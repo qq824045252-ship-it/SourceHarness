@@ -241,7 +241,7 @@ fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> 
     json!({"type":"function","function":{"name":name,"description":description,"parameters":{"type":"object","properties":properties,"required":required,"additionalProperties":false}}})
 }
 fn tools(arm: Arm) -> Value {
-    let integer = json!({"type":"integer"});
+    let integer = json!({"type":"integer","minimum":0});
     let string = json!({"type":"string"});
     let open = tool(
         "open_report",
@@ -268,8 +268,8 @@ fn tools(arm: Arm) -> Value {
         ]);
     }
     json!([open,status,
-        tool("read_result","Read raw lines of an existing report (1-based). If next_offset is present continue the same range with it; otherwise the requested range is complete.",json!({"ref":string,"start_line":integer,"line_count":integer,"offset":integer}),&["ref","start_line","line_count"]),
-        tool("search_result","Case-sensitive literal search in an existing report, one hit per line. Continue using next_line if present.",json!({"ref":string,"query":string,"start_line":integer,"limit":integer}),&["ref","query"])])
+        tool("read_result","Read raw lines of an existing report (1-based). If next_offset is present continue the same range with it; otherwise the requested range is complete.",json!({"ref":string,"start_line":{"type":"integer","minimum":1},"line_count":{"type":"integer","minimum":1,"maximum":4096},"offset":integer}),&["ref","start_line","line_count"]),
+        tool("search_result","Case-sensitive literal search in an existing report, one hit per line. Limit 1 to 20. Continue with the same query and next_line if present.",json!({"ref":string,"query":{"type":"string","minLength":1,"maxLength":128},"start_line":{"type":"integer","minimum":1},"limit":{"type":"integer","minimum":1,"maximum":20}}),&["ref","query"])])
 }
 fn assistant_calls(r: &model::Reply) -> Value {
     json!({"role":"assistant","content":if r.text.is_empty(){Value::Null}else{json!(r.text)},
@@ -420,6 +420,7 @@ async fn task(f: &Fixture, a: Arm, natural: bool) -> Value {
     let mut searched = false;
     let mut query_complete = false;
     let mut expected_search_line = Some(1);
+    let mut coverage_query: Option<String> = None;
     let mut checked = false;
     let mut response = String::new();
     let mut indexing_us = 0u128;
@@ -612,7 +613,18 @@ async fn task(f: &Fixture, a: Arm, natural: bool) -> Value {
                     );
                     if r["status"] == "ok" {
                         let exact = f.query.as_deref() == Some(q);
-                        if f.kind == 5 && exact && expected_search_line == Some(start) {
+                        let covers_all_marked = f.kind == 5
+                            && f.raw
+                                .lines()
+                                .filter(|line| line.ends_with(": REVIEW"))
+                                .all(|line| line.contains(q));
+                        if covers_all_marked
+                            && expected_search_line == Some(start)
+                            && coverage_query
+                                .as_deref()
+                                .is_none_or(|selected| selected == q)
+                        {
+                            coverage_query = Some(q.to_owned());
                             searched = true;
                             query_complete = r["data"]["has_more"] == false;
                             expected_search_line =
