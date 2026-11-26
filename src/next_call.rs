@@ -1,6 +1,7 @@
 use crate::{model, roundtrip::reply_messages, tools, wire};
 use serde_json::{json, Value};
 use std::{
+    collections::BTreeMap,
     fs::{self, OpenOptions},
     io::Write,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -99,9 +100,39 @@ fn request(c: &Case) -> Value {
     req
 }
 
+fn unique_arguments(input: &str) -> Result<Value, serde_json::Error> {
+    use serde::de::{Deserializer, Error, MapAccess, Visitor};
+    use serde::Deserialize;
+
+    struct Unique(BTreeMap<String, Value>);
+    impl<'de> Deserialize<'de> for Unique {
+        fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+            struct Object;
+            impl<'de> Visitor<'de> for Object {
+                type Value = Unique;
+                fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    f.write_str("a JSON object with unique argument names")
+                }
+                fn visit_map<M: MapAccess<'de>>(self, mut map: M) -> Result<Unique, M::Error> {
+                    let mut entries = BTreeMap::new();
+                    while let Some((name, value)) = map.next_entry::<String, Value>()? {
+                        if entries.insert(name, value).is_some() {
+                            return Err(M::Error::custom("duplicate argument name"));
+                        }
+                    }
+                    Ok(Unique(entries))
+                }
+            }
+            d.deserialize_map(Object)
+        }
+    }
+    serde_json::from_str::<Unique>(input)
+        .map(|object| Value::Object(object.0.into_iter().collect()))
+}
+
 fn one_call(r: &model::Reply, name: &str, args: &Value) -> bool {
     matches!(r.calls.as_slice(), [call] if call.name==name && !call.id.trim().is_empty() &&
-      serde_json::from_str::<Value>(&call.arguments).as_ref().is_ok_and(|got| got==args))
+      unique_arguments(&call.arguments).as_ref().is_ok_and(|got| got==args))
 }
 
 fn timestamp() -> u128 {
@@ -171,9 +202,33 @@ fn final_after_followup(k: usize, text: &str) -> bool {
     }
 }
 
+// The catalog is a test fixture, but these two lookups really execute against it.
+const CATALOG: [&str; 3] = ["A-319", "B-207", "B-319"];
+
+fn search(call: &model::ToolCall) -> Option<Value> {
+    let args = unique_arguments(&call.arguments).ok()?;
+    if args.as_object()?.len() != 1 {
+        return None;
+    }
+    match call.name.as_str() {
+        "find_exact" => {
+            let query = args["query"].as_str()?;
+            Some(wire::ok(json!({"found":CATALOG.contains(&query)})))
+        }
+        "find_prefix" => {
+            let prefix = args["prefix"].as_str()?;
+            let matches: Vec<_> = CATALOG
+                .iter()
+                .filter(|sku| sku.starts_with(prefix))
+                .collect();
+            Some(wire::ok(json!({"matches":matches})))
+        }
+        _ => None,
+    }
+}
+
 fn receipt(k: usize) -> Value {
     match k {
-        1 => wire::ok(json!({"matches":["A-319"]})),
         2 => wire::ok(json!({"label":"Blue Spruce"})),
         4 => wire::ok(json!({"available":true})),
         7 => wire::ok(json!({"state":"completed"})),
@@ -221,6 +276,17 @@ async fn evaluate(k: usize) -> Outcome {
             Some(sum) => wire::ok(json!({"sum":sum})),
             None => return e,
         }
+    } else if k == 1 {
+        let Some(found) = search(call) else {
+            e.observed = json!({"error":"fixture_search_rejected"});
+            return e;
+        };
+        if found != c.result {
+            e.observed =
+                json!({"error":"unexpected_fixture_result","actual":found,"expected":c.result});
+            return e;
+        }
+        found
     } else {
         c.result
     };
@@ -251,10 +317,25 @@ async fn evaluate(k: usize) -> Outcome {
         }
         // Only deterministic in-memory test fixtures execute. Unknown real effects
         // would require a status query; never repeat the initial unknown operation.
+        let next_result = if k == 1 {
+            let Some(result) = search(&next.calls[0]) else {
+                e.observed["local_error"] = json!("fixture_search_rejected");
+                return e;
+            };
+            if result != wire::ok(json!({"matches":["A-319"]})) {
+                e.observed["local_error"] = json!("unexpected_fixture_result");
+                e.observed["followup_result"] = result;
+                return e;
+            }
+            result
+        } else {
+            receipt(k)
+        };
+        e.observed["followup_result"] = next_result.clone();
         let mut last = match reply_messages(
             &follow,
             assistant,
-            &[(next.calls[0].id.clone(), receipt(k))],
+            &[(next.calls[0].id.clone(), next_result)],
         ) {
             Ok(x) => x,
             Err(err) => {
@@ -332,6 +413,59 @@ pub async fn run(n: usize) -> Result<(), AnyError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn reject_duplicate_arguments_even_if_last_value_matches_the_expected_call() {
+        let duplicate = r#"{"prefix":"B-","prefix":"A-"}"#;
+        assert_eq!(
+            serde_json::from_str::<Value>(duplicate).unwrap(),
+            json!({"prefix":"A-"})
+        );
+        assert!(unique_arguments(duplicate).is_err());
+        assert!(unique_arguments(r#"{"prefix":"B-","pre\u0066ix":"A-"}"#).is_err());
+        assert!(unique_arguments("[]").is_err());
+        assert!(unique_arguments("{} trailing").is_err());
+        assert_eq!(unique_arguments(" {} ").unwrap(), json!({}));
+    }
+
+    #[test]
+    fn fixture_search_validates_and_executes_actual_arguments() {
+        let search_with = |name: &str, arguments: &str| {
+            search(&model::ToolCall {
+                id: "fixture".into(),
+                name: name.into(),
+                arguments: arguments.into(),
+            })
+        };
+        assert_eq!(
+            search_with("find_exact", r#"{"query":"A-314"}"#),
+            Some(wire::ok(json!({"found":false})))
+        );
+        assert_eq!(
+            search_with("find_exact", r#"{"query":"A-319"}"#),
+            Some(wire::ok(json!({"found":true})))
+        );
+        assert_eq!(
+            search_with("find_prefix", r#"{"prefix":"A-"}"#),
+            Some(wire::ok(json!({"matches":["A-319"]})))
+        );
+        assert_eq!(
+            search_with("find_prefix", r#"{"prefix":"B-"}"#),
+            Some(wire::ok(json!({"matches":["B-207","B-319"]})))
+        );
+        assert_eq!(
+            search_with("find_prefix", r#"{"prefix":"Z-"}"#),
+            Some(wire::ok(json!({"matches":[]})))
+        );
+        for bad in [
+            "{}",
+            r#"{"prefix":42}"#,
+            r#"{"prefix":"A-","extra":1}"#,
+            r#"{"prefix":"B-","prefix":"A-"}"#,
+        ] {
+            assert_eq!(search_with("find_prefix", bad), None);
+        }
+    }
+
     #[test]
     fn transient_differs_by_permission_and_unknown_only_checks_status() {
         let a = scenario(4, "id");
