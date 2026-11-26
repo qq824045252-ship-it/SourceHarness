@@ -193,7 +193,7 @@ async fn one(attempt: usize, kind: usize, split_error: bool) -> Result<(bool, Va
 }
 
 fn slim_missing_record(reference: &str) -> Value {
-    json!({"ok":false,"code":"RECORD_NOT_FOUND","retryable":false,"ref":reference})
+    json!({"ok":false,"code":"RECORD_NOT_FOUND","reason":"fixture_absent","retryable":false,"ref":reference})
 }
 
 fn missing_record(secret: &str) -> Value {
@@ -323,9 +323,21 @@ mod tests {
     #[test]
     fn slim_contract_keeps_only_one_error_code_and_diagnostic_ref() {
         let r = slim_missing_record("abcd");
+        let follow = reply_messages(
+            &model::request(false, "fixture"),
+            json!({"role":"assistant","tool_calls":[{"id":"lookup-call"}]}),
+            &[("lookup-call".into(), r.clone())],
+        )
+        .unwrap();
+        let message = &follow["messages"][2];
+        assert_eq!(message["tool_call_id"], "lookup-call");
+        assert_eq!(
+            serde_json::from_str::<Value>(message["content"].as_str().unwrap()).unwrap(),
+            r
+        );
         assert_eq!(
             r,
-            json!({"ok":false,"code":"RECORD_NOT_FOUND","retryable":false,"ref":"abcd"})
+            json!({"ok":false,"code":"RECORD_NOT_FOUND","reason":"fixture_absent","retryable":false,"ref":"abcd"})
         );
         assert!(answer_matches(
             2,
