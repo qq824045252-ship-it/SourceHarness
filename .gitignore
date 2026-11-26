@@ -1,5 +1,4 @@
-/target/
-/.env
-/.env.*
-/evidence/
-*.jsonl
+/target
+*.log
+.env
+.DS_Store

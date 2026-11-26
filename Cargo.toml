@@ -1,12 +1,11 @@
 [package]
-name = "sourceharness"
+name = "source_harness"
 version = "0.1.0"
 edition = "2021"
-publish = false
+description = "Responses API native SourceHarness tool kernel and stateless transport loop"
 
 [dependencies]
-reqwest = { version = "0.12", default-features = false, features = ["json"] }
+regex = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
-getrandom = "0.3"
+ureq = { version = "2", default-features = false, features = ["native-tls"] }
