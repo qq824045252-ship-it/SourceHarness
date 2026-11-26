@@ -26,7 +26,7 @@ fn nonce() -> Result<String, AnyError> {
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
-fn reply_messages(
+pub(crate) fn reply_messages(
     original: &Value,
     assistant: Value,
     results: &[(String, Value)],

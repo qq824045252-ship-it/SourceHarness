@@ -1,4 +1,6 @@
+mod capability;
 mod model;
+mod result_pages;
 mod roundtrip;
 mod tools;
 use serde_json::json;
@@ -19,7 +21,7 @@ async fn main() -> ExitCode {
         .as_slice()
     {
         [] | ["--help" | "-h"] => {
-            println!("SourceHarness: Rust tool-calling test harness\n\nUsage: sourceharness [--help | --version | smoke-model | smoke-declare | smoke-execute | roundtrip <3..100> | compare-error-contract <3..100>]");
+            println!("SourceHarness: Rust tool-calling test harness\n\nUsage: sourceharness [--help | --version | smoke-model | smoke-declare | smoke-execute | roundtrip <3..100> | compare-error-contract <3..100> | check-decisions <1..100> | smoke-result-page]");
             ExitCode::SUCCESS
         }
         ["--version" | "-V"] => {
@@ -51,6 +53,23 @@ async fn main() -> ExitCode {
                 eprintln!("Use a sample count from 3 to 100.");
                 ExitCode::from(2)
             }
+        },
+        ["smoke-result-page"] => match capability::smoke_page().await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("{e}");
+                ExitCode::FAILURE
+            }
+        },
+        ["check-decisions", n] => match n.parse::<usize>() {
+            Ok(n @ 1..=100) => match capability::run(n).await {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("{e}");
+                    ExitCode::FAILURE
+                }
+            },
+            _ => ExitCode::from(2),
         },
         ["smoke-model"] => match smoke_model().await {
             Ok(()) => ExitCode::SUCCESS,
