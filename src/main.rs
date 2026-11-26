@@ -19,7 +19,7 @@ async fn main() -> ExitCode {
         .as_slice()
     {
         [] | ["--help" | "-h"] => {
-            println!("SourceHarness: Rust tool-calling test harness\n\nUsage: sourceharness [--help | --version | smoke-model | smoke-declare | smoke-execute | roundtrip <3..100>]");
+            println!("SourceHarness: Rust tool-calling test harness\n\nUsage: sourceharness [--help | --version | smoke-model | smoke-declare | smoke-execute | roundtrip <3..100> | compare-error-contract <3..100>]");
             ExitCode::SUCCESS
         }
         ["--version" | "-V"] => {
@@ -35,8 +35,12 @@ async fn main() -> ExitCode {
                 }
             }
         }
-        ["roundtrip", n] => match n.parse::<usize>() {
-            Ok(n @ 3..=100) => match roundtrip::run(n).await {
+        [mode @ ("roundtrip" | "compare-error-contract"), n] => match n.parse::<usize>() {
+            Ok(n @ 3..=100) => match if *mode == "compare-error-contract" {
+                roundtrip::compare_error_contract(n).await
+            } else {
+                roundtrip::run(n).await
+            } {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
                     eprintln!("{e}");

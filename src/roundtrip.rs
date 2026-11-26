@@ -104,7 +104,7 @@ fn answer_matches(kind: usize, actual: &str, expected: &str) -> bool {
     }
 }
 
-async fn one(attempt: usize, kind: usize) -> Result<(bool, Value), AnyError> {
+async fn one(attempt: usize, kind: usize, split_error: bool) -> Result<(bool, Value), AnyError> {
     let name = NAMES[kind];
     let desc = [
         "Generate a random nonce that cannot be known without actually using this tool.",
@@ -122,7 +122,13 @@ async fn one(attempt: usize, kind: usize) -> Result<(bool, Value), AnyError> {
          "Use the lookup tool and report FAILED:<error_code> if it returns a failure.",
          "Attempt the fixture lookup. On error, give only FAILED: followed by the exact error_code."]
     ];
-    let mut req = model::request(false, variants[kind][(attempt / 3) % 3]);
+    let variant = (attempt / 3) % 3;
+    let prompt = variants[kind][variant];
+    let split_prompt = prompt.replace("<error_code>", "<code>:<ref>").replace(
+        "the exact error_code.",
+        "the exact code, a colon, and the exact ref.",
+    );
+    let mut req = model::request(false, if split_error { &split_prompt } else { prompt });
     req["tools"] = json!([schema(name, desc)]);
     req["tool_choice"] = json!("auto");
     let first_started = epoch_ms();
@@ -153,6 +159,10 @@ async fn one(attempt: usize, kind: usize) -> Result<(bool, Value), AnyError> {
             json!({"accepted":accepted,"receipt_code":secret}),
             format!("{}:{secret}", if accepted { "YES" } else { "NO" }),
         ),
+        _ if split_error => (
+            slim_missing_record(&secret),
+            format!("FAILED:RECORD_NOT_FOUND:{secret}"),
+        ),
         _ => (
             missing_record(&secret),
             format!("FAILED:record_not_found_{secret}"),
@@ -182,6 +192,10 @@ async fn one(attempt: usize, kind: usize) -> Result<(bool, Value), AnyError> {
     ))
 }
 
+fn slim_missing_record(reference: &str) -> Value {
+    json!({"ok":false,"code":"RECORD_NOT_FOUND","retryable":false,"ref":reference})
+}
+
 fn missing_record(secret: &str) -> Value {
     // Keep the opaque suffix to prove the model received the actual response.
     // The deterministic reason is not derived from that suffix.
@@ -203,9 +217,22 @@ fn epoch_ms() -> u128 {
 }
 
 pub async fn run(n: usize) -> Result<(), AnyError> {
+    run_cases(n, false).await
+}
+
+pub async fn compare_error_contract(n: usize) -> Result<(), AnyError> {
+    run_cases(n, true).await
+}
+
+async fn run_cases(n: usize, compare: bool) -> Result<(), AnyError> {
     let epoch = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
     fs::create_dir_all("evidence")?;
-    let path = format!("evidence/roundtrip-{epoch}-{}.jsonl", std::process::id());
+    let prefix = if compare {
+        "error-contract-ab"
+    } else {
+        "roundtrip"
+    };
+    let path = format!("evidence/{prefix}-{epoch}-{}.jsonl", std::process::id());
     let mut opts = OpenOptions::new();
     opts.write(true).create_new(true);
     #[cfg(unix)]
@@ -217,43 +244,62 @@ pub async fn run(n: usize) -> Result<(), AnyError> {
     let mut attempted = [0; 3];
     let mut passed = [0; 3];
     let mut excluded = [0; 3];
-    // Correctness runs are paced, not load tests. Never automatically rerun a case.
-    for i in 0..n {
-        let kind = i % 3;
+    let mut exact_first_line = [0; 3];
+    // Alternate which contract goes first in each pair. The pair shares a prompt
+    // variant, but each arm gets a separately generated runtime reference.
+    let total = if compare { n * 2 } else { n };
+    for i in 0..total {
+        let (kind, arm, case, split) = if compare {
+            let pair = i / 2;
+            let arm = (i % 2 + pair % 2) % 2;
+            (2, arm, pair * 3 + 2, arm == 1)
+        } else {
+            (i % 3, i % 3, i, false)
+        };
         let start = Instant::now();
-        let (pass, detail) = one(i, kind)
+        let (pass, detail) = one(case, kind, split)
             .await
             .unwrap_or_else(|_| (false, json!({"error_class":"local_error"})));
         let ms = start.elapsed().as_millis();
         let external = detail["external"] == true;
-        attempted[kind] += 1;
-        passed[kind] += usize::from(pass);
-        excluded[kind] += usize::from(external);
+        let first_line_matches = detail["actual"]
+            .as_str()
+            .zip(detail["expected"].as_str())
+            .is_some_and(|(a, e)| answer_matches(kind, a.trim().lines().next().unwrap_or(""), e));
+        attempted[arm] += 1;
+        passed[arm] += usize::from(pass);
+        exact_first_line[arm] += usize::from(first_line_matches);
+        excluded[arm] += usize::from(external);
+        let contract = if split { "single_code_ref" } else { "legacy" };
         writeln!(
             out,
             "{}",
-            json!({"test_id":format!("R0{}",kind+1),
+            json!({"test_id":format!("R0{}",kind+1),"contract":contract,
+            "paired_case":compare.then_some(i/2),"exact_first_line":first_line_matches,
             "attempt_id":format!("{epoch}-{i}"),"status":if pass {"PASS"} else if external {"EXCLUDED_UPSTREAM"} else {"FAIL"},
             "detail":detail,"elapsed_ms":ms})
         )?;
         out.flush()?;
-        if i + 1 < n {
+        if i + 1 < total {
             tokio::time::sleep(std::time::Duration::from_millis(850)).await;
         }
     }
-    let minimum = if n >= 100 { 30 } else { 1 };
-    for i in 0..3 {
-        println!(
-            "R0{}: {}/{} valid ({} attempted, {} confirmed upstream exclusions)",
-            i + 1,
-            passed[i],
-            attempted[i] - excluded[i],
-            attempted[i],
-            excluded[i]
-        );
+    let minimum = if n >= 100 || compare && n >= 33 {
+        30
+    } else {
+        1
+    };
+    let labels: &[&str] = if compare {
+        &["R03 original", "R03 single code + ref"]
+    } else {
+        &["R01", "R02", "R03"]
+    };
+    for (i, label) in labels.iter().enumerate() {
+        println!("{label}: {}/{} strict ({} attempted, {} confirmed upstream exclusions; {} exact first line)",
+            passed[i], attempted[i] - excluded[i], attempted[i], excluded[i], exact_first_line[i]);
     }
     println!("Evidence: {path}");
-    if (0..3).all(|i| {
+    if (if compare { 1..2 } else { 0..3 }).all(|i| {
         attempted[i] - excluded[i] >= minimum
             && 100 * passed[i] >= 95 * (attempted[i] - excluded[i])
     }) {
@@ -273,6 +319,29 @@ mod tests {
         assert!(!answer_matches(2, "FAILED: xyz", "FAILED:abc"));
         assert!(!answer_matches(2, "FAILED: abc\nextra", "FAILED:abc"));
         assert!(!answer_matches(0, "ab c", "abc"));
+    }
+    #[test]
+    fn slim_contract_keeps_only_one_error_code_and_diagnostic_ref() {
+        let r = slim_missing_record("abcd");
+        assert_eq!(
+            r,
+            json!({"ok":false,"code":"RECORD_NOT_FOUND","retryable":false,"ref":"abcd"})
+        );
+        assert!(answer_matches(
+            2,
+            "FAILED:RECORD_NOT_FOUND:abcd",
+            "FAILED:RECORD_NOT_FOUND:abcd"
+        ));
+        assert!(!answer_matches(
+            2,
+            "FAILED:RECORD_NOT_FOUND:abcd\nextra",
+            "FAILED:RECORD_NOT_FOUND:abcd"
+        ));
+        assert!(!answer_matches(
+            2,
+            "FAILED:RECORD_NOT_FOUND:wrong",
+            "FAILED:RECORD_NOT_FOUND:abcd"
+        ));
     }
     #[test]
     fn missing_record_cannot_be_mistaken_for_missing_argument() {
