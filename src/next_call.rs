@@ -199,7 +199,11 @@ fn final_after_followup(k: usize, text: &str) -> bool {
     match k {
         1 => lower.contains("a-319"),
         2 => lower.contains("blue spruce"),
-        4 => lower.contains("available") && !lower.contains("unavailable"),
+        4 => {
+            // An earlier failure code may be quoted in an otherwise correct report.
+            let current = lower.replace("service_unavailable", "");
+            current.contains("available") && !current.contains("unavailable")
+        }
         7 => {
             lower.contains("finished") || lower.contains("completed") || lower.contains("succeeded")
         }
@@ -506,6 +510,19 @@ mod tests {
         ] {
             assert_eq!(search_with("find_prefix", bad), None);
         }
+    }
+
+    #[test]
+    fn retry_delivery_does_not_count_the_historical_machine_code_as_current_state() {
+        assert!(final_after_followup(
+            4,
+            "First: SERVICE_UNAVAILABLE. Now available."
+        ));
+        assert!(!final_after_followup(
+            4,
+            "Still unavailable. SERVICE_UNAVAILABLE."
+        ));
+        assert!(!final_after_followup(4, "SERVICE_UNAVAILABLE"));
     }
 
     #[tokio::test]
