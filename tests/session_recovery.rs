@@ -51,6 +51,169 @@ fn invoke(root: &Path, gateway: &str, interrupt: bool, args: &[&str]) -> Output 
 }
 
 #[test]
+fn continues_with_a_changed_tool_contract_and_new_user_correction() {
+    let root = tempfile::tempdir().unwrap();
+    let file = root.path().join("config.txt");
+    fs::write(&file, b"primary\r\nalpha: 30\r\narchive\r\nalpha: 30\r\n").unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let gateway = format!("http://{}/v1", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        request(&mut stream);
+        respond(stream, call("read_1", "read", json!({"path":"config.txt"})));
+
+        let (mut stream, _) = listener.accept().unwrap();
+        let before = request(&mut stream);
+        let output: Value =
+            serde_json::from_str(before["input"][2]["output"].as_str().unwrap()).unwrap();
+        respond(
+            stream,
+            call(
+                "edit_1",
+                "edit",
+                json!({
+                    "path":"config.txt","expected_revision":output["revision"],
+                    "changes":[{"old_text":"primary\r\nalpha: 30","new_text":"primary\r\nalpha: 60"}]
+                }),
+            ),
+        );
+
+        let (mut stream, _) = listener.accept().unwrap();
+        let continued = request(&mut stream);
+        let archived = &continued["input"][4];
+        assert_eq!(archived["call_id"], "edit_1");
+        let observed: Value = serde_json::from_str(archived["output"].as_str().unwrap()).unwrap();
+        assert_eq!(observed["outcome"], "observed_target");
+        assert_eq!(observed["current_revision"], observed["planned_revision"]);
+        assert!(continued["input"][5]["content"]
+            .as_str()
+            .unwrap()
+            .contains("Use 40 instead."));
+        let schema = continued["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == "edit")
+            .unwrap();
+        assert_eq!(
+            schema["parameters"]["properties"]["changes"]["items"]["properties"]["start_line"]
+                ["type"],
+            "integer"
+        );
+        respond(stream, call("read_2", "read", json!({"path":"config.txt"})));
+
+        let (mut stream, _) = listener.accept().unwrap();
+        let refreshed = request(&mut stream);
+        let output: Value =
+            serde_json::from_str(refreshed["input"][7]["output"].as_str().unwrap()).unwrap();
+        assert!(output["content"]
+            .as_str()
+            .unwrap()
+            .contains("primary\r\nalpha: 60"));
+        respond(
+            stream,
+            call(
+                "edit_2",
+                "edit",
+                json!({
+                    "path":"config.txt","expected_revision":output["revision"],
+                    "changes":[{"start_line":2,"end_line":2,"new_text":"alpha: 40\r\n"}]
+                }),
+            ),
+        );
+
+        let (mut stream, _) = listener.accept().unwrap();
+        let corrected = request(&mut stream);
+        let output: Value =
+            serde_json::from_str(corrected["input"][9]["output"].as_str().unwrap()).unwrap();
+        assert_eq!(output["outcome"], "committed");
+        respond(
+            stream,
+            json!({"type":"message","role":"assistant",
+            "content":[{"type":"output_text","text":"Primary alpha is 40."}]}),
+        );
+    });
+
+    let interrupted = invoke(
+        root.path(),
+        &gateway,
+        true,
+        &["agent", "--prompt", "Use 60 for primary alpha."],
+    );
+    assert_eq!(interrupted.status.code(), Some(86));
+    let rejected = invoke(
+        root.path(),
+        &gateway,
+        false,
+        &["agent", "--resume", "--edit-mode", "range"],
+    );
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("Use --continue"));
+    assert_eq!(
+        fs::read(&file).unwrap(),
+        b"primary\r\nalpha: 60\r\narchive\r\nalpha: 30\r\n"
+    );
+
+    let args = [
+        "agent",
+        "--continue",
+        "--edit-mode",
+        "range",
+        "--prompt",
+        "Use 40 instead.",
+    ];
+    let continued = invoke(root.path(), &gateway, false, &args);
+    assert!(
+        continued.status.success(),
+        "{}",
+        String::from_utf8_lossy(&continued.stderr)
+    );
+    server.join().unwrap();
+    assert_eq!(
+        fs::read(file).unwrap(),
+        b"primary\r\nalpha: 40\r\narchive\r\nalpha: 30\r\n"
+    );
+
+    let events = fs::read_to_string(
+        root.path()
+            .join(".sourceharness/sessions/acceptance/events.jsonl"),
+    )
+    .unwrap();
+    let events = events
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    let users = events
+        .iter()
+        .filter(|e| e["kind"] == "user")
+        .collect::<Vec<_>>();
+    assert_eq!(users.len(), 2);
+    assert_eq!(users[1]["data"]["continuation"]["run"], users[0]["run"]);
+    assert_eq!(
+        users[1]["data"]["continuation"]["correction"],
+        "Use 40 instead."
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e["kind"] == "edit_receipt")
+            .count(),
+        1
+    );
+    let final_text = invoke(
+        root.path(),
+        &gateway,
+        false,
+        &["agent", "--resume", "--edit-mode", "range"],
+    );
+    assert!(final_text.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&final_text.stdout).trim(),
+        "Primary alpha is 40."
+    );
+}
+
+#[test]
 fn resumes_an_applied_edit_and_retains_exact_old_content() {
     let root = tempfile::tempdir().unwrap();
     fs::write(

@@ -16,7 +16,7 @@ use crate::transport::injection::{
 };
 use crate::transport::sse::UsageMetrics;
 use crate::transport::{
-    GatewayConfig, KernelToolExecutor, NoopRunObserver, ResponsesClient, ToolCallTrace,
+    GatewayConfig, KernelToolExecutor, ResponsesClient, RunObserver, ToolCallTrace,
     ToolExecutionOutput, ToolExecutor, TransportError,
 };
 
@@ -172,7 +172,10 @@ pub struct BenchCaseResult {
     pub sorted_aggregations: usize,
     pub max_tool_response_bytes: usize,
     pub reasoning_items: usize,
+    /// Known usage across every attempt, with unreported requests counted separately.
     pub usage: UsageMetrics,
+    pub unknown_usage_requests: usize,
+    /// Total attempt elapsed time, excluding inter-attempt backoff.
     pub latency_ms: u128,
     pub tool_traces: Vec<ToolCallTrace>,
     pub attempts: Vec<BenchAttempt>,
@@ -183,7 +186,37 @@ pub struct BenchAttempt {
     pub passed: bool,
     pub error: Option<String>,
     pub total_tokens: Option<u64>,
+    pub known_usage: UsageMetrics,
+    pub model_requests: usize,
+    pub unknown_usage_requests: usize,
     pub elapsed_ms: u128,
+}
+
+#[derive(Default)]
+struct AttemptObserver {
+    model_requests: usize,
+    reported_requests: usize,
+    known_usage: UsageMetrics,
+}
+
+impl RunObserver for AttemptObserver {
+    fn on_turn_start(&mut self, _turn: usize) {
+        self.model_requests += 1;
+    }
+
+    fn on_model_response_usage(&mut self, usage: Option<&UsageMetrics>) {
+        if let Some(usage) = usage {
+            self.reported_requests += 1;
+            add_usage(&mut self.known_usage, usage);
+        }
+    }
+}
+
+fn add_usage(total: &mut UsageMetrics, usage: &UsageMetrics) {
+    total.input_tokens += usage.input_tokens;
+    total.output_tokens += usage.output_tokens;
+    total.reasoning_tokens += usage.reasoning_tokens;
+    total.total_tokens += usage.total_tokens;
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -196,7 +229,10 @@ pub struct BenchAggregateStats {
     pub hint_triggers: usize,
     pub sharded_reads: usize,
     pub sorted_aggregations: usize,
+    pub total_attempts: usize,
     pub total_tokens: u64,
+    pub unknown_usage_requests: usize,
+    pub total_elapsed_ms: u128,
     pub avg_latency_ms: u128,
 }
 
@@ -217,8 +253,11 @@ pub struct BenchReport {
     pub total_hint_triggers: usize,
     pub total_sharded_reads: usize,
     pub total_sorted_aggregations: usize,
+    pub total_attempts: usize,
     pub total_tokens: u64,
     pub total_reasoning_tokens: u64,
+    pub unknown_usage_requests: usize,
+    pub total_elapsed_ms: u128,
     pub by_tier: BTreeMap<String, BenchAggregateStats>,
     pub by_category: BTreeMap<String, BenchAggregateStats>,
     pub results: Vec<BenchCaseResult>,
@@ -329,7 +368,7 @@ pub fn run_bench_suite(
                         || res.over_called
                     {
                         println!(
-                            "[{done:>3}/{total_cases}] {} ({}/{}) pass={} rounds={}/{} tools={} err={} tokens={} {}ms",
+                            "[{done:>3}/{total_cases}] {} ({}/{}) pass={} rounds={}/{} tools={} err={} known_tokens={} unknown_usage_requests={} {}ms",
                             res.id,
                             res.category.label(),
                             res.size_tier.label(),
@@ -339,6 +378,7 @@ pub fn run_bench_suite(
                             res.total_tool_calls,
                             res.error_tool_calls,
                             res.usage.total_tokens,
+                            res.unknown_usage_requests,
                             res.latency_ms
                         );
                     }
@@ -386,23 +426,27 @@ fn execute_case_with_retry(
     let mut attempts = Vec::with_capacity(delays.len() + 1);
     for attempt in 0..=delays.len() {
         let started = Instant::now();
-        match execute_single_case(client, case, strategy) {
-            Ok(mut res) => {
-                attempts.append(&mut res.attempts);
-                res.attempts = attempts;
-                return res;
-            }
+        let mut observer = AttemptObserver::default();
+        let outcome = execute_single_case(client, case, strategy, &mut observer);
+        let unknown_usage_requests = observer.model_requests - observer.reported_requests;
+        attempts.push(BenchAttempt {
+            passed: outcome.as_ref().is_ok_and(|result| result.passed),
+            error: outcome.as_ref().err().map(ToString::to_string),
+            total_tokens: (unknown_usage_requests == 0).then_some(observer.known_usage.total_tokens),
+            known_usage: observer.known_usage,
+            model_requests: observer.model_requests,
+            unknown_usage_requests,
+            elapsed_ms: started.elapsed().as_millis(),
+        });
+        let mut result = match outcome {
+            Ok(result) => result,
             Err(err) => {
-                attempts.push(BenchAttempt {
-                    passed: false, error: Some(err.to_string()), total_tokens: None,
-                    elapsed_ms: started.elapsed().as_millis(),
-                });
                 let retryable = matches!(err, TransportError::Http(_) | TransportError::Io(_));
                 if retryable && attempt < delays.len() {
                     std::thread::sleep(Duration::from_millis(delays[attempt]));
                     continue;
                 }
-                return BenchCaseResult {
+                BenchCaseResult {
                     id: case.id.clone(),
                     category: case.category,
                     size_tier: case.size_tier,
@@ -428,12 +472,20 @@ fn execute_case_with_retry(
                     max_tool_response_bytes: 0,
                     reasoning_items: 0,
                     usage: UsageMetrics::default(),
+                    unknown_usage_requests: 0,
                     latency_ms: 0,
                     tool_traces: Vec::new(),
-                    attempts,
-                };
+                    attempts: Vec::new(),
+                }
             }
+        };
+        for attempt in &attempts {
+            add_usage(&mut result.usage, &attempt.known_usage);
+            result.unknown_usage_requests += attempt.unknown_usage_requests;
+            result.latency_ms += attempt.elapsed_ms;
         }
+        result.attempts = attempts;
+        return result;
     }
     unreachable!()
 }
@@ -442,6 +494,7 @@ fn execute_single_case(
     client: &ResponsesClient,
     case: &BenchCase,
     strategy: &str,
+    observer: &mut AttemptObserver,
 ) -> Result<BenchCaseResult, TransportError> {
     let injector = select_injector(strategy).expect("valid bench strategy");
     let store = FoldStore::new();
@@ -466,13 +519,12 @@ fn execute_single_case(
     };
 
     let executor = TracingExecutor::new(&store, extra_tools);
-    let mut observer = NoopRunObserver;
 
     let run = client.run_with_executor(
         input,
         Some("Answer accurately and concisely using the provided content or result tools."),
         &executor,
-        &mut observer,
+        observer,
     )?;
 
     let mut failure_reasons = Vec::new();
@@ -538,13 +590,11 @@ fn execute_single_case(
         sorted_aggregations: executor.sorted_aggregations.load(Ordering::Relaxed),
         max_tool_response_bytes,
         reasoning_items,
-        usage: run.total_usage,
-        latency_ms: run.total_latency_ms,
+        usage: UsageMetrics::default(),
+        unknown_usage_requests: 0,
+        latency_ms: 0,
         tool_traces: run.tool_traces,
-        attempts: vec![BenchAttempt {
-            passed, error: None, total_tokens: run.usage_complete.then_some(run.total_usage.total_tokens),
-            elapsed_ms: run.total_latency_ms,
-        }],
+        attempts: Vec::new(),
     })
 }
 
@@ -557,7 +607,9 @@ fn aggregate_slice<'a>(items: impl Iterator<Item = &'a BenchCaseResult>) -> Benc
     let mut hint_triggers = 0usize;
     let mut sharded_reads = 0usize;
     let mut sorted_aggregations = 0usize;
+    let mut total_attempts = 0usize;
     let mut total_tokens = 0u64;
+    let mut unknown_usage_requests = 0usize;
     let mut total_latency = 0u128;
 
     for r in items {
@@ -577,7 +629,9 @@ fn aggregate_slice<'a>(items: impl Iterator<Item = &'a BenchCaseResult>) -> Benc
         }
         sharded_reads += r.sharded_reads;
         sorted_aggregations += r.sorted_aggregations;
+        total_attempts += r.attempts.len();
         total_tokens += r.usage.total_tokens;
+        unknown_usage_requests += r.unknown_usage_requests;
         total_latency += r.latency_ms;
     }
 
@@ -590,7 +644,10 @@ fn aggregate_slice<'a>(items: impl Iterator<Item = &'a BenchCaseResult>) -> Benc
         hint_triggers,
         sharded_reads,
         sorted_aggregations,
+        total_attempts,
         total_tokens,
+        unknown_usage_requests,
+        total_elapsed_ms: total_latency,
         avg_latency_ms: if total == 0 {
             0
         } else {
@@ -675,8 +732,11 @@ fn build_report(
         total_hint_triggers: results.iter().filter(|r| r.hint_triggered).count(),
         total_sharded_reads: results.iter().map(|r| r.sharded_reads).sum(),
         total_sorted_aggregations: results.iter().map(|r| r.sorted_aggregations).sum(),
+        total_attempts: results.iter().map(|r| r.attempts.len()).sum(),
         total_tokens: results.iter().map(|r| r.usage.total_tokens).sum(),
         total_reasoning_tokens: results.iter().map(|r| r.usage.reasoning_tokens).sum(),
+        unknown_usage_requests: results.iter().map(|r| r.unknown_usage_requests).sum(),
+        total_elapsed_ms: results.iter().map(|r| r.latency_ms).sum(),
         by_tier,
         by_category,
         results,
@@ -696,14 +756,16 @@ fn print_bench_summary(report: &BenchReport) {
         report.folded_one_round_rate
     );
     println!(
-        "tool_errors={} {:?} | hint_triggers={} | sharded_reads={} | sorted_aggregations={} | tokens={} (reason={})",
+        "tool_errors={} {:?} | hint_triggers={} | sharded_reads={} | sorted_aggregations={} | known_tokens={} (reason={}) | unknown_usage_requests={} | attempts={}",
         report.total_tool_errors,
         report.error_code_counts,
         report.total_hint_triggers,
         report.total_sharded_reads,
         report.total_sorted_aggregations,
         report.total_tokens,
-        report.total_reasoning_tokens
+        report.total_reasoning_tokens,
+        report.unknown_usage_requests,
+        report.total_attempts
     );
 
     println!("\n--- BY SIZE TIER ---");

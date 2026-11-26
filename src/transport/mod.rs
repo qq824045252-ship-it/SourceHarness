@@ -153,6 +153,7 @@ pub struct RunResult {
 pub trait RunObserver {
     fn on_turn_start(&mut self, _turn: usize) {}
     fn on_text_delta(&mut self, _delta: &str) {}
+    fn on_model_response_usage(&mut self, _usage: Option<&UsageMetrics>) {}
     fn on_tool_call(&mut self, _trace: &ToolCallTrace) {}
     fn on_turn_complete(&mut self, _metrics: &TurnMetrics) {}
 }
@@ -255,6 +256,7 @@ impl ResponsesClient {
             let body = self.request_body(&input, instructions, &tools);
             let parsed = self.send_turn(&body, observer)?;
             usage_complete &= parsed.usage_reported;
+            observer.on_model_response_usage(parsed.usage_reported.then_some(&parsed.usage));
 
             let reasoning_item_count = parsed
                 .output_items

@@ -1,0 +1,1772 @@
+{
+  "base_commit": "65f53fa5875867ff8e5244c9163b21410724193e",
+  "release_sha256": "09399d544a9ad2c981191a3d31d4452022b4f441a4d2bbab3bf4fbc260ec507f",
+  "legacy_workspace_eval": {
+    "passed": 5,
+    "failed": 0
+  },
+  "source_sha256": {
+    "Cargo.lock": "c0638ea0d8aec8fec23dd884e6e0efee839ad477a4ad26b1d17f2df48ad11e58",
+    "Cargo.toml": "5a8b9c1ab2b786901f8004e75e5f179f297edb147a64118471e027d586802824",
+    "scripts/check_session_fixture.py": "b8dc6b75b91c21c08389b6d0be6bb07166873f0669f5de9bd9948e951854de5f",
+    "scripts/eval_session.py": "37ba84faf237a6d96c51b713b8f214f8e591d1d67ee7d25c2fe7ac66d7d77bbe",
+    "scripts/session_eval_cases.py": "252da4f4ed5e4715dd02a54bb362fc8a10717904f613f808929ebcbce258dc2d",
+    "scripts/test_eval_session.py": "f713735813ddb3f6de0997ecb721756ad3e2915af9251349ff3f35af09d7efd4",
+    "src/bench.rs": "48cf0dab591c6ee4b9698c64a8df61ce4d262c0d36449642f9723324307beef0",
+    "src/budget.rs": "98215560218ef3144f5652e9e72cd6f2cdd2a20f7b67e20f7a669f923f4f0238",
+    "src/error.rs": "308cd710b7b4f981c679d18a724f601aef725f989dcdf63a9669177370773f85",
+    "src/eval.rs": "3aaacde41957e1df7b682cf71606d29d5f74cd6586d63744edb7f8915a98193e",
+    "src/lib.rs": "7fc0ad2f0c62b63d66d1af3906b74d8b0869dc64957102aca637c912ced5224b",
+    "src/main.rs": "c755e711224d4ea5d44298c88cfa03505e98386704be1c484ee96f11dd40a247",
+    "src/read.rs": "fd6ea3069b5a6aa2e42269973b9fa32bd26472ee180f2ad66a512e97944dcb8c",
+    "src/registry.rs": "764b2ceb07fa5ee7dce5dc916acf5e4b15abdeda1a0322b645443a00b253b0db",
+    "src/search.rs": "9899dfdb2e6fa84f123e4f6b32cfab5197854878ccc7028286b801fbf67a1949",
+    "src/session/history.rs": "07d0c38b514bc32829b2b651f0895ea7d9dd8a54d585b9e01b580c1ae56d54c5",
+    "src/session/journal.rs": "85beb8051336a4d8a7d1dde32802f67c2349c782673ba280e0290a6cabb77f82",
+    "src/session/mod.rs": "6cd7e8e2780e5ddb167f69ed9695806af51683b7f3680ee9612d7251fee9d9e3",
+    "src/session/retrieval_tests.rs": "fdf2b0def3ee8df7e74035c350480ff5038d51285fc4fc5d186b9025f7662cae",
+    "src/session/tests.rs": "c057bbffee136960cefe120e426c456c508cd3366cb37ebfc40051b6722d3f8e",
+    "src/session/tools.rs": "f21539d843cb97d4eecca343d8ac88fb7cb815447104ca45135f746421fcffcc",
+    "src/session/validation.rs": "e61029f3fc5a2c14a86a38e22b70c951eccbbdc91ab8a3a8622359fc9ad7c2d9",
+    "src/store.rs": "4d0fe4b8d791b4708791f61266f10e6308bfc3056f3c6ed569dbb50342b1f931",
+    "src/transport/injection.rs": "ddd44addb3f6a0188b761917810b8598d1de2ab0d6101e678ae3ccfa522257c1",
+    "src/transport/mod.rs": "1c884004ef72a28df64edecfd8778ec9a63ede828bbfb454b5cce947b82dfc91",
+    "src/transport/sse.rs": "f78a4f2a1450f13006c121edb2a471cfb69ba22d5d8f9f1f05c46812c76b2419",
+    "src/workspace/mod.rs": "104d880b52ce4a9c55c25c58f2f6c5fb1f28a014e0d1390ad458bc6cc5c141ab",
+    "src/workspace/tools.rs": "6f96dc7a5fc7694882d35dc2aedf44264db26d7bc932e4757869b9644f1524dd",
+    "tests/bench_suite.rs": "1f4fced782d12a34e2b38e1d53cad6cc9543d1928976fd301ad88e98a54691cf",
+    "tests/session_recovery.rs": "d7fd9d291a2f556b60431c2b08404a3a71b527f9e1a3339bc1e2d35e15baa29a",
+    "tests/spec_acceptance.rs": "9d329cd19bec440cf1b5236fe27c1fa9c11d251d1bb481ff085cc568128cd1dd",
+    "tests/workspace_harness.rs": "89a54d3207f3296d08d9d7fd1a1e6d79d3ba240a9cf211eb10cdf075db69d0d1"
+  },
+  "batches": {
+    "exploratory-deepseek": {
+      "model": "auto/deepseek-v4.1-flash-1017",
+      "effort": "low",
+      "profile": "all",
+      "exe_sha256": "14709db33ee1d94a2a469ef1c8e9f4a3af54f09f60ca3a978eb18fab02204da1",
+      "initial_exe_sha256": null,
+      "passed": 30,
+      "observations": 32,
+      "by_case": {
+        "default-current-version": {
+          "passed": 2,
+          "observations": 2,
+          "request_attempts": 11,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            27194,
+            50860
+          ],
+          "tool_rejections": {
+            "INVALID_ARGUMENT": 1
+          },
+          "failures": []
+        },
+        "holdout-default-create": {
+          "passed": 2,
+          "observations": 2,
+          "request_attempts": 11,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            37053,
+            44090
+          ],
+          "tool_rejections": {
+            "FILE_NOT_FOUND": 2
+          },
+          "failures": []
+        },
+        "resume-after-replace": {
+          "passed": 2,
+          "observations": 2,
+          "request_attempts": 9,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            27965,
+            34917
+          ],
+          "tool_rejections": {},
+          "failures": []
+        },
+        "resume-with-external-change": {
+          "passed": 2,
+          "observations": 2,
+          "request_attempts": 10,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            35981,
+            37810
+          ],
+          "tool_rejections": {
+            "REVISION_CONFLICT": 2
+          },
+          "failures": []
+        },
+        "64k-middle-edit": {
+          "passed": 2,
+          "observations": 2,
+          "request_attempts": 18,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            69210,
+            77243
+          ],
+          "tool_rejections": {
+            "FILE_NOT_FOUND": 2
+          },
+          "failures": []
+        },
+        "64k-resume-after-replace": {
+          "passed": 2,
+          "observations": 2,
+          "request_attempts": 18,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            77076,
+            71120
+          ],
+          "tool_rejections": {
+            "FILE_NOT_FOUND": 2,
+            "INVALID_ARGUMENT": 2
+          },
+          "failures": []
+        },
+        "repair-cli-and-docs": {
+          "passed": 2,
+          "observations": 2,
+          "request_attempts": 20,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            55429,
+            57513
+          ],
+          "tool_rejections": {
+            "INVALID_ARGUMENT": 1
+          },
+          "failures": []
+        },
+        "changed-tools-same-workspace": {
+          "passed": 2,
+          "observations": 2,
+          "request_attempts": 5,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            27309,
+            18007
+          ],
+          "tool_rejections": {},
+          "failures": []
+        },
+        "history-conversation": {
+          "passed": 2,
+          "observations": 2,
+          "request_attempts": 17,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            62658,
+            93763
+          ],
+          "tool_rejections": {
+            "INVALID_RANGE": 1
+          },
+          "failures": []
+        },
+        "history-events": {
+          "passed": 2,
+          "observations": 2,
+          "request_attempts": 18,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            140068,
+            40520
+          ],
+          "tool_rejections": {
+            "INVALID_RANGE": 1
+          },
+          "failures": []
+        },
+        "history-facts": {
+          "passed": 2,
+          "observations": 2,
+          "request_attempts": 12,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            61452,
+            41646
+          ],
+          "tool_rejections": {},
+          "failures": []
+        },
+        "history-instructions": {
+          "passed": 2,
+          "observations": 2,
+          "request_attempts": 11,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            52321,
+            39411
+          ],
+          "tool_rejections": {},
+          "failures": []
+        },
+        "history-projection": {
+          "passed": 2,
+          "observations": 2,
+          "request_attempts": 13,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            61629,
+            34104
+          ],
+          "tool_rejections": {},
+          "failures": []
+        },
+        "edit-text": {
+          "passed": 2,
+          "observations": 2,
+          "request_attempts": 10,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            37995,
+            36534
+          ],
+          "tool_rejections": {},
+          "failures": []
+        },
+        "edit-range": {
+          "passed": 2,
+          "observations": 2,
+          "request_attempts": 11,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            38996,
+            43660
+          ],
+          "tool_rejections": {},
+          "failures": []
+        },
+        "edit-patch": {
+          "passed": 0,
+          "observations": 2,
+          "request_attempts": 32,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            225024,
+            211150
+          ],
+          "tool_rejections": {
+            "PATCH_MISMATCH": 6,
+            "INVALID_RANGE": 1
+          },
+          "failures": [
+            {
+              "name": "edit-patch-1",
+              "independent": {
+                "passed": false,
+                "mismatched_paths": [
+                  "service.cfg"
+                ],
+                "evidence_exact": true
+              },
+              "active_revision_validated": false,
+              "provenance_answer": null,
+              "provenance_observed": null,
+              "last_exit": 1,
+              "error": "Error: Model turn limit reached. The run can be resumed."
+            },
+            {
+              "name": "edit-patch-2",
+              "independent": {
+                "passed": false,
+                "mismatched_paths": [
+                  "service.cfg"
+                ],
+                "evidence_exact": true
+              },
+              "active_revision_validated": false,
+              "provenance_answer": null,
+              "provenance_observed": null,
+              "last_exit": 1,
+              "error": "Error: Model turn limit reached. The run can be resumed."
+            }
+          ]
+        }
+      },
+      "history_balance": [
+        {
+          "repeat": 1,
+          "events": {
+            "available_facts": 2,
+            "budget_bytes": 8192,
+            "bytes": 2233,
+            "fact_count": 2,
+            "facts_revision": "7a6c7ec7705d186dd6f3dbeb575d44875869f0c3071e1b1aaf37b556ce518111",
+            "freshness_instructions": false,
+            "representation": "events",
+            "stale_projection": false,
+            "tokens": null,
+            "workspace_changes_available": 0,
+            "workspace_changes_shown": 0
+          },
+          "facts": {
+            "available_facts": 2,
+            "budget_bytes": 8192,
+            "bytes": 2282,
+            "fact_count": 2,
+            "facts_revision": "7a6c7ec7705d186dd6f3dbeb575d44875869f0c3071e1b1aaf37b556ce518111",
+            "freshness_instructions": false,
+            "representation": "facts",
+            "stale_projection": false,
+            "tokens": null,
+            "workspace_changes_available": 0,
+            "workspace_changes_shown": 0
+          },
+          "same_first_request_facts": true
+        },
+        {
+          "repeat": 2,
+          "events": {
+            "available_facts": 2,
+            "budget_bytes": 8192,
+            "bytes": 2233,
+            "fact_count": 2,
+            "facts_revision": "7a6c7ec7705d186dd6f3dbeb575d44875869f0c3071e1b1aaf37b556ce518111",
+            "freshness_instructions": false,
+            "representation": "events",
+            "stale_projection": false,
+            "tokens": null,
+            "workspace_changes_available": 0,
+            "workspace_changes_shown": 0
+          },
+          "facts": {
+            "available_facts": 2,
+            "budget_bytes": 8192,
+            "bytes": 2282,
+            "fact_count": 2,
+            "facts_revision": "7a6c7ec7705d186dd6f3dbeb575d44875869f0c3071e1b1aaf37b556ce518111",
+            "freshness_instructions": false,
+            "representation": "facts",
+            "stale_projection": false,
+            "tokens": null,
+            "workspace_changes_available": 0,
+            "workspace_changes_shown": 0
+          },
+          "same_first_request_facts": true
+        }
+      ]
+    },
+    "exploratory-qwen": {
+      "model": "qwen-token-plan/qwen3.8-flash",
+      "effort": "low",
+      "profile": "selected",
+      "exe_sha256": "14709db33ee1d94a2a469ef1c8e9f4a3af54f09f60ca3a978eb18fab02204da1",
+      "initial_exe_sha256": null,
+      "passed": 7,
+      "observations": 8,
+      "by_case": {
+        "default-current-version": {
+          "passed": 1,
+          "observations": 1,
+          "request_attempts": 6,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            46361
+          ],
+          "tool_rejections": {},
+          "failures": []
+        },
+        "holdout-default-create": {
+          "passed": 1,
+          "observations": 1,
+          "request_attempts": 8,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            55683
+          ],
+          "tool_rejections": {
+            "FILE_NOT_FOUND": 1,
+            "INVALID_ARGUMENT": 1
+          },
+          "failures": []
+        },
+        "resume-after-replace": {
+          "passed": 1,
+          "observations": 1,
+          "request_attempts": 6,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            46040
+          ],
+          "tool_rejections": {},
+          "failures": []
+        },
+        "resume-with-external-change": {
+          "passed": 1,
+          "observations": 1,
+          "request_attempts": 9,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            74700
+          ],
+          "tool_rejections": {
+            "REVISION_CONFLICT": 1
+          },
+          "failures": []
+        },
+        "64k-middle-edit": {
+          "passed": 1,
+          "observations": 1,
+          "request_attempts": 12,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            104305
+          ],
+          "tool_rejections": {
+            "INVALID_GROUP_BY_CAPTURE": 1,
+            "INVALID_ARGUMENT": 2
+          },
+          "failures": []
+        },
+        "64k-resume-after-replace": {
+          "passed": 1,
+          "observations": 1,
+          "request_attempts": 8,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            63934
+          ],
+          "tool_rejections": {
+            "FILE_NOT_FOUND": 1
+          },
+          "failures": []
+        },
+        "repair-cli-and-docs": {
+          "passed": 1,
+          "observations": 1,
+          "request_attempts": 8,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            33442
+          ],
+          "tool_rejections": {},
+          "failures": []
+        },
+        "changed-tools-same-workspace": {
+          "passed": 0,
+          "observations": 1,
+          "request_attempts": 2,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            14709
+          ],
+          "tool_rejections": {},
+          "failures": [
+            {
+              "name": "changed-tools-same-workspace",
+              "independent": {
+                "passed": true,
+                "mismatched_paths": [],
+                "evidence_exact": true
+              },
+              "active_revision_validated": true,
+              "provenance_answer": {
+                "TOOLS": "same",
+                "VALIDATION": "same",
+                "WORKSPACE": "same"
+              },
+              "provenance_observed": true,
+              "last_exit": 0,
+              "error": ""
+            }
+          ]
+        }
+      },
+      "history_balance": []
+    },
+    "pre-fix-retest-deepseek": {
+      "model": "auto/deepseek-v4.1-flash-1017",
+      "effort": "low",
+      "profile": "all",
+      "exe_sha256": "c9f258083fe7684679104d1cf902dfbbece7460ae3dac3646d3b8742ae37b94e",
+      "initial_exe_sha256": null,
+      "passed": 29,
+      "observations": 32,
+      "by_case": {
+        "default-current-version": {
+          "passed": 2,
+          "observations": 2,
+          "request_attempts": 11,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            45575,
+            36831
+          ],
+          "tool_rejections": {},
+          "failures": []
+        },
+        "holdout-default-create": {
+          "passed": 2,
+          "observations": 2,
+          "request_attempts": 12,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            59392,
+            37438
+          ],
+          "tool_rejections": {
+            "FILE_NOT_FOUND": 2
+          },
+          "failures": []
+        },
+        "resume-after-replace": {
+          "passed": 2,
+          "observations": 2,
+          "request_attempts": 13,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            42385,
+            51081
+          ],
+          "tool_rejections": {},
+          "failures": []
+        },
+        "resume-with-external-change": {
+          "passed": 2,
+          "observations": 2,
+          "request_attempts": 23,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            100151,
+            84015
+          ],
+          "tool_rejections": {
+            "REVISION_CONFLICT": 2,
+            "TEXT_NOT_FOUND": 2
+          },
+          "failures": []
+        },
+        "64k-middle-edit": {
+          "passed": 2,
+          "observations": 2,
+          "request_attempts": 16,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            52091,
+            68617
+          ],
+          "tool_rejections": {
+            "FILE_NOT_FOUND": 2
+          },
+          "failures": []
+        },
+        "64k-resume-after-replace": {
+          "passed": 1,
+          "observations": 2,
+          "request_attempts": 31,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            82007,
+            204256
+          ],
+          "tool_rejections": {
+            "FILE_NOT_FOUND": 3,
+            "INVALID_ARGUMENT": 8,
+            "REVISION_CONFLICT": 1
+          },
+          "failures": [
+            {
+              "name": "64k-resume-after-replace-2",
+              "independent": {
+                "passed": false,
+                "mismatched_paths": [],
+                "evidence_exact": false
+              },
+              "active_revision_validated": false,
+              "provenance_answer": null,
+              "provenance_observed": null,
+              "last_exit": 1,
+              "error": "Error: Model turn limit reached. The run can be resumed."
+            }
+          ]
+        },
+        "repair-cli-and-docs": {
+          "passed": 2,
+          "observations": 2,
+          "request_attempts": 16,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            28234,
+            55839
+          ],
+          "tool_rejections": {
+            "INVALID_ARGUMENT": 1
+          },
+          "failures": []
+        },
+        "changed-tools-same-workspace": {
+          "passed": 2,
+          "observations": 2,
+          "request_attempts": 5,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            12382,
+            23840
+          ],
+          "tool_rejections": {},
+          "failures": []
+        },
+        "history-conversation": {
+          "passed": 2,
+          "observations": 2,
+          "request_attempts": 13,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            43580,
+            53290
+          ],
+          "tool_rejections": {},
+          "failures": []
+        },
+        "history-events": {
+          "passed": 2,
+          "observations": 2,
+          "request_attempts": 9,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            35214,
+            30705
+          ],
+          "tool_rejections": {},
+          "failures": []
+        },
+        "history-facts": {
+          "passed": 2,
+          "observations": 2,
+          "request_attempts": 10,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            41903,
+            40518
+          ],
+          "tool_rejections": {},
+          "failures": []
+        },
+        "history-instructions": {
+          "passed": 2,
+          "observations": 2,
+          "request_attempts": 12,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            37376,
+            59996
+          ],
+          "tool_rejections": {},
+          "failures": []
+        },
+        "history-projection": {
+          "passed": 2,
+          "observations": 2,
+          "request_attempts": 13,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            33730,
+            66685
+          ],
+          "tool_rejections": {},
+          "failures": []
+        },
+        "edit-text": {
+          "passed": 2,
+          "observations": 2,
+          "request_attempts": 9,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            29335,
+            34720
+          ],
+          "tool_rejections": {},
+          "failures": []
+        },
+        "edit-range": {
+          "passed": 2,
+          "observations": 2,
+          "request_attempts": 10,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            28009,
+            42759
+          ],
+          "tool_rejections": {},
+          "failures": []
+        },
+        "edit-patch": {
+          "passed": 0,
+          "observations": 2,
+          "request_attempts": 32,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            196983,
+            202720
+          ],
+          "tool_rejections": {
+            "PATCH_MISMATCH": 9,
+            "INVALID_ARGUMENT": 1,
+            "INVALID_RANGE": 1
+          },
+          "failures": [
+            {
+              "name": "edit-patch-1",
+              "independent": {
+                "passed": false,
+                "mismatched_paths": [
+                  "service.cfg"
+                ],
+                "evidence_exact": true
+              },
+              "active_revision_validated": false,
+              "provenance_answer": null,
+              "provenance_observed": null,
+              "last_exit": 1,
+              "error": "Error: Model turn limit reached. The run can be resumed."
+            },
+            {
+              "name": "edit-patch-2",
+              "independent": {
+                "passed": false,
+                "mismatched_paths": [
+                  "service.cfg"
+                ],
+                "evidence_exact": true
+              },
+              "active_revision_validated": false,
+              "provenance_answer": null,
+              "provenance_observed": null,
+              "last_exit": 1,
+              "error": "Error: Model turn limit reached. The run can be resumed."
+            }
+          ]
+        }
+      },
+      "history_balance": [
+        {
+          "repeat": 1,
+          "events": {
+            "available_facts": 2,
+            "budget_bytes": 8192,
+            "bytes": 2432,
+            "fact_count": 2,
+            "facts_revision": "121483e285714116a39c2b05963bcc669f9f76e0f401069f87da58ef17ff930f",
+            "freshness_instructions": false,
+            "representation": "events",
+            "stale_projection": false,
+            "tokens": null,
+            "workspace_changes_available": 0,
+            "workspace_changes_shown": 0
+          },
+          "facts": {
+            "available_facts": 2,
+            "budget_bytes": 8192,
+            "bytes": 2481,
+            "fact_count": 2,
+            "facts_revision": "121483e285714116a39c2b05963bcc669f9f76e0f401069f87da58ef17ff930f",
+            "freshness_instructions": false,
+            "representation": "facts",
+            "stale_projection": false,
+            "tokens": null,
+            "workspace_changes_available": 0,
+            "workspace_changes_shown": 0
+          },
+          "same_first_request_facts": true
+        },
+        {
+          "repeat": 2,
+          "events": {
+            "available_facts": 2,
+            "budget_bytes": 8192,
+            "bytes": 2432,
+            "fact_count": 2,
+            "facts_revision": "121483e285714116a39c2b05963bcc669f9f76e0f401069f87da58ef17ff930f",
+            "freshness_instructions": false,
+            "representation": "events",
+            "stale_projection": false,
+            "tokens": null,
+            "workspace_changes_available": 0,
+            "workspace_changes_shown": 0
+          },
+          "facts": {
+            "available_facts": 2,
+            "budget_bytes": 8192,
+            "bytes": 2481,
+            "fact_count": 2,
+            "facts_revision": "121483e285714116a39c2b05963bcc669f9f76e0f401069f87da58ef17ff930f",
+            "freshness_instructions": false,
+            "representation": "facts",
+            "stale_projection": false,
+            "tokens": null,
+            "workspace_changes_available": 0,
+            "workspace_changes_shown": 0
+          },
+          "same_first_request_facts": true
+        }
+      ]
+    },
+    "pre-fix-continuation": {
+      "model": "auto/deepseek-v4.1-flash-1017",
+      "effort": "low",
+      "profile": "continuation",
+      "exe_sha256": "ec1b6788a0bb82ef038ad9e65b0bbd6f4a4499498a0ec7da96b21300be98824c",
+      "initial_exe_sha256": null,
+      "passed": 2,
+      "observations": 2,
+      "by_case": {
+        "resume-after-upgrade-with-correction": {
+          "passed": 2,
+          "observations": 2,
+          "request_attempts": 21,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            65039,
+            106890
+          ],
+          "tool_rejections": {
+            "REVISION_CONFLICT": 1
+          },
+          "failures": []
+        }
+      },
+      "history_balance": []
+    },
+    "pre-research-defaults-deepseek": {
+      "model": "auto/deepseek-v4.1-flash-1017",
+      "effort": "low",
+      "profile": "all",
+      "exe_sha256": "c684780d88a70c0368c5b2faaad921584040dc15bfbbf60b14f7148673290b74",
+      "initial_exe_sha256": null,
+      "passed": 30,
+      "observations": 32,
+      "by_case": {
+        "default-current-version": {
+          "passed": 2,
+          "observations": 2,
+          "request_attempts": 12,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            43199,
+            42149
+          ],
+          "tool_rejections": {},
+          "failures": []
+        },
+        "holdout-default-create": {
+          "passed": 2,
+          "observations": 2,
+          "request_attempts": 15,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            37009,
+            90309
+          ],
+          "tool_rejections": {
+            "FILE_NOT_FOUND": 2
+          },
+          "failures": []
+        },
+        "resume-after-replace": {
+          "passed": 2,
+          "observations": 2,
+          "request_attempts": 10,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            38006,
+            33511
+          ],
+          "tool_rejections": {},
+          "failures": []
+        },
+        "resume-with-external-change": {
+          "passed": 2,
+          "observations": 2,
+          "request_attempts": 15,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            56330,
+            67981
+          ],
+          "tool_rejections": {
+            "REVISION_CONFLICT": 2
+          },
+          "failures": []
+        },
+        "64k-middle-edit": {
+          "passed": 2,
+          "observations": 2,
+          "request_attempts": 18,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            43787,
+            131104
+          ],
+          "tool_rejections": {
+            "FILE_NOT_FOUND": 2
+          },
+          "failures": []
+        },
+        "64k-resume-after-replace": {
+          "passed": 2,
+          "observations": 2,
+          "request_attempts": 16,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            71898,
+            50864
+          ],
+          "tool_rejections": {
+            "FILE_NOT_FOUND": 2
+          },
+          "failures": []
+        },
+        "repair-cli-and-docs": {
+          "passed": 2,
+          "observations": 2,
+          "request_attempts": 14,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            28285,
+            49279
+          ],
+          "tool_rejections": {},
+          "failures": []
+        },
+        "changed-tools-same-workspace": {
+          "passed": 2,
+          "observations": 2,
+          "request_attempts": 4,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            17489,
+            18454
+          ],
+          "tool_rejections": {},
+          "failures": []
+        },
+        "history-conversation": {
+          "passed": 2,
+          "observations": 2,
+          "request_attempts": 13,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            57120,
+            42942
+          ],
+          "tool_rejections": {},
+          "failures": []
+        },
+        "history-events": {
+          "passed": 2,
+          "observations": 2,
+          "request_attempts": 13,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            66835,
+            64802
+          ],
+          "tool_rejections": {
+            "RESULT_NOT_FOUND": 1
+          },
+          "failures": []
+        },
+        "history-facts": {
+          "passed": 2,
+          "observations": 2,
+          "request_attempts": 11,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            65395,
+            35125
+          ],
+          "tool_rejections": {},
+          "failures": []
+        },
+        "history-instructions": {
+          "passed": 2,
+          "observations": 2,
+          "request_attempts": 10,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            42815,
+            45002
+          ],
+          "tool_rejections": {},
+          "failures": []
+        },
+        "history-projection": {
+          "passed": 2,
+          "observations": 2,
+          "request_attempts": 11,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            40474,
+            44704
+          ],
+          "tool_rejections": {},
+          "failures": []
+        },
+        "edit-text": {
+          "passed": 2,
+          "observations": 2,
+          "request_attempts": 9,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            27110,
+            33227
+          ],
+          "tool_rejections": {},
+          "failures": []
+        },
+        "edit-range": {
+          "passed": 2,
+          "observations": 2,
+          "request_attempts": 9,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            26948,
+            34127
+          ],
+          "tool_rejections": {},
+          "failures": []
+        },
+        "edit-patch": {
+          "passed": 0,
+          "observations": 2,
+          "request_attempts": 32,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            201390,
+            177532
+          ],
+          "tool_rejections": {
+            "PATCH_MISMATCH": 7,
+            "INVALID_PATCH": 3
+          },
+          "failures": [
+            {
+              "name": "edit-patch-1",
+              "independent": {
+                "passed": false,
+                "mismatched_paths": [
+                  "service.cfg"
+                ],
+                "evidence_exact": true
+              },
+              "active_revision_validated": false,
+              "provenance_answer": null,
+              "provenance_observed": null,
+              "last_exit": 1,
+              "error": "Error: Model turn limit reached. The run can be resumed."
+            },
+            {
+              "name": "edit-patch-2",
+              "independent": {
+                "passed": false,
+                "mismatched_paths": [
+                  "service.cfg"
+                ],
+                "evidence_exact": true
+              },
+              "active_revision_validated": false,
+              "provenance_answer": null,
+              "provenance_observed": null,
+              "last_exit": 1,
+              "error": "Error: Model turn limit reached. The run can be resumed."
+            }
+          ]
+        }
+      },
+      "history_balance": [
+        {
+          "repeat": 1,
+          "events": {
+            "available_facts": 2,
+            "budget_bytes": 8192,
+            "bytes": 2533,
+            "fact_count": 2,
+            "facts_revision": "73a55e68d7adddf1e28a1add5d7b553a62be1f9c33f862c57156c5f6d822d3f5",
+            "freshness_instructions": false,
+            "representation": "events",
+            "stale_projection": false,
+            "tokens": null,
+            "workspace_changes_available": 0,
+            "workspace_changes_shown": 0
+          },
+          "facts": {
+            "available_facts": 2,
+            "budget_bytes": 8192,
+            "bytes": 2582,
+            "fact_count": 2,
+            "facts_revision": "73a55e68d7adddf1e28a1add5d7b553a62be1f9c33f862c57156c5f6d822d3f5",
+            "freshness_instructions": false,
+            "representation": "facts",
+            "stale_projection": false,
+            "tokens": null,
+            "workspace_changes_available": 0,
+            "workspace_changes_shown": 0
+          },
+          "same_first_request_facts": true
+        },
+        {
+          "repeat": 2,
+          "events": {
+            "available_facts": 2,
+            "budget_bytes": 8192,
+            "bytes": 2533,
+            "fact_count": 2,
+            "facts_revision": "73a55e68d7adddf1e28a1add5d7b553a62be1f9c33f862c57156c5f6d822d3f5",
+            "freshness_instructions": false,
+            "representation": "events",
+            "stale_projection": false,
+            "tokens": null,
+            "workspace_changes_available": 0,
+            "workspace_changes_shown": 0
+          },
+          "facts": {
+            "available_facts": 2,
+            "budget_bytes": 8192,
+            "bytes": 2582,
+            "fact_count": 2,
+            "facts_revision": "73a55e68d7adddf1e28a1add5d7b553a62be1f9c33f862c57156c5f6d822d3f5",
+            "freshness_instructions": false,
+            "representation": "facts",
+            "stale_projection": false,
+            "tokens": null,
+            "workspace_changes_available": 0,
+            "workspace_changes_shown": 0
+          },
+          "same_first_request_facts": true
+        }
+      ]
+    },
+    "pre-research-defaults-qwen": {
+      "model": "qwen-token-plan/qwen3.8-flash",
+      "effort": "low",
+      "profile": "selected",
+      "exe_sha256": "c684780d88a70c0368c5b2faaad921584040dc15bfbbf60b14f7148673290b74",
+      "initial_exe_sha256": null,
+      "passed": 7,
+      "observations": 8,
+      "by_case": {
+        "default-current-version": {
+          "passed": 1,
+          "observations": 1,
+          "request_attempts": 5,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            40455
+          ],
+          "tool_rejections": {},
+          "failures": []
+        },
+        "holdout-default-create": {
+          "passed": 1,
+          "observations": 1,
+          "request_attempts": 10,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            71907
+          ],
+          "tool_rejections": {
+            "INVALID_ARGUMENT": 2,
+            "FILE_NOT_FOUND": 1
+          },
+          "failures": []
+        },
+        "resume-after-replace": {
+          "passed": 1,
+          "observations": 1,
+          "request_attempts": 6,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            49926
+          ],
+          "tool_rejections": {},
+          "failures": []
+        },
+        "resume-with-external-change": {
+          "passed": 1,
+          "observations": 1,
+          "request_attempts": 7,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            69967
+          ],
+          "tool_rejections": {
+            "REVISION_CONFLICT": 1
+          },
+          "failures": []
+        },
+        "64k-middle-edit": {
+          "passed": 1,
+          "observations": 1,
+          "request_attempts": 8,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            61042
+          ],
+          "tool_rejections": {
+            "FILE_NOT_FOUND": 1
+          },
+          "failures": []
+        },
+        "64k-resume-after-replace": {
+          "passed": 1,
+          "observations": 1,
+          "request_attempts": 8,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            63374
+          ],
+          "tool_rejections": {
+            "FILE_NOT_FOUND": 1
+          },
+          "failures": []
+        },
+        "repair-cli-and-docs": {
+          "passed": 0,
+          "observations": 1,
+          "request_attempts": 16,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            90171
+          ],
+          "tool_rejections": {
+            "INVALID_ARGUMENT": 3,
+            "INVALID_PATH": 2
+          },
+          "failures": [
+            {
+              "name": "repair-cli-and-docs",
+              "independent": {
+                "passed": true,
+                "mismatched_paths": [],
+                "evidence_exact": true
+              },
+              "active_revision_validated": true,
+              "provenance_answer": null,
+              "provenance_observed": null,
+              "last_exit": 1,
+              "error": "Error: Model turn limit reached. The run can be resumed."
+            }
+          ]
+        },
+        "changed-tools-same-workspace": {
+          "passed": 1,
+          "observations": 1,
+          "request_attempts": 2,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            19260
+          ],
+          "tool_rejections": {},
+          "failures": []
+        }
+      },
+      "history_balance": []
+    },
+    "pre-research-defaults-continuation": {
+      "model": "auto/deepseek-v4.1-flash-1017",
+      "effort": "low",
+      "profile": "continuation",
+      "exe_sha256": "c684780d88a70c0368c5b2faaad921584040dc15bfbbf60b14f7148673290b74",
+      "initial_exe_sha256": null,
+      "passed": 2,
+      "observations": 2,
+      "by_case": {
+        "resume-after-upgrade-with-correction": {
+          "passed": 2,
+          "observations": 2,
+          "request_attempts": 17,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            64143,
+            69412
+          ],
+          "tool_rejections": {},
+          "failures": []
+        }
+      },
+      "history_balance": []
+    },
+    "pre-research-defaults-binary-upgrade": {
+      "model": "auto/deepseek-v4.1-flash-1017",
+      "effort": "low",
+      "profile": "continuation",
+      "exe_sha256": "c684780d88a70c0368c5b2faaad921584040dc15bfbbf60b14f7148673290b74",
+      "initial_exe_sha256": "14709db33ee1d94a2a469ef1c8e9f4a3af54f09f60ca3a978eb18fab02204da1",
+      "passed": 2,
+      "observations": 2,
+      "by_case": {
+        "resume-after-upgrade-with-correction": {
+          "passed": 2,
+          "observations": 2,
+          "request_attempts": 17,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            70337,
+            58293
+          ],
+          "tool_rejections": {
+            "INVALID_ARGUMENT": 1
+          },
+          "failures": []
+        }
+      },
+      "history_balance": []
+    },
+    "final-deepseek": {
+      "model": "auto/deepseek-v4.1-flash-1017",
+      "effort": "low",
+      "profile": "all",
+      "exe_sha256": "09399d544a9ad2c981191a3d31d4452022b4f441a4d2bbab3bf4fbc260ec507f",
+      "initial_exe_sha256": null,
+      "passed": 30,
+      "observations": 32,
+      "by_case": {
+        "default-current-version": {
+          "passed": 2,
+          "observations": 2,
+          "request_attempts": 11,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            37755,
+            44845
+          ],
+          "tool_rejections": {},
+          "failures": []
+        },
+        "holdout-default-create": {
+          "passed": 2,
+          "observations": 2,
+          "request_attempts": 15,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            54598,
+            78291
+          ],
+          "tool_rejections": {
+            "FILE_NOT_FOUND": 2
+          },
+          "failures": []
+        },
+        "resume-after-replace": {
+          "passed": 2,
+          "observations": 2,
+          "request_attempts": 12,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            45170,
+            43118
+          ],
+          "tool_rejections": {},
+          "failures": []
+        },
+        "resume-with-external-change": {
+          "passed": 2,
+          "observations": 2,
+          "request_attempts": 20,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            73298,
+            97135
+          ],
+          "tool_rejections": {
+            "INVALID_ARGUMENT": 1,
+            "REVISION_CONFLICT": 2,
+            "INVALID_RANGE": 1
+          },
+          "failures": []
+        },
+        "64k-middle-edit": {
+          "passed": 2,
+          "observations": 2,
+          "request_attempts": 19,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            118980,
+            62203
+          ],
+          "tool_rejections": {
+            "FILE_NOT_FOUND": 2
+          },
+          "failures": []
+        },
+        "64k-resume-after-replace": {
+          "passed": 2,
+          "observations": 2,
+          "request_attempts": 15,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            56199,
+            64735
+          ],
+          "tool_rejections": {
+            "FILE_NOT_FOUND": 2
+          },
+          "failures": []
+        },
+        "repair-cli-and-docs": {
+          "passed": 2,
+          "observations": 2,
+          "request_attempts": 18,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            51225,
+            56603
+          ],
+          "tool_rejections": {},
+          "failures": []
+        },
+        "changed-tools-same-workspace": {
+          "passed": 2,
+          "observations": 2,
+          "request_attempts": 4,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            13513,
+            13422
+          ],
+          "tool_rejections": {},
+          "failures": []
+        },
+        "history-conversation": {
+          "passed": 2,
+          "observations": 2,
+          "request_attempts": 13,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            54398,
+            71842
+          ],
+          "tool_rejections": {},
+          "failures": []
+        },
+        "history-events": {
+          "passed": 2,
+          "observations": 2,
+          "request_attempts": 15,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            82259,
+            125340
+          ],
+          "tool_rejections": {},
+          "failures": []
+        },
+        "history-facts": {
+          "passed": 2,
+          "observations": 2,
+          "request_attempts": 9,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            36527,
+            44255
+          ],
+          "tool_rejections": {},
+          "failures": []
+        },
+        "history-instructions": {
+          "passed": 2,
+          "observations": 2,
+          "request_attempts": 12,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            48073,
+            94689
+          ],
+          "tool_rejections": {},
+          "failures": []
+        },
+        "history-projection": {
+          "passed": 2,
+          "observations": 2,
+          "request_attempts": 13,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            75631,
+            38650
+          ],
+          "tool_rejections": {},
+          "failures": []
+        },
+        "edit-text": {
+          "passed": 2,
+          "observations": 2,
+          "request_attempts": 10,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            39343,
+            39822
+          ],
+          "tool_rejections": {},
+          "failures": []
+        },
+        "edit-range": {
+          "passed": 2,
+          "observations": 2,
+          "request_attempts": 9,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            32269,
+            39696
+          ],
+          "tool_rejections": {},
+          "failures": []
+        },
+        "edit-patch": {
+          "passed": 0,
+          "observations": 2,
+          "request_attempts": 32,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            224731,
+            192546
+          ],
+          "tool_rejections": {
+            "INVALID_PATCH": 1,
+            "PATCH_MISMATCH": 6
+          },
+          "failures": [
+            {
+              "name": "edit-patch-1",
+              "independent": {
+                "passed": true,
+                "mismatched_paths": [],
+                "evidence_exact": true
+              },
+              "active_revision_validated": false,
+              "provenance_answer": null,
+              "provenance_observed": null,
+              "last_exit": 1,
+              "error": "Error: Model turn limit reached. The run can be resumed."
+            },
+            {
+              "name": "edit-patch-2",
+              "independent": {
+                "passed": false,
+                "mismatched_paths": [
+                  "service.cfg"
+                ],
+                "evidence_exact": false
+              },
+              "active_revision_validated": false,
+              "provenance_answer": null,
+              "provenance_observed": null,
+              "last_exit": 1,
+              "error": "Error: Model turn limit reached. The run can be resumed."
+            }
+          ]
+        }
+      },
+      "history_balance": [
+        {
+          "repeat": 1,
+          "events": {
+            "available_facts": 2,
+            "budget_bytes": 8192,
+            "bytes": 2533,
+            "fact_count": 2,
+            "facts_revision": "aedb55b634903bb68183f7e440e2011783c80f98f0f72775a246cef59a11043f",
+            "freshness_instructions": false,
+            "representation": "events",
+            "stale_projection": false,
+            "tokens": null,
+            "workspace_changes_available": 0,
+            "workspace_changes_shown": 0
+          },
+          "facts": {
+            "available_facts": 2,
+            "budget_bytes": 8192,
+            "bytes": 2582,
+            "fact_count": 2,
+            "facts_revision": "aedb55b634903bb68183f7e440e2011783c80f98f0f72775a246cef59a11043f",
+            "freshness_instructions": false,
+            "representation": "facts",
+            "stale_projection": false,
+            "tokens": null,
+            "workspace_changes_available": 0,
+            "workspace_changes_shown": 0
+          },
+          "same_first_request_facts": true
+        },
+        {
+          "repeat": 2,
+          "events": {
+            "available_facts": 2,
+            "budget_bytes": 8192,
+            "bytes": 2533,
+            "fact_count": 2,
+            "facts_revision": "aedb55b634903bb68183f7e440e2011783c80f98f0f72775a246cef59a11043f",
+            "freshness_instructions": false,
+            "representation": "events",
+            "stale_projection": false,
+            "tokens": null,
+            "workspace_changes_available": 0,
+            "workspace_changes_shown": 0
+          },
+          "facts": {
+            "available_facts": 2,
+            "budget_bytes": 8192,
+            "bytes": 2582,
+            "fact_count": 2,
+            "facts_revision": "aedb55b634903bb68183f7e440e2011783c80f98f0f72775a246cef59a11043f",
+            "freshness_instructions": false,
+            "representation": "facts",
+            "stale_projection": false,
+            "tokens": null,
+            "workspace_changes_available": 0,
+            "workspace_changes_shown": 0
+          },
+          "same_first_request_facts": true
+        }
+      ]
+    },
+    "final-qwen": {
+      "model": "qwen-token-plan/qwen3.8-flash",
+      "effort": "low",
+      "profile": "selected",
+      "exe_sha256": "09399d544a9ad2c981191a3d31d4452022b4f441a4d2bbab3bf4fbc260ec507f",
+      "initial_exe_sha256": null,
+      "passed": 8,
+      "observations": 8,
+      "by_case": {
+        "default-current-version": {
+          "passed": 1,
+          "observations": 1,
+          "request_attempts": 8,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            61129
+          ],
+          "tool_rejections": {
+            "INVALID_ARGUMENT": 1
+          },
+          "failures": []
+        },
+        "holdout-default-create": {
+          "passed": 1,
+          "observations": 1,
+          "request_attempts": 9,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            64848
+          ],
+          "tool_rejections": {
+            "INVALID_ARGUMENT": 1,
+            "FILE_NOT_FOUND": 1
+          },
+          "failures": []
+        },
+        "resume-after-replace": {
+          "passed": 1,
+          "observations": 1,
+          "request_attempts": 6,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            42463
+          ],
+          "tool_rejections": {},
+          "failures": []
+        },
+        "resume-with-external-change": {
+          "passed": 1,
+          "observations": 1,
+          "request_attempts": 14,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            112339
+          ],
+          "tool_rejections": {
+            "INVALID_ARGUMENT": 4,
+            "REVISION_CONFLICT": 1
+          },
+          "failures": []
+        },
+        "64k-middle-edit": {
+          "passed": 1,
+          "observations": 1,
+          "request_attempts": 11,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            90087
+          ],
+          "tool_rejections": {
+            "INVALID_ARGUMENT": 1,
+            "FILE_NOT_FOUND": 1
+          },
+          "failures": []
+        },
+        "64k-resume-after-replace": {
+          "passed": 1,
+          "observations": 1,
+          "request_attempts": 8,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            57268
+          ],
+          "tool_rejections": {
+            "FILE_NOT_FOUND": 1
+          },
+          "failures": []
+        },
+        "repair-cli-and-docs": {
+          "passed": 1,
+          "observations": 1,
+          "request_attempts": 7,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            24122
+          ],
+          "tool_rejections": {},
+          "failures": []
+        },
+        "changed-tools-same-workspace": {
+          "passed": 1,
+          "observations": 1,
+          "request_attempts": 2,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            18255
+          ],
+          "tool_rejections": {},
+          "failures": []
+        }
+      },
+      "history_balance": []
+    },
+    "final-binary-upgrade": {
+      "model": "auto/deepseek-v4.1-flash-1017",
+      "effort": "low",
+      "profile": "continuation",
+      "exe_sha256": "09399d544a9ad2c981191a3d31d4452022b4f441a4d2bbab3bf4fbc260ec507f",
+      "initial_exe_sha256": "14709db33ee1d94a2a469ef1c8e9f4a3af54f09f60ca3a978eb18fab02204da1",
+      "passed": 2,
+      "observations": 2,
+      "by_case": {
+        "resume-after-upgrade-with-correction": {
+          "passed": 2,
+          "observations": 2,
+          "request_attempts": 15,
+          "unknown_usage_attempts": 0,
+          "known_tokens": [
+            61332,
+            68010
+          ],
+          "tool_rejections": {
+            "INVALID_ARGUMENT": 1
+          },
+          "failures": []
+        }
+      },
+      "history_balance": []
+    }
+  }
+}

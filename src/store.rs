@@ -72,6 +72,17 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
+    pub(crate) fn new(result_ref: String, raw: String) -> Self {
+        let lines = build_line_spans(&raw);
+        let sections = extract_markdown_sections(&raw, &lines);
+        Self {
+            result_ref,
+            raw,
+            lines,
+            sections,
+        }
+    }
+
     pub fn result_ref(&self) -> &str {
         &self.result_ref
     }
@@ -156,20 +167,13 @@ impl FoldStore {
 
     /// Always stores `raw` as an immutable snapshot and returns its bounded [`FoldEnvelope`].
     pub fn insert(&self, raw: impl Into<String>) -> FoldEnvelope {
-        let raw = raw.into();
-        let lines = build_line_spans(&raw);
-        let sections = extract_markdown_sections(&raw, &lines);
-
+        let mut snapshot = Snapshot::new(String::new(), raw.into());
         let mut inner = self.inner.write().expect("FoldStore lock poisoned");
         inner.next_seq += 1;
         let result_ref = format!("res_{}_{}", self.store_id, inner.next_seq);
 
-        let snapshot = Arc::new(Snapshot {
-            result_ref: result_ref.clone(),
-            raw,
-            lines,
-            sections,
-        });
+        snapshot.result_ref.clone_from(&result_ref);
+        let snapshot = Arc::new(snapshot);
 
         let envelope = build_fold_envelope(&snapshot, self.config.preview_max_bytes);
         let entry_bytes = snapshot.raw.len();

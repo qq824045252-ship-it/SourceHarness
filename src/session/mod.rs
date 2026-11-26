@@ -1,9 +1,11 @@
+mod history;
 mod journal;
 #[cfg(test)]
 mod tests;
 mod tools;
 mod validation;
 
+pub use history::{DEFAULT_BUDGET as DEFAULT_HISTORY_BUDGET, MAX_BUDGET as MAX_HISTORY_BUDGET, MIN_BUDGET as MIN_HISTORY_BUDGET};
 pub use tools::EditMode;
 pub use validation::Commands;
 
@@ -20,8 +22,6 @@ use std::time::{Duration, Instant};
 
 const INSTRUCTIONS: &str = "You are working in a real workspace. Tool results are evidence. Use research to locate evidence and read only when more exact content is needed. Preserve unrelated content. Copy the path and revision from the observed file into write or edit. On a version conflict, inspect the current evidence before retrying. Ground verification claims in validate results for the relevant revision. Answer when the user's objective and requested checks are complete.";
 
-const FRESHNESS_INSTRUCTIONS: &str = "Use fresh workspace evidence for requirements that can change. When workspace_changes identifies an earlier read as stale, inspect the current source before relying on that earlier content. Earlier validations and snapshots remain available as historical evidence.";
-
 #[derive(Clone, Copy, Debug, Default)]
 pub enum HistoryMode {
     Conversation,
@@ -30,11 +30,37 @@ pub enum HistoryMode {
     Facts,
 }
 
-#[derive(Clone, Debug, Default)]
+impl HistoryMode {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Conversation => "conversation",
+            Self::Events => "events",
+            Self::Facts => "facts",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct Options {
     pub edit: EditMode,
     pub history: HistoryMode,
     pub commands: Commands,
+    pub freshness_instructions: Option<bool>,
+    pub stale_projection: Option<bool>,
+    pub history_budget: usize,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            edit: EditMode::default(),
+            history: HistoryMode::default(),
+            commands: Commands::default(),
+            freshness_instructions: None,
+            stale_projection: None,
+            history_budget: DEFAULT_HISTORY_BUDGET,
+        }
+    }
 }
 
 pub struct Session {
@@ -64,6 +90,12 @@ struct Checkpoint {
     profile: Value,
 }
 
+enum Start<'a> {
+    Prompt(&'a str),
+    Resume,
+    Continue(Option<&'a str>),
+}
+
 fn session_path(root: &Path, name: &str) -> Result<PathBuf, String> {
     if name.is_empty()
         || name.len() > 64
@@ -80,6 +112,9 @@ fn session_path(root: &Path, name: &str) -> Result<PathBuf, String> {
 
 impl Session {
     pub fn open(root: &Path, name: &str, options: Options) -> Result<Self, String> {
+        if !(MIN_HISTORY_BUDGET..=MAX_HISTORY_BUDGET).contains(&options.history_budget) {
+            return Err(format!("History budget must be {MIN_HISTORY_BUDGET}..={MAX_HISTORY_BUDGET} bytes."));
+        }
         let ctx = WorkspaceContext::new(WorkspaceConfig::with_root(root))?;
         let dir = session_path(ctx.root(), name)?;
         for path in [
@@ -133,37 +168,55 @@ impl Session {
         client: &ResponsesClient,
         prompt: Option<&str>,
     ) -> Result<String, String> {
+        self.run_with_start(client, prompt.map_or(Start::Resume, Start::Prompt))
+    }
+
+    pub fn continue_pending(
+        &mut self,
+        client: &ResponsesClient,
+        correction: Option<&str>,
+    ) -> Result<String, String> {
+        self.run_with_start(client, Start::Continue(correction))
+    }
+
+    fn run_with_start(&mut self, client: &ResponsesClient, start: Start<'_>) -> Result<String, String> {
         let mut definitions = tools::definitions(self.options.edit);
         definitions.extend(self.options.commands.definition());
+        let history_enabled = !matches!(self.options.history, HistoryMode::Conversation);
+        let freshness = self.options.freshness_instructions.unwrap_or(history_enabled);
+        let projection = self.options.stale_projection.unwrap_or(history_enabled);
         let profile = json!({"model":client.config().model,"effort":client.config().reasoning_effort,
             "gateway":client.config().base_url,"tools_revision":revision(&serde_json::to_vec(&definitions).map_err(|e|e.to_string())?),
             "binary_revision":self.binary_revision,"history_mode":format!("{:?}",self.options.history),
-            "validation":self.options.commands,"workspace":self.ctx.root()});
+            "freshness_instructions":freshness,"stale_projection":projection,"history_budget_bytes":self.options.history_budget,
+            "validation":self.options.commands,"validation_programs":self.options.commands.program_revisions(),
+            "workspace":self.ctx.root()});
         let mut checkpoint = self.checkpoint()?;
-        if let Some(prompt) = prompt {
-            if checkpoint.run > 0 && checkpoint.final_text.is_none() {
-                return Err("A run is pending. Resume it before starting a new request.".to_owned());
+        let entry = match start {
+            Start::Prompt(prompt) => {
+                if checkpoint.run > 0 && checkpoint.final_text.is_none() {
+                    return Err("A run is pending. Use --resume or --continue before starting a new request.".to_owned());
+                }
+                Some(json!({"text":prompt,"profile":profile}))
             }
+            Start::Resume => {
+                if checkpoint.run == 0 {
+                    return Err("No run to resume.".to_owned());
+                }
+                if let Some(final_text) = checkpoint.final_text {
+                    return Ok(final_text);
+                }
+                if checkpoint.profile != profile {
+                    return Err("Resume with the original model, executable, tool definitions, history mode, and validation configuration. Use --continue to start a linked run with current conditions.".to_owned());
+                }
+                None
+            }
+            Start::Continue(correction) => Some(self.continuation(&checkpoint, &profile, correction)?),
+        };
+        if let Some(data) = entry {
             let run = self.journal.events.len() + 1;
-            self.journal
-                .append(run, "user", json!({"text":prompt,"profile":profile}))?;
-            checkpoint.run = run;
-            checkpoint.round = 0;
-            checkpoint.final_text = None;
-            checkpoint.prior_len = checkpoint.input.len();
-            checkpoint
-                .input
-                .push(json!({"role":"user","content":prompt}));
-        } else {
-            if checkpoint.run == 0 {
-                return Err("No run to resume.".to_owned());
-            }
-            if let Some(final_text) = checkpoint.final_text {
-                return Ok(final_text);
-            }
-            if checkpoint.profile != profile {
-                return Err("Resume with the original model, executable, tool definitions, history mode, and validation configuration.".to_owned());
-            }
+            self.journal.append(run, "user", data.clone())?;
+            self.apply_user(&mut checkpoint, run, &data)?;
         }
         let run = checkpoint.run;
         for step in 0..=client.config().max_turns {
@@ -178,14 +231,26 @@ impl Session {
 
             let round = checkpoint.round + 1;
             let mut body = client.request_body(&checkpoint.input, None, &definitions);
-            let changes = if matches!(self.options.history, HistoryMode::Conversation) {
-                Vec::new()
-            } else {
+            let changes = if projection {
                 self.project_workspace_evidence(&mut body["input"], checkpoint.prior_len)
+            } else {
+                Vec::new()
             };
-            body["instructions"] = json!(self.instructions(run, changes)?);
-            let received = Instant::now();
-            let (request, response) = self.request(client, run, round, &profile, &body)?;
+            let records = if history_enabled {
+                history::related(&self.ctx, &self.journal, run, &profile, &self.options.commands)
+            } else {
+                Vec::new()
+            };
+            let auxiliary = history::prepare(
+                self.options.history,
+                freshness,
+                projection,
+                self.options.history_budget,
+                changes,
+                records,
+            );
+            body["instructions"] = json!(format!("{INSTRUCTIONS}{}", auxiliary.suffix));
+            let (request, response, elapsed_ms) = self.request(client, run, round, &profile, &body, &auxiliary.audit)?;
             let output = self.journal.store_json(&json!(response.output_items))?;
             let raw_response = self.journal.store_json(&response.response)?;
             let calls = match calls_from(&response.output_items, run, round) {
@@ -196,7 +261,7 @@ impl Session {
                         "model_rejected",
                         json!({"request":request,"round":round,
                         "output":output,"raw_response":raw_response,"error":error,
-                        "usage":response.usage_reported.then_some(response.usage)}),
+                        "usage":response.usage_reported.then_some(response.usage),"elapsed_ms":elapsed_ms}),
                     )?;
                     return Err(error);
                 }
@@ -206,7 +271,7 @@ impl Session {
                 .then(|| extract_final_text(&response.output_items));
             let usage = response.usage_reported.then_some(response.usage);
             self.journal.append(run,"model_response",json!({"request":request,"round":round,"output":output,
-                "raw_response":raw_response,"response_id":response.response_id,"usage":usage,"elapsed_ms":received.elapsed().as_millis(),
+                "raw_response":raw_response,"response_id":response.response_id,"usage":usage,"elapsed_ms":elapsed_ms,
                 "final_text":final_text}))?;
             if let Some(final_text) = final_text {
                 return Ok(final_text);
@@ -230,16 +295,20 @@ impl Session {
         round: usize,
         profile: &Value,
         body: &Value,
-    ) -> Result<(usize, ParsedResponse), String> {
+        history_auxiliary: &Value,
+    ) -> Result<(usize, ParsedResponse, u128), String> {
         let payload = self.journal.store_json(body)?;
         let mut observer = NoopRunObserver;
         for attempt in 1..=2 {
             let request=self.journal.append(run,"model_request",json!({"round":round,"attempt":attempt,"input":payload,
-                "model":client.config().model,"tools_revision":profile["tools_revision"],"effort":client.config().reasoning_effort}))?;
+                "model":client.config().model,"tools_revision":profile["tools_revision"],"effort":client.config().reasoning_effort,
+                "history_auxiliary":history_auxiliary}))?;
+            let started = Instant::now();
             match client.send_turn(body, &mut observer) {
-                Ok(response) => return Ok((request, response)),
+                Ok(response) => return Ok((request, response, started.elapsed().as_millis())),
                 Err(error) => {
-                    self.journal.append(run,"model_error",json!({"request":request,"round":round,"error":error.to_string(),"usage":null}))?;
+                    self.journal.append(run,"model_error",json!({"request":request,"round":round,"error":error.to_string(),"usage":null,
+                        "elapsed_ms":started.elapsed().as_millis()}))?;
                     let temporary = matches!(&error,TransportError::Http(detail) if ["HTTP 429:","HTTP 502:","HTTP 503:","HTTP 504:"].iter().any(|prefix|detail.starts_with(prefix)));
                     if attempt == 1 && temporary {
                         std::thread::sleep(Duration::from_millis(500));
@@ -256,17 +325,7 @@ impl Session {
         let mut checkpoint = Checkpoint::default();
         for event in &self.journal.events {
             match event.kind.as_str() {
-                "user" => {
-                    checkpoint.run = event.run;
-                    checkpoint.round = 0;
-                    checkpoint.profile = event.data["profile"].clone();
-                    checkpoint.final_text = None;
-                    checkpoint.pending.clear();
-                    checkpoint.prior_len = checkpoint.input.len();
-                    checkpoint
-                        .input
-                        .push(json!({"role":"user","content":event.data["text"]}));
-                }
+                "user" => self.apply_user(&mut checkpoint, event.run, &event.data)?,
                 "model_response" => {
                     let output = self.journal.load_json(&event.data["output"])?;
                     let items = output
@@ -297,6 +356,81 @@ impl Session {
         Ok(checkpoint)
     }
 
+    fn apply_user(&self, checkpoint: &mut Checkpoint, run: usize, data: &Value) -> Result<(), String> {
+        if let Some(link) = data.get("continuation") {
+            let output = self.journal.load_json(&link["outputs"])?;
+            let outputs = output.as_array().ok_or("Continuation has no output array")?;
+            if link["run"] != checkpoint.run
+                || checkpoint.final_text.is_some()
+                || outputs.len() != checkpoint.pending.len()
+                || outputs.iter().zip(&checkpoint.pending).any(|(output, call)| {
+                    output["type"] != "function_call_output" || output["call_id"] != call.call_id
+                })
+            {
+                return Err("Continuation does not match the prior pending calls.".to_owned());
+            }
+            checkpoint.input.extend(outputs.iter().cloned());
+        }
+        checkpoint.run = run;
+        checkpoint.round = 0;
+        checkpoint.profile = data["profile"].clone();
+        checkpoint.final_text = None;
+        checkpoint.pending.clear();
+        checkpoint.prior_len = checkpoint.input.len();
+        checkpoint.input.push(json!({"role":"user","content":data["text"]}));
+        Ok(())
+    }
+
+    fn continuation(&self, checkpoint: &Checkpoint, profile: &Value, correction: Option<&str>) -> Result<Value, String> {
+        if checkpoint.run == 0 || checkpoint.final_text.is_some() {
+            return Err("No unfinished run to continue.".to_owned());
+        }
+        let outputs: Vec<Value> = checkpoint.pending.iter().map(|call| {
+            function_output(call, &self.observe_pending(call))
+        }).collect();
+        let outputs = self.journal.store_json(&json!(outputs))?;
+        let mut text = format!(
+            "Continue the unfinished task from run {} under the current configuration. Pending calls from that run were reconciled from the journal and current workspace. Use the recorded outcomes and inspect the current workspace before deciding what work remains.",
+            checkpoint.run
+        );
+        if let Some(correction) = correction {
+            text.push_str("\n\nUser correction to the original task:\n");
+            text.push_str(correction);
+        }
+        Ok(json!({"text":text,"profile":profile,"continuation":{
+            "run":checkpoint.run,"round":checkpoint.round,"outputs":outputs,"correction":correction
+        }}))
+    }
+
+    fn observe_pending(&self, call: &Call) -> Value {
+        let records = self.journal.events.iter().rev().filter(|e| e.data["operation"] == call.operation);
+        for event in records {
+            match event.kind.as_str() {
+                "edit_receipt" | "validation_receipt" => return event.data.clone(),
+                "edit_intent" => {
+                    let path = event.data["path"].as_str().unwrap_or("");
+                    let current = tools::workspace_revision(&self.ctx, path);
+                    let disposition = match current.as_ref() {
+                        Some(observed) if observed == &event.data["after"] => "observed_target",
+                        Some(observed) if observed == &event.data["before"] => "observed_original",
+                        Some(_) => "observed_different_version",
+                        None => "current_version_unavailable",
+                    };
+                    return json!({"status":"error","code":"CONTINUATION_OBSERVATION","outcome":disposition,
+                        "intent_event":event.seq,"operation":call.operation,"path":path,
+                        "expected_revision":event.data["before"],"planned_revision":event.data["after"],
+                        "current_revision":current,"reason":"Inspect the live file before deciding on another edit."});
+                }
+                "validation_intent" => return json!({"status":"error","code":"VALIDATION_INTERRUPTED",
+                    "intent_event":event.seq,"operation":call.operation,
+                    "reason":"The original check has no completed receipt."}),
+                _ => {}
+            }
+        }
+        json!({"status":"error","code":"CALL_SUPERSEDED","operation":call.operation,
+            "reason":"The pending call was superseded at the start of the linked continuation."})
+    }
+
     fn execute(&mut self, run: usize, round: usize, call: &Call) -> Result<Value, String> {
         let args: Result<Value, _> = serde_json::from_str(&call.raw_args);
         let input = self.journal.put(call.raw_args.as_bytes())?;
@@ -313,6 +447,7 @@ impl Session {
             }
             ("read", Ok(args)) => tools::read(&self.ctx, &mut self.journal, run, &args)?,
             ("research", Ok(args)) => tools::research(&self.ctx, &mut self.journal, run, &args)?,
+            ("search_result", Ok(args)) => tools::search_result(&self.journal, &args)?,
             ("edit" | "write", Ok(args)) => tools::modify(
                 &self.ctx,
                 &mut self.journal,
@@ -398,65 +533,6 @@ impl Session {
         changes
     }
 
-    fn instructions(&self, run: usize, workspace_changes: Vec<Value>) -> Result<String, String> {
-        if matches!(self.options.history, HistoryMode::Conversation) {
-            return Ok(INSTRUCTIONS.to_owned());
-        }
-        let validated = self
-            .journal
-            .events
-            .iter()
-            .rev()
-            .find(|event| event.kind == "validation_receipt");
-        let related = match validated {
-            Some(event) => {
-                let current = validation::workspace_version(&self.ctx, &self.journal).ok();
-                let changes = self
-                    .journal
-                    .events
-                    .iter()
-                    .rev()
-                    .filter(|e| e.seq > event.seq && e.kind == "edit_receipt")
-                    .take(4)
-                    .map(|e| json!(e))
-                    .collect::<Vec<_>>();
-                Some((current, json!(event), changes))
-            }
-            None => None,
-        };
-        let rejection = self
-            .journal
-            .events
-            .iter()
-            .rev()
-            .find(|e| e.run == run && e.kind == "tool_result")
-            .filter(|e| e.data["status"] == "error")
-            .map(|e| json!(e));
-        if related.is_none() && rejection.is_none() && workspace_changes.is_empty() {
-            return Ok(format!("{INSTRUCTIONS}\n{FRESHNESS_INSTRUCTIONS}"));
-        }
-        let facts = match self.options.history {
-            HistoryMode::Events => {
-                let mut records = Vec::new();
-                if let Some((current, receipt, changes)) = related {
-                    records.push(receipt);
-                    records.extend(changes);
-                    records
-                        .push(json!({"kind":"workspace_observation","workspace_current":current}));
-                }
-                records.extend(rejection);
-                if !workspace_changes.is_empty() {
-                    records.push(json!({"kind":"workspace_changes","sources":workspace_changes}));
-                }
-                json!(records)
-            }
-            HistoryMode::Facts => json!({"validation":related.map(|(current,receipt,changes)|{
-                json!({"workspace_current":current,"receipt":receipt,"changes_after":changes})
-            }),"current_run_rejection":rejection,"workspace_changes":workspace_changes}),
-            HistoryMode::Conversation => unreachable!(),
-        };
-        Ok(format!("{INSTRUCTIONS}\n{FRESHNESS_INSTRUCTIONS}\n\nRelated recorded facts. A validation receipt with workspace_revision different from workspace_current only establishes the tested version.\n{facts}"))
-    }
 }
 
 fn tool_payload(item: &Value) -> Option<Value> {
@@ -486,6 +562,7 @@ fn project_historical_source(evidence: &mut Value, checked: &BTreeMap<String, Va
         .expect("workspace evidence is an object");
     for field in [
         "content",
+        "data",
         "text",
         "text_complete",
         "diff",
@@ -557,14 +634,15 @@ pub fn inspect(
             .get(seq.checked_sub(1).ok_or("Event numbers start at 1")?)
             .ok_or("Unknown event")?;
         let mut output = json!(entry);
-        let key = match entry.kind.as_str() {
-            "tool_attempt" => Some("arguments"),
-            "tool_result" => Some("output"),
-            "model_request" => Some("input"),
-            "model_response" => Some("raw_response"),
+        let payload = match entry.kind.as_str() {
+            "user" => entry.data["continuation"]["outputs"].as_str(),
+            "tool_attempt" => entry.data["arguments"].as_str(),
+            "tool_result" => entry.data["output"].as_str(),
+            "model_request" => entry.data["input"].as_str(),
+            "model_response" => entry.data["raw_response"].as_str(),
             _ => None,
         };
-        if let Some(hash) = key.and_then(|key| entry.data[key].as_str()) {
+        if let Some(hash) = payload {
             let bytes = get_blob(&dir, hash)?;
             let receipt = String::from_utf8_lossy(&bytes);
             let mut detail: Value =

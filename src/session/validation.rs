@@ -68,6 +68,15 @@ impl Commands {
         Some(definition("validate", &format!("Run a configured check against the current workspace. Read the exit status and tested revision before making a verification claim. {descriptions}"),
             json!({"check":{"type":"string","enum":names}}), &["check"]))
     }
+
+    pub(crate) fn program_revision(&self, check: &str) -> Option<String> {
+        let command = self.0.get(check)?;
+        fs::read(&command.program).ok().map(|bytes| revision(&bytes))
+    }
+
+    pub(crate) fn program_revisions(&self) -> BTreeMap<&str, Option<String>> {
+        self.0.keys().map(|check| (check.as_str(), self.program_revision(check))).collect()
+    }
 }
 
 fn manifest(

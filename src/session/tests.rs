@@ -1,10 +1,27 @@
 use super::journal::{revision, Journal};
-use super::tools::{modify, read, research, EditMode};
-use super::{Options, Session};
+use super::tools::{modify, read, research, search_result, EditMode};
+use super::{history, validation, Commands, HistoryMode, Options, Session};
 use crate::budget::json_byte_len;
 use crate::workspace::{WorkspaceConfig, WorkspaceContext};
 use serde_json::{json, Value};
 use std::fs;
+
+#[test]
+fn create_accepts_an_empty_optional_revision_but_still_requires_an_absent_file() {
+    let root = tempfile::tempdir().unwrap();
+    let mut session = Session::open(root.path(), "work", Options::default()).unwrap();
+    let args = json!({"path":"evidence.md","mode":"create","expected_revision":"","content":"first"});
+    let created = modify(&session.ctx, &mut session.journal, 1, "create", "write", EditMode::Text, &args).unwrap();
+    assert_eq!(created["status"], "ok");
+    let mut args = args;
+    args["content"] = json!("should not replace");
+    let rejected = modify(&session.ctx, &mut session.journal, 1, "again", "write", EditMode::Text, &args).unwrap();
+    assert_eq!(rejected["code"], "REVISION_CONFLICT");
+    assert_eq!(fs::read(root.path().join("evidence.md")).unwrap(), b"first");
+    args["expected_revision"] = json!(created["revision"]);
+    let wrong_mode = modify(&session.ctx, &mut session.journal, 1, "wrong-mode", "write", EditMode::Text, &args).unwrap();
+    assert_eq!(wrong_mode["omit"], json!(["expected_revision"]));
+}
 
 #[test]
 fn research_samples_keep_source_coordinates_and_shared_edit_revision() {
@@ -170,6 +187,12 @@ fn model_request_marks_stale_history_and_keeps_the_archived_snapshot_available()
         &json!({"scope":"workspace","query":"limit="}),
     )
     .unwrap();
+    let old_count = search_result(
+        &session.journal,
+        &json!({"result_ref":old["result_ref"],"query":"limit=30"}),
+    )
+    .unwrap();
+    assert_eq!(old_count["data"]["total_occurrences"], 1);
     fs::write(&file, "limit=60\n").unwrap();
     let new = read(
         &session.ctx,
@@ -181,10 +204,11 @@ fn model_request_marks_stale_history_and_keeps_the_archived_snapshot_available()
     let mut request = json!([
         {"type":"function_call_output","call_id":"old","output":old.to_string()},
         {"type":"function_call_output","call_id":"old_hit","output":old_hit.to_string()},
+        {"type":"function_call_output","call_id":"old_count","output":old_count.to_string()},
         {"role":"user","content":"What is the current limit?"},
         {"type":"function_call_output","call_id":"new","output":new.to_string()}
     ]);
-    let changed = session.project_workspace_evidence(&mut request, 2);
+    let changed = session.project_workspace_evidence(&mut request, 3);
     assert!(
         changed.is_empty(),
         "The current read supersedes the old observation."
@@ -197,7 +221,11 @@ fn model_request_marks_stale_history_and_keeps_the_archived_snapshot_available()
     assert_eq!(search["hits"][0]["historical"], true);
     assert!(search["hits"][0].get("text").is_none());
     assert_eq!(search["hits"][0]["result_ref"], old["result_ref"]);
-    assert_eq!(request[3]["output"], new.to_string());
+    let count: Value = serde_json::from_str(request[2]["output"].as_str().unwrap()).unwrap();
+    assert_eq!(count["historical"], true);
+    assert!(count.get("data").is_none());
+    assert_eq!(count["result_ref"], old["result_ref"]);
+    assert_eq!(request[4]["output"], new.to_string());
     let archived = read(
         &session.ctx,
         &mut session.journal,
@@ -261,4 +289,91 @@ fn recovered_conflict_exposes_the_exact_difference_from_the_intended_version() {
         fs::read_to_string(path).unwrap(),
         "timeout=60\n# hand edited\n"
     );
+}
+
+#[test]
+fn historical_validation_distinguishes_changed_conditions_from_unchanged_workspace() {
+    let root = tempfile::tempdir().unwrap();
+    let programs = tempfile::tempdir().unwrap();
+    let executable = programs.path().join("check.exe");
+    fs::write(&executable, b"validator v1").unwrap();
+    fs::write(root.path().join("settings.txt"), b"timeout=30\n").unwrap();
+    let mut session = Session::open(root.path(), "work", Options::default()).unwrap();
+    let old_command = json!({"program":executable,"args":[],"description":"Check v1",
+                             "artifacts":[],"timeout_seconds":30});
+    let new_command = json!({"program":executable,"args":[],"description":"Check v2",
+                             "artifacts":[],"timeout_seconds":30});
+    let commands: Commands = serde_json::from_value(json!({"sample":new_command})).unwrap();
+    let workspace = validation::workspace_version(&session.ctx, &session.journal).unwrap();
+    session.journal.append(1, "user", json!({"profile":{
+        "model":"model-a","effort":"low","gateway":"gateway",
+        "tools_revision":"tools-a","binary_revision":"binary-a",
+        "validation":{"sample":old_command}
+    }})).unwrap();
+    session.journal.append(1, "validation_intent", json!({
+        "operation":"1.1.1","config":old_command,"workspace_revision":workspace
+    })).unwrap();
+    let receipt = session.journal.append(1, "validation_receipt", json!({
+        "check":"sample","operation":"1.1.1","workspace_revision":workspace,
+        "program_revision":revision(b"validator v1"),"result_ref":"r2","passed":true
+    })).unwrap();
+    fs::write(executable, b"validator v2").unwrap();
+    let profile = json!({"model":"model-b","effort":"low","gateway":"gateway",
+        "tools_revision":"tools-b","binary_revision":"binary-b",
+        "validation":{"sample":new_command}
+    });
+    let records = history::related(&session.ctx, &session.journal, 2, &profile, &commands);
+    let provenance = &records[0];
+    assert_eq!(provenance["validation_event"], receipt);
+    assert_eq!(provenance["validation_run"], 1);
+    assert_eq!(provenance["workspace_revision_comparison"]["status"], "same");
+    for field in ["tools_revision","binary_revision","validation_config_revision","validation_program_revision","model"] {
+        assert_eq!(provenance["comparisons"][field]["status"], "changed");
+    }
+    assert_eq!(provenance["comparisons"]["validation_program_revision"]["current"], revision(b"validator v2"));
+    assert_eq!(provenance["comparisons"]["effort"]["status"], "same");
+    assert_eq!(provenance["result_ref"], "r2");
+
+    session.journal.append(2, "user", json!({"profile":profile})).unwrap();
+    let current = session.journal.append(2, "validation_receipt", json!({
+        "check":"sample","operation":"2.1.1","workspace_revision":workspace,
+        "program_revision":revision(b"validator v2"),"result_ref":"r3","passed":true
+    })).unwrap();
+    let records = history::related(&session.ctx, &session.journal, 2, &profile, &commands);
+    let auxiliary = history::prepare(HistoryMode::Events, false, false, 8192, Vec::new(), records);
+    let sent: Value = serde_json::from_str(auxiliary.suffix.lines().last().unwrap()).unwrap();
+    assert_eq!(sent[0]["validation_event"], receipt);
+    assert_eq!(sent[0]["scope"], "previous_runs");
+    assert_eq!(sent[0]["comparisons"]["tools_revision"]["status"], "changed");
+    assert_eq!(sent[1]["validation_event"], current);
+    assert_eq!(sent[1]["scope"], "current_run");
+    assert_eq!(sent[1]["comparisons"]["tools_revision"]["status"], "same");
+}
+
+#[test]
+fn history_representations_send_the_same_records_under_the_same_budget() {
+    let records = vec![
+        json!({"kind":"validation_provenance","validation_event":4,"check":"build"}),
+        json!({"kind":"validation_receipt","seq":4,"data":{"passed":true}}),
+        json!({"kind":"edit_receipt","seq":8,"data":{"detail":"a".repeat(1900)}}),
+    ];
+    let options = |mode| history::prepare(mode, false, false, 1024, Vec::new(), records.clone());
+    let events = options(HistoryMode::Events);
+    let facts = options(HistoryMode::Facts);
+    let sent_events: Value = serde_json::from_str(events.suffix.lines().last().unwrap()).unwrap();
+    let sent_facts: Value = serde_json::from_str(facts.suffix.lines().last().unwrap()).unwrap();
+    for record in sent_events.as_array().unwrap() {
+        assert!(sent_facts[record["kind"].as_str().unwrap()]
+            .as_array().unwrap().contains(record));
+    }
+    assert_eq!(sent_facts.as_object().unwrap().values().map(|v| v.as_array().unwrap().len()).sum::<usize>(), 2);
+    assert_eq!(events.audit["fact_count"], 2);
+    assert_eq!(events.audit["facts_revision"], facts.audit["facts_revision"]);
+    for prepared in [events, facts] {
+        assert!(prepared.suffix.len() <= 1024);
+        assert_eq!(prepared.audit["bytes"], prepared.suffix.len());
+        assert_eq!(prepared.audit["freshness_instructions"], false);
+        assert_eq!(prepared.audit["stale_projection"], false);
+        assert!(prepared.audit["tokens"].is_null());
+    }
 }

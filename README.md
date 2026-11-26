@@ -51,14 +51,19 @@ Add `--session` to `agent` or `chat` to let SourceHarness research, read, edit, 
 ```powershell
 cargo run --locked -- agent --root . --session config-review --prompt "Apply the current configuration policy and report the changes."
 cargo run --locked -- agent --root . --session config-review --resume
+cargo run --locked -- agent --root . --session config-review --continue --prompt "Use the updated policy."
 cargo run --locked -- history --root . --session config-review
 ```
 
 Use `history --event <n>` to inspect a request or receipt and `history --ref <ref>` to open its original text. A `result_ref` belongs to its session and retains the old content when a live file changes. A validation receipt includes `workspace_revision`. Use `fork --revision <hash> --to <new-directory>` with the same `--root` and `--session` to open that tested file snapshot in a fresh workspace.
 
-`research` searches the workspace, stored results, and session history. `read` returns literal UTF-8 text and the source revision, with continuation coordinates when a result spans pages. `edit` matches exact old text by default. `--edit-mode range` and `--edit-mode patch` select alternative contracts. The default `--history-mode events` supplies related execution records, and `conversation` and `facts` select the other experiment conditions. Use the same model, executable, tool options, and validation configuration when resuming an unfinished run.
+`research` searches the workspace, stored results, and session history. Literal queries can span lines. Pass the returned `next` arguments back to `research` to enumerate the same stored hit set. Open `arguments_ref` with `read` to retrieve the original arguments of a historical tool call. Use `search_result` on a saved reference for exact occurrence counts, regex searches, and capture aggregation.
 
-The events and facts modes check the versions of file evidence carried into a later request. When a file has changed, the replay links to the original snapshot and directs the model to the current revision. The conversation mode replays the original tool results for comparison. A recovery conflict includes the diff from the planned file to the current file when both versions are available.
+`read` returns literal UTF-8 text and the source revision, with continuation coordinates when a result spans pages. `edit` matches exact old text by default. `--edit-mode range` and `--edit-mode patch` select alternative contracts. Use `--resume` with the original model, executable, tool options, and validation setup. Use `--continue` to open a linked run under current conditions and optionally supply a correction. It reports the observed state of outstanding calls for the model to decide what remains. A recovery conflict includes the diff from the planned file to the current file when both versions are available.
+
+The default `--history-mode events` attaches a list of related records. `facts` groups the same records by type within the same budget. `conversation` uses the conversation alone by default. The related records link earlier validation reports to the workspace, tool definitions, executable, model, and check configuration in effect when they ran.
+
+Use `--freshness-instructions on|off` and `--stale-projection on|off` to vary the reminder and the treatment of stale file contents independently. A reference to the original snapshot remains available when a result is reduced to a version notice. `--history-budget` sets the auxiliary input budget in bytes. Request events audit the selected facts and bytes. The model provider reports tokens for the whole request.
 
 To give the model a validation tool, pass `--checks <file>` with a map of check names to executable configurations. For example, the following command runs a workspace test script against a captured file snapshot and records the checked revision, program digest, stdout, stderr, and exit status.
 
@@ -78,5 +83,9 @@ Reports distinguish a completed write receipt from a matching target observed du
 Run the real-model comparison with the release executable and a fresh output directory.
 
 ```powershell
-python scripts/eval_session.py --exe target/release/source_harness.exe --out target/session-eval
+python -B -m unittest discover -s scripts -p "test_*.py"
+python -B scripts/eval_session.py --exe target/release/source_harness.exe --out target/session-eval
+python -B scripts/eval_session.py --exe target/release/source_harness.exe --out target/session-history --profile history --repeats 2
 ```
+
+The runner scores the final workspace against fixtures and expected values held outside the model workspace. A passing run also needs a successful model-initiated validation of the delivered revision. The report keeps known token and latency totals and counts requests with missing usage separately.

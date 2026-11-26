@@ -1,12 +1,16 @@
 use super::journal::{revision, Artifact, Journal};
 use crate::budget::{json_byte_len, truncate_utf8_bytes, MAX_RESPONSE_BYTES};
-use crate::store::build_line_spans;
+use crate::store::{build_line_spans, Snapshot};
 use crate::workspace::WorkspaceContext;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
+
+#[cfg(test)]
+#[path = "retrieval_tests.rs"]
+mod retrieval_tests;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub enum EditMode {
@@ -37,17 +41,26 @@ pub fn definitions(mode: EditMode) -> Vec<Value> {
         EditMode::Patch => definition("edit", "Apply a unified text patch to exactly one file revision. Use the supplied path as the target and preserve unrelated content.",
             json!({"path":path,"expected_revision":version,"patch":{"type":"string"}}), &["path","expected_revision","patch"]),
     };
+    let mut indexed_search = crate::registry::search_result_schema();
+    indexed_search["description"] = json!("Search lines in a saved session result for exact counts, matching lines, or regex capture groups. Use a result_ref from this session. Omit line bounds for one full scan. Use matching_lines for a line count and total_occurrences for a match count. Once those counts answer the task, respond without another search.");
+    indexed_search["parameters"]["properties"]["result_ref"]["description"] =
+        json!("Copy the immutable result_ref from a prior session tool result.");
     vec![
-        definition("research", "Locate literal evidence by file name or content in the workspace, an existing result, or this session's history. The returned scope and coverage tell you what was actually searched. Hits identify original content and can be read or edited from directly when sufficient.",
-            json!({"scope":{"type":"string","enum":["workspace","result","history"]},"path":path,"result_ref":reference,
-                "query":{"type":"string","description":"Case-sensitive literal. Omit to list workspace paths or recent history."},
-                "limit":{"type":"integer","minimum":1,"maximum":20,"default":8}}), &["scope"]),
+        definition("research", "Find literal evidence in the workspace, a saved result, or session history. Pass next back to research to enumerate the saved match set. Read the hit's result_ref for the original bytes. Historical calls can include arguments_ref for read.",
+            json!({"scope":{"type":"string","enum":["workspace","result","history","page"]},
+                "path":{"type":"string","description":"Workspace scope only. Omit to search the whole workspace."},
+                "result_ref":{"type":"string","description":"Result or page scope only. Copy a saved result_ref."},
+                "query":{"type":"string","description":"Case-sensitive literal, including exact line endings for multiline text. Omit to list workspace paths or recent history."},
+                "offset":{"type":"integer","minimum":0,"description":"Copy the offset from next when scope is page."},
+                "limit":{"type":"integer","minimum":1,"maximum":20,"default":8,"description":"Hits per page, up to 20. Follow next for more."}}), &["scope"]),
         definition("read", "Read exact original text by file path or an immutable result_ref. A path supplied with a reference must match its source. Use 1-based source lines or UTF-8 byte offsets. Follow next exactly to keep the same snapshot and requested range.",
             json!({"path":path,"result_ref":reference,"start_line":{"type":"integer","minimum":1},
                 "line_count":{"type":"integer","minimum":1},"start_byte":{"type":"integer","minimum":0},"end_byte":{"type":"integer","minimum":0}}), &[]),
         edit,
-        definition("write", "Create a UTF-8 file if absent or replace its complete contents using the revision you observed. Parent directory must exist. Returns a verified revision and diff.",
-            json!({"path":path,"content":{"type":"string"},"mode":{"type":"string","enum":["create","replace"]},"expected_revision":version}), &["path","content","mode"]),
+        definition("write", "Create a UTF-8 file at an absent path with mode=create. For create, omit expected_revision. For a full replacement, use mode=replace and pass the observed revision of that same file. Parent directory must exist. Returns a verified revision and diff.",
+            json!({"path":path,"content":{"type":"string"},"mode":{"type":"string","enum":["create","replace"]},
+                "expected_revision":{"type":"string","description":"Use the observed file revision for mode=replace. Omit this parameter for mode=create."}}), &["path","content","mode"]),
+        indexed_search,
     ]
 }
 
@@ -70,6 +83,7 @@ struct ResearchArgs {
     result_ref: Option<String>,
     query: Option<String>,
     limit: Option<usize>,
+    offset: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -398,36 +412,208 @@ pub fn read(ctx: &WorkspaceContext, journal: &mut Journal, run: usize, args: &Va
     read_page(journal, &artifact, &args)
 }
 
-fn match_lines(
-    text: &str,
-    query: &str,
-    artifact: &Artifact,
-    hits: &mut Vec<Value>,
-    matches: &mut usize,
-) {
-    let mut offset = 0;
-    for (idx, line) in text.split_inclusive('\n').enumerate() {
-        if line.contains(query) {
-            *matches += 1;
-            if hits.len() >= 2048 {
-                offset += line.len();
-                continue;
-            }
-            let complete = line.len() <= 320;
-            let excerpt = truncate_utf8_bytes(line, 320).0;
-            hits.push(json!({"source":artifact.source,"revision":artifact.revision,"result_ref":artifact.result_ref,
-                "range":{"start_line":idx+1,"end_line":idx+1,"byte_start":offset,"byte_end":offset+line.len()},
-                "text":excerpt,"text_complete":complete}));
+pub fn search_result(journal: &Journal, args: &Value) -> Reply {
+    if args["query"]
+        .as_str()
+        .is_some_and(|query| query.contains('\n'))
+        && args["match_mode"].as_str().unwrap_or("literal") == "literal"
+    {
+        return Ok(rejected(
+            "INVALID_ARGUMENT",
+            "search_result matches within lines. Use research on this result for a multiline literal.",
+        ));
+    }
+    let mut metadata = json!({});
+    let outcome = crate::search::execute_snapshot(&args.to_string(), |reference| {
+        let Some(artifact) = journal.resolve(reference) else {
+            return Ok(None);
+        };
+        let raw =
+            String::from_utf8(journal.get(&artifact.revision)?).map_err(|err| err.to_string())?;
+        metadata = json!({"source":artifact.source,"revision":artifact.revision,"result_ref":artifact.result_ref});
+        Ok(Some(Snapshot::new(artifact.result_ref, raw)))
+    })?;
+    let mut envelope = match outcome {
+        Ok(envelope) => envelope,
+        Err(error) => return serde_json::to_value(error).map_err(|err| err.to_string()),
+    };
+    let available = MAX_RESPONSE_BYTES.saturating_sub(json_byte_len(&metadata) - 1);
+    crate::search::enforce_response_budget(&mut envelope, available);
+    let mut value = serde_json::to_value(envelope).map_err(|err| err.to_string())?;
+    if json_byte_len(&value) <= available {
+        value
+            .as_object_mut()
+            .ok_or("Expected search envelope object")?
+            .append(
+                metadata
+                    .as_object_mut()
+                    .ok_or("Expected search metadata object")?,
+            );
+    }
+    Ok(value)
+}
+
+const RESEARCH_BATCH_SIZE: usize = 128;
+
+#[derive(Default)]
+struct ResearchHits {
+    count: usize,
+    pending: Vec<Value>,
+    batches: Vec<String>,
+}
+
+impl ResearchHits {
+    fn push(&mut self, journal: &Journal, hit: Value) -> Result<(), String> {
+        self.count += 1;
+        self.pending.push(hit);
+        if self.pending.len() == RESEARCH_BATCH_SIZE {
+            self.flush(journal)?;
         }
-        offset += line.len();
+        Ok(())
+    }
+
+    fn flush(&mut self, journal: &Journal) -> Result<(), String> {
+        if !self.pending.is_empty() {
+            let bytes = serde_json::to_vec(&self.pending).map_err(|err| err.to_string())?;
+            self.batches.push(journal.put(&bytes)?);
+            self.pending.clear();
+        }
+        Ok(())
     }
 }
 
+#[derive(Serialize, Deserialize)]
+struct ResearchReport {
+    coverage: Value,
+    count: usize,
+    batches: Vec<String>,
+}
+
+impl ResearchReport {
+    fn batch(&self, journal: &Journal, index: usize) -> Result<Vec<Value>, String> {
+        let hash = self
+            .batches
+            .get(index)
+            .ok_or("Missing archived research batch")?;
+        serde_json::from_slice(&journal.get(hash)?).map_err(|err| err.to_string())
+    }
+
+    fn page(
+        &self,
+        journal: &mut Journal,
+        run: usize,
+        artifact: &Artifact,
+        offset: usize,
+        limit: usize,
+    ) -> Reply {
+        if offset > self.count {
+            return Ok(rejected(
+                "INVALID_RANGE",
+                "Use an offset from the saved research result.",
+            ));
+        }
+        let end = offset.saturating_add(limit).min(self.count);
+        let mut hits = Vec::new();
+        let mut index = offset;
+        while index < end {
+            let batch = self.batch(journal, index / RESEARCH_BATCH_SIZE)?;
+            let skip = index % RESEARCH_BATCH_SIZE;
+            let available = batch.len().saturating_sub(skip);
+            let take = available.min(end - index);
+            if take == 0 {
+                return Err("Incomplete archived research batch".to_owned());
+            }
+            hits.extend(batch.into_iter().skip(skip).take(take));
+            index += take;
+        }
+        loop {
+            let shown = hits.len();
+            let next_offset = offset + shown;
+            let mut value = json!({"status":"ok","source":{"kind":"research","scope":artifact.source["scope"]},
+                "revision":artifact.revision,"result_ref":artifact.result_ref,
+                "coverage":self.coverage,"presentation":{"matching_items":self.count,"retained":self.count,
+                    "offset":offset,"shown":shown,"complete":offset==0 && shown==self.count},"hits":hits});
+            if next_offset < self.count {
+                value["next"] = json!({"scope":"page","result_ref":artifact.result_ref,
+                    "offset":next_offset,"limit":limit});
+            }
+            if json_byte_len(&value) <= MAX_RESPONSE_BYTES {
+                return Ok(value);
+            }
+            if hits.len() == 1 {
+                let payload = journal.artifact(
+                    run,
+                    json!({"kind":"research_hit","report":artifact.result_ref,"index":offset}),
+                    &serde_json::to_vec_pretty(&hits[0]).map_err(|err| err.to_string())?,
+                )?;
+                hits[0] = json!({"delivery":"folded","result_ref":payload.result_ref});
+            } else {
+                hits.pop();
+            }
+        }
+    }
+}
+
+fn research_hit(
+    artifact: &Artifact,
+    start: usize,
+    end: usize,
+    range: (usize, usize),
+    text: &str,
+) -> Value {
+    let (excerpt, truncated) = truncate_utf8_bytes(text, 320);
+    json!({"source":artifact.source,"revision":artifact.revision,"result_ref":artifact.result_ref,
+        "range":{"start_line":start,"end_line":end,"byte_start":range.0,"byte_end":range.1},
+        "text":excerpt,"text_complete":!truncated})
+}
+
+fn match_lines(
+    journal: &Journal,
+    text: &str,
+    query: &str,
+    artifact: &Artifact,
+    hits: &mut ResearchHits,
+) -> Result<(), String> {
+    if query.contains('\n') {
+        let lines = line_offsets(text);
+        for (start, exact) in text.match_indices(query) {
+            let stop = start + exact.len();
+            hits.push(
+                journal,
+                research_hit(
+                    artifact,
+                    line_location(&lines, start),
+                    line_location(&lines, stop - 1),
+                    (start, stop),
+                    exact,
+                ),
+            )?;
+        }
+        return Ok(());
+    }
+
+    let mut offset = 0;
+    for (idx, line) in text.split_inclusive('\n').enumerate() {
+        let end = offset + line.len();
+        if line.contains(query) {
+            hits.push(
+                journal,
+                research_hit(artifact, idx + 1, idx + 1, (offset, end), line),
+            )?;
+        }
+        offset = end;
+    }
+    Ok(())
+}
+
 pub fn research(ctx: &WorkspaceContext, journal: &mut Journal, run: usize, args: &Value) -> Reply {
-    let args: ResearchArgs = match parse(args) {
+    let mut args: ResearchArgs = match parse(args) {
         Ok(v) => v,
         Err(e) => return Ok(e),
     };
+    args.path = args.path.filter(|value| !value.is_empty());
+    args.result_ref = args.result_ref.filter(|value| !value.is_empty());
+    args.query = args.query.filter(|value| !value.is_empty());
     let query = args.query.as_deref().unwrap_or("");
     let limit = args.limit.unwrap_or(8);
     if !(1..=20).contains(&limit) || query.len() > 512 {
@@ -436,8 +622,42 @@ pub fn research(ctx: &WorkspaceContext, journal: &mut Journal, run: usize, args:
             "Use a query of at most 512 bytes and limit 1 to 20.",
         ));
     }
-    let mut hits = Vec::new();
-    let mut matching_items = 0;
+    if args.scope == "page" {
+        if args.path.is_some() || args.query.is_some() || args.offset.is_none() {
+            return Ok(rejected(
+                "INVALID_ARGUMENT",
+                "Use the next arguments from a research result.",
+            ));
+        }
+        let offset = args.offset.unwrap_or_default();
+        let Some(artifact) = args
+            .result_ref
+            .as_deref()
+            .and_then(|reference| journal.resolve(reference))
+        else {
+            return Ok(rejected(
+                "RESULT_NOT_FOUND",
+                "Use the result_ref from a research result.",
+            ));
+        };
+        let Some(report_hash) = artifact.source["research_report"].as_str() else {
+            return Ok(rejected(
+                "INVALID_ARGUMENT",
+                "This reference has no research continuation.",
+            ));
+        };
+        let report: ResearchReport =
+            serde_json::from_slice(&journal.get(report_hash)?).map_err(|err| err.to_string())?;
+        return report.page(journal, run, &artifact, offset, limit);
+    }
+    if args.offset.unwrap_or_default() != 0 {
+        return Ok(rejected(
+            "INVALID_ARGUMENT",
+            "Use offset only with scope=page.",
+        ));
+    }
+
+    let mut hits = ResearchHits::default();
     let mut inspected = 0;
     let mut skipped = 0;
     let mut scanned_all = true;
@@ -465,8 +685,7 @@ pub fn research(ctx: &WorkspaceContext, journal: &mut Journal, run: usize, args:
                 let display = ctx.relative_display(&path);
                 if query.is_empty() {
                     inspected += 1;
-                    matching_items += 1;
-                    hits.push(json!({"source":source(&display)}));
+                    hits.push(journal, json!({"source":source(&display)}))?;
                     continue;
                 }
                 let Ok(Some(bytes)) = file_bytes(&path, ctx.config().max_grep_file_bytes) else {
@@ -482,10 +701,9 @@ pub fn research(ctx: &WorkspaceContext, journal: &mut Journal, run: usize, args:
                 let text = std::str::from_utf8(&bytes).map_err(|e| e.to_string())?;
                 if text.contains(query) {
                     let artifact = file_snapshot(journal, run, &display, &bytes)?;
-                    match_lines(text, query, &artifact, &mut hits, &mut matching_items);
+                    match_lines(journal, text, query, &artifact, &mut hits)?;
                 } else if display.contains(query) {
-                    matching_items += 1;
-                    hits.push(json!({"source":source(&display)}));
+                    hits.push(journal, json!({"source":source(&display)}))?;
                 }
             }
         }
@@ -498,12 +716,12 @@ pub fn research(ctx: &WorkspaceContext, journal: &mut Journal, run: usize, args:
             };
             let raw = journal.get(&artifact.revision)?;
             match_lines(
+                journal,
                 std::str::from_utf8(&raw).map_err(|e| e.to_string())?,
                 query,
                 &artifact,
                 &mut hits,
-                &mut matching_items,
-            );
+            )?;
             inspected = 1;
         }
         "history" if args.path.is_none() && args.result_ref.is_none() => {
@@ -524,7 +742,13 @@ pub fn research(ctx: &WorkspaceContext, journal: &mut Journal, run: usize, args:
                     ) && !(e.kind == "artifact"
                         && matches!(
                             e.data["source"]["kind"].as_str(),
-                            Some("history" | "history_result")
+                            Some(
+                                "history"
+                                    | "history_arguments"
+                                    | "history_result"
+                                    | "research"
+                                    | "research_hit"
+                            )
                         ))
                 })
                 .cloned()
@@ -547,18 +771,28 @@ pub fn research(ctx: &WorkspaceContext, journal: &mut Journal, run: usize, args:
                     found = String::from_utf8_lossy(&journal.get(hash)?).contains(query);
                 }
                 if found {
-                    matching_items += 1;
-                    if hits.len() >= 128 {
-                        continue;
-                    }
                     let source = json!({"kind":"history","event":event.seq});
-                    let record_artifact = journal.artifact(
-                        run,
-                        source.clone(),
-                        &serde_json::to_vec_pretty(&record).map_err(|err| err.to_string())?,
-                    )?;
-                    record["source"] = source;
-                    record["result_ref"] = json!(record_artifact.result_ref);
+                    let attempt = match event.kind.as_str() {
+                        "tool_attempt" => Some(&event),
+                        "tool_result" => event.data["attempt"]
+                            .as_u64()
+                            .and_then(|seq| usize::try_from(seq).ok())
+                            .and_then(|seq| seq.checked_sub(1))
+                            .and_then(|index| journal.events.get(index))
+                            .filter(|entry| entry.kind == "tool_attempt"),
+                        _ => None,
+                    };
+                    if let Some(attempt) = attempt {
+                        let arguments = journal.get(
+                            attempt.data["arguments"]
+                                .as_str()
+                                .ok_or("Missing recorded arguments")?,
+                        )?;
+                        let arguments_source =
+                            json!({"kind":"history_arguments","event":attempt.seq});
+                        let artifact = journal.artifact(run, arguments_source, &arguments)?;
+                        record["arguments_ref"] = json!(artifact.result_ref);
+                    }
                     if event.kind == "tool_result" {
                         let output = journal.load_json(&event.data["output"])?;
                         let payload = journal.artifact(
@@ -571,34 +805,42 @@ pub fn research(ctx: &WorkspaceContext, journal: &mut Journal, run: usize, args:
                     if event.kind == "validation_receipt" {
                         record["output_ref"] = event.data["result_ref"].clone();
                     }
-                    hits.push(record);
+                    let record_artifact = journal.artifact(
+                        run,
+                        source.clone(),
+                        &serde_json::to_vec_pretty(&record).map_err(|err| err.to_string())?,
+                    )?;
+                    record["source"] = source;
+                    record["result_ref"] = json!(record_artifact.result_ref);
+                    hits.push(journal, record)?;
                 }
             }
         }
         _ => {
             return Ok(rejected(
                 "INVALID_ARGUMENT",
-                "Choose workspace, result with a query and result_ref, or history.",
+                "Choose workspace, result with a query and result_ref, history, or a saved page.",
             ))
         }
     }
+    hits.flush(journal)?;
+    let report = ResearchReport {
+        coverage: json!({"items_scanned":inspected,"skipped_items":skipped,"scan_complete":scanned_all&&skipped==0}),
+        count: hits.count,
+        batches: hits.batches,
+    };
+    let preview = if report.count == 0 {
+        Vec::new()
+    } else {
+        report.batch(journal, 0)?
+    };
+    let hash = journal.put(&serde_json::to_vec(&report).map_err(|err| err.to_string())?)?;
     let artifact = journal.artifact(
         run,
-        json!({"kind":"research","scope":args.scope}),
-        &serde_json::to_vec_pretty(&hits).map_err(|e| e.to_string())?,
+        json!({"kind":"research","scope":args.scope,"research_report":hash}),
+        &serde_json::to_vec_pretty(&preview).map_err(|err| err.to_string())?,
     )?;
-    let retained = hits.len();
-    hits.truncate(limit);
-    loop {
-        let shown = hits.len();
-        let value = json!({"status":"ok","source":artifact.source,"revision":artifact.revision,"result_ref":artifact.result_ref,
-            "coverage":{"items_scanned":inspected,"skipped_items":skipped,"scan_complete":scanned_all&&skipped==0},
-            "presentation":{"matching_items":matching_items,"retained":retained,"shown":shown,"complete":shown==matching_items},"hits":hits});
-        if json_byte_len(&value) <= MAX_RESPONSE_BYTES {
-            return Ok(value);
-        }
-        hits.pop();
-    }
+    report.page(journal, run, &artifact, 0, limit)
 }
 
 fn conflict(
@@ -745,13 +987,29 @@ pub fn modify(
             Ok(v) => v,
             Err(e) => return Ok(e),
         };
-        match (args.mode.as_str(), args.expected_revision) {
+        // Some providers supply an empty string for an omitted optional argument.
+        let expected = args.expected_revision.filter(|value| !value.is_empty());
+        match (args.mode.as_str(), expected) {
             ("create", None) => (args.path, None, None, Some(args.content)),
             ("replace", Some(rev)) => (args.path, Some(rev), None, Some(args.content)),
+            ("create", Some(_)) => {
+                let mut error = rejected(
+                    "INVALID_ARGUMENT",
+                    "Remove the expected_revision parameter from this call. For mode=create, send path, content and mode only. The tool checks that the file is absent.",
+                );
+                error["omit"] = json!(["expected_revision"]);
+                return Ok(error);
+            }
+            ("replace", None) => {
+                return Ok(rejected(
+                    "INVALID_ARGUMENT",
+                    "For mode=replace, set expected_revision to the current revision of this path from read or research.",
+                ));
+            }
             _ => {
                 return Ok(rejected(
                     "INVALID_ARGUMENT",
-                    "Create requires absence. Replace requires expected_revision.",
+                    "Set mode to create for an absent path or replace for an existing file.",
                 ))
             }
         }

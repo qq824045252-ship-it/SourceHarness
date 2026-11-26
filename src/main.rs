@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 use source_harness::bench;
 use source_harness::eval;
 use source_harness::registry;
-use source_harness::session::{self, Commands, EditMode, HistoryMode, Options, Session};
+use source_harness::session::{self, Commands, EditMode, HistoryMode, Options, Session, DEFAULT_HISTORY_BUDGET};
 use source_harness::store::{FoldStore, IngestOutcome};
 use source_harness::transport::injection::{
     EnvelopeInjector, InlineUserMessageInjector, NativeFunctionCallInjector,
@@ -62,11 +62,23 @@ fn run_cli() -> Result<(), String> {
                 let mut session = Session::open(&PathBuf::from(root), &name, session_options(&args[1..])?)?;
                 let prompt = parse_flag(&args[1..], "--prompt")?;
                 let resume = args[1..].iter().any(|arg| arg == "--resume");
-                if resume == prompt.is_some() {
-                    return Err("Supply either --prompt or --resume for this session.".to_owned());
+                let continuation = args[1..].iter().any(|arg| arg == "--continue");
+                if resume && (continuation || prompt.is_some())
+                    || (!resume && !continuation && prompt.is_none())
+                {
+                    return Err("Supply --prompt, --resume, or --continue with an optional --prompt correction.".to_owned());
                 }
-                println!("{}", session.run(&ResponsesClient::new(cfg), prompt.as_deref())?);
+                let client = ResponsesClient::new(cfg);
+                let result = if continuation {
+                    session.continue_pending(&client, prompt.as_deref())?
+                } else {
+                    session.run(&client, prompt.as_deref())?
+                };
+                println!("{result}");
                 return Ok(());
+            }
+            if args[1..].iter().any(|arg| matches!(arg.as_str(), "--resume" | "--continue")) {
+                return Err("--resume and --continue require --session.".to_owned());
             }
             let prompt = parse_flag(&args[1..], "--prompt")?
                 .ok_or_else(|| "Missing --prompt <text>".to_owned())?;
@@ -172,7 +184,25 @@ fn session_options(args: &[String]) -> Result<Options, String> {
     };
     let commands = parse_flag(args, "--checks")?.map(|path| Commands::from_file(&PathBuf::from(path)))
         .transpose()?.unwrap_or_default();
-    Ok(Options { edit, history, commands })
+    let switch = |flag| match parse_flag(args, flag)?.as_deref() {
+        None => Ok(None),
+        Some("on") => Ok(Some(true)),
+        Some("off") => Ok(Some(false)),
+        _ => Err(format!("Expected {flag} on or off")),
+    };
+    let history_budget = parse_flag(args, "--history-budget")?
+        .map(|raw| raw.parse())
+        .transpose()
+        .map_err(|_| "Expected --history-budget <bytes>".to_owned())?
+        .unwrap_or(DEFAULT_HISTORY_BUDGET);
+    Ok(Options {
+        edit,
+        history,
+        commands,
+        freshness_instructions: switch("--freshness-instructions")?,
+        stale_projection: switch("--stale-projection")?,
+        history_budget,
+    })
 }
 
 fn run_session_chat(mut session: Session, client: ResponsesClient) -> Result<(), String> {
@@ -509,7 +539,9 @@ fn print_usage() {
          source_harness run --file <path> --prompt <text> [--strategy inline|native] [--model <m>] [--effort <e>]\n  \
          source_harness agent --root <dir> --prompt <text> [--model <m>] [--effort <e>]\n  \
          source_harness chat --root <dir> [--model <m>] [--effort <e>]\n  \
-         source_harness agent --root <dir> --session <name> [--prompt <text> | --resume] [--checks <file>]\n  \
+         source_harness agent --root <dir> --session <name> [--prompt <text> | --resume | --continue [--prompt <correction>]] [--checks <file>]\n  \
+         Session options: [--edit-mode text|range|patch] [--history-mode conversation|events|facts]\n  \
+                          [--freshness-instructions on|off] [--stale-projection on|off] [--history-budget <bytes>]\n  \
          source_harness history --root <dir> --session <name> [--event <n> | --ref <ref>]\n  \
          source_harness fork --root <dir> --session <name> --revision <hash> --to <new-dir>\n  \
          source_harness eval [--root <dir>] [--model <m>] [--effort <e>] [--out <json_path>]\n  \

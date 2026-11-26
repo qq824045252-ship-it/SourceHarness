@@ -181,17 +181,35 @@ impl Serialize for SearchRequest {
     }
 }
 
-fn execute_inner(raw_args: &str, store: &FoldStore) -> Result<OkEnvelope<SearchData>, ErrorPayload> {
+fn execute_inner(
+    raw_args: &str,
+    store: &FoldStore,
+) -> Result<OkEnvelope<SearchData>, ErrorPayload> {
     let args = parse_and_validate_args(raw_args)?;
-    let snapshot = store.get(&args.result_ref).ok_or_else(|| {
-        ErrorPayload::new(
-            ErrorCode::ResultNotFound,
-            Some("result_ref"),
-            "UNKNOWN_OR_EVICTED_REF",
-        )
-    })?;
+    let snapshot = store.get(&args.result_ref).ok_or_else(unknown_reference)?;
 
     run_search(&args, &snapshot)
+}
+
+fn unknown_reference() -> ErrorPayload {
+    ErrorPayload::new(
+        ErrorCode::ResultNotFound,
+        Some("result_ref"),
+        "UNKNOWN_OR_EVICTED_REF",
+    )
+}
+
+pub(crate) fn execute_snapshot(
+    raw_args: &str,
+    load: impl FnOnce(&str) -> Result<Option<Snapshot>, String>,
+) -> Result<Result<OkEnvelope<SearchData>, ErrorPayload>, String> {
+    let args = match parse_and_validate_args(raw_args) {
+        Ok(args) => args,
+        Err(err) => return Ok(Err(err)),
+    };
+    Ok(load(&args.result_ref)?
+        .ok_or_else(unknown_reference)
+        .and_then(|snapshot| run_search(&args, &snapshot)))
 }
 
 fn parse_and_validate_args(raw_args: &str) -> Result<ParsedArgs, ErrorPayload> {
@@ -600,7 +618,7 @@ fn run_search(args: &ParsedArgs, snapshot: &Snapshot) -> Result<OkEnvelope<Searc
         aggregation,
     });
 
-    enforce_response_budget(&mut envelope);
+    enforce_response_budget(&mut envelope, MAX_RESPONSE_BYTES);
     Ok(envelope)
 }
 
@@ -609,8 +627,8 @@ fn run_search(args: &ParsedArgs, snapshot: &Snapshot) -> Result<OkEnvelope<Searc
 /// 2) Pop tail of `aggregation.value_counts` and mark `value_counts_truncated = true`.
 ///
 /// Scalar truth fields are NEVER altered.
-fn enforce_response_budget(envelope: &mut OkEnvelope<SearchData>) {
-    while json_byte_len(envelope) > MAX_RESPONSE_BYTES {
+pub(crate) fn enforce_response_budget(envelope: &mut OkEnvelope<SearchData>, max_bytes: usize) {
+    while json_byte_len(envelope) > max_bytes {
         if let Some(hits) = envelope.data.hits.as_mut() {
             if !hits.is_empty() {
                 hits.pop();

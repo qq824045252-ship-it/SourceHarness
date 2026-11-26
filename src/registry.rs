@@ -24,7 +24,7 @@ pub fn dispatch(name: &str, raw_args: &str, store: &FoldStore) -> String {
     }
 }
 
-fn search_result_schema() -> Value {
+pub(crate) fn search_result_schema() -> Value {
     json!({
         "type": "function",
         "name": SEARCH_RESULT_NAME,
