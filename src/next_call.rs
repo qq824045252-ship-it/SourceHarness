@@ -105,7 +105,7 @@ fn request(c: &Case) -> Value {
     req
 }
 
-fn unique_arguments(input: &str) -> Result<Value, serde_json::Error> {
+pub(crate) fn unique_arguments(input: &str) -> Result<Value, serde_json::Error> {
     use serde::de::{Deserializer, Error, MapAccess, Visitor};
     use serde::Deserialize;
 

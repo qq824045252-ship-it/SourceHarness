@@ -1,4 +1,6 @@
 mod capability;
+mod fold_store;
+mod folding_experiment;
 mod model;
 mod next_call;
 mod result_pages;
@@ -70,6 +72,23 @@ async fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        ["experiment-folding", mode @ ("calibrate" | "holdout" | "natural"), first, count, log] => {
+            match (first.parse::<usize>(), count.parse::<usize>()) {
+                (Ok(first), Ok(count @ 1..=100)) if first < 100 && first + count <= 100 => {
+                    match folding_experiment::run(mode, first, count, log).await {
+                        Ok(()) => ExitCode::SUCCESS,
+                        Err(e) => {
+                            eprintln!("{e}");
+                            ExitCode::FAILURE
+                        }
+                    }
+                }
+                _ => {
+                    eprintln!("Use 0..99 first index and 1..100 count within the stage.");
+                    ExitCode::from(2)
+                }
+            }
+        }
         ["check-next-call", n] => run_next_call(n, next_call::DEFAULT_WORKERS).await,
         ["check-next-call", n, workers] => match workers.parse::<usize>() {
             Ok(workers @ 1..=4) => run_next_call(n, workers).await,
