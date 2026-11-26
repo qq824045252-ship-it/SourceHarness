@@ -1,4 +1,7 @@
-use crate::model::{self, ToolCall};
+use crate::{
+    model::{self, ToolCall},
+    tools,
+};
 use serde_json::{json, Value};
 use std::{
     fs::{self, OpenOptions},
@@ -62,7 +65,8 @@ fn reply_messages(
     }
     for id in known {
         let result = &results.iter().find(|(i, _)| *i == id).unwrap().1;
-        messages.push(json!({"role":"tool","tool_call_id":id,"content":result.to_string()}));
+        messages
+            .push(json!({"role":"tool","tool_call_id":id,"content":tools::agent_content(result)}));
     }
     Ok(request)
 }
@@ -121,9 +125,15 @@ async fn one(attempt: usize, kind: usize) -> Result<(bool, Value), AnyError> {
     let mut req = model::request(false, variants[kind][(attempt / 3) % 3]);
     req["tools"] = json!([schema(name, desc)]);
     req["tool_choice"] = json!("auto");
+    let first_started = epoch_ms();
     let (first, raw) = match model::send(&req).await {
         Ok(x) => x,
-        Err(e) => return Ok((false, json!({"request":req,"error_class":e.to_string()}))),
+        Err(e) => {
+            return Ok((
+                false,
+                json!({"request":req,"error_class":e.to_string(),"external":e.confirmed_external(),"request_start_unix_ms":first_started,"request_stage":"initial"}),
+            ))
+        }
     };
     let wire = model::safe_wire(&raw, false).ok();
     let call = match first.calls.as_slice() {
@@ -144,8 +154,8 @@ async fn one(attempt: usize, kind: usize) -> Result<(bool, Value), AnyError> {
             format!("{}:{secret}", if accepted { "YES" } else { "NO" }),
         ),
         _ => (
-            json!({"ok":false,"error_code":format!("missing_{secret}")}),
-            format!("FAILED:missing_{secret}"),
+            missing_record(&secret),
+            format!("FAILED:record_not_found_{secret}"),
         ),
     };
     let original: Value = serde_json::from_slice(&raw)?;
@@ -153,13 +163,14 @@ async fn one(attempt: usize, kind: usize) -> Result<(bool, Value), AnyError> {
     let mut follow = reply_messages(&req, assistant, &[(call.id.clone(), result.clone())])?;
     follow["tool_choice"] = json!("none");
     let safe_follow = safe_request(&follow);
+    let follow_started = epoch_ms();
     let (second, wire2) = match model::send(&follow).await {
         Ok(x) => x,
         Err(e) => {
             return Ok((
                 false,
                 json!({"request":req,"first_response":wire,"tool_call_id":call.id,"tool_result":result,
-                                                 "followup":safe_follow,"error_class":e.to_string()}),
+                                                 "followup":safe_follow,"error_class":e.to_string(),"external":e.confirmed_external(),"request_start_unix_ms":follow_started,"request_stage":"tool_result"}),
             ))
         }
     };
@@ -169,6 +180,26 @@ async fn one(attempt: usize, kind: usize) -> Result<(bool, Value), AnyError> {
         json!({"request":req,"first_response":wire,"tool_call_id":call.id,"tool_result":result,
                     "followup":safe_follow,"assertion":"exact runtime value and status; separator whitespace ignored for R02/R03","response":model::safe_wire(&wire2,false).ok(),"expected":expected,"actual":second.text}),
     ))
+}
+
+fn missing_record(secret: &str) -> Value {
+    // Keep the opaque suffix to prove the model received the actual response.
+    // The deterministic reason is not derived from that suffix.
+    let mut result = tools::failure(
+        "RECORD_NOT_FOUND",
+        "execution",
+        "The configured fixture record does not exist. This tool takes no arguments.",
+        None,
+    );
+    result["error_code"] = json!(format!("record_not_found_{secret}"));
+    result
+}
+
+fn epoch_ms() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
 }
 
 pub async fn run(n: usize) -> Result<(), AnyError> {
@@ -185,37 +216,47 @@ pub async fn run(n: usize) -> Result<(), AnyError> {
     let mut out = opts.open(&path)?;
     let mut attempted = [0; 3];
     let mut passed = [0; 3];
-    // At most three synthetic cases at once; no automatic retries.
-    for base in (0..n).step_by(3) {
-        let mut jobs = tokio::task::JoinSet::new();
-        for i in base..(base + 3).min(n) {
-            jobs.spawn(async move {
-                let start = Instant::now();
-                let (pass, detail) = one(i, i % 3)
-                    .await
-                    .unwrap_or_else(|_| (false, json!({"error_class":"local_error"})));
-                (i, pass, detail, start.elapsed().as_millis())
-            });
-        }
-        while let Some(job) = jobs.join_next().await {
-            let (i, pass, detail, ms) = job?;
-            let kind = i % 3;
-            attempted[kind] += 1;
-            passed[kind] += usize::from(pass);
-            writeln!(
-                out,
-                "{}",
-                json!({"test_id":format!("R0{}",kind+1),"attempt_id":format!("{epoch}-{i}"),
-                "status":if pass {"PASS"} else {"FAIL"},"detail":detail,"elapsed_ms":ms})
-            )?;
-            out.flush()?;
+    let mut excluded = [0; 3];
+    // Correctness runs are paced, not load tests. Never automatically rerun a case.
+    for i in 0..n {
+        let kind = i % 3;
+        let start = Instant::now();
+        let (pass, detail) = one(i, kind)
+            .await
+            .unwrap_or_else(|_| (false, json!({"error_class":"local_error"})));
+        let ms = start.elapsed().as_millis();
+        let external = detail["external"] == true;
+        attempted[kind] += 1;
+        passed[kind] += usize::from(pass);
+        excluded[kind] += usize::from(external);
+        writeln!(
+            out,
+            "{}",
+            json!({"test_id":format!("R0{}",kind+1),
+            "attempt_id":format!("{epoch}-{i}"),"status":if pass {"PASS"} else if external {"EXCLUDED_UPSTREAM"} else {"FAIL"},
+            "detail":detail,"elapsed_ms":ms})
+        )?;
+        out.flush()?;
+        if i + 1 < n {
+            tokio::time::sleep(std::time::Duration::from_millis(850)).await;
         }
     }
+    let minimum = if n >= 100 { 30 } else { 1 };
     for i in 0..3 {
-        println!("R0{}: {}/{}", i + 1, passed[i], attempted[i]);
+        println!(
+            "R0{}: {}/{} valid ({} attempted, {} confirmed upstream exclusions)",
+            i + 1,
+            passed[i],
+            attempted[i] - excluded[i],
+            attempted[i],
+            excluded[i]
+        );
     }
     println!("Evidence: {path}");
-    if (0..3).all(|i| attempted[i] > 0 && 100 * passed[i] >= 95 * attempted[i]) {
+    if (0..3).all(|i| {
+        attempted[i] - excluded[i] >= minimum
+            && 100 * passed[i] >= 95 * (attempted[i] - excluded[i])
+    }) {
         Ok(())
     } else {
         Err("Roundtrip gate not met".into())
@@ -232,6 +273,21 @@ mod tests {
         assert!(!answer_matches(2, "FAILED: xyz", "FAILED:abc"));
         assert!(!answer_matches(2, "FAILED: abc\nextra", "FAILED:abc"));
         assert!(!answer_matches(0, "ab c", "abc"));
+    }
+    #[test]
+    fn missing_record_cannot_be_mistaken_for_missing_argument() {
+        let r = missing_record("0123");
+        assert_eq!(r["error_code"], "record_not_found_0123");
+        assert_eq!(r["error"]["retryable"], false);
+        assert!(r["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("takes no arguments"));
+        assert!(!answer_matches(
+            2,
+            "FAILED:record_not_found_0123\nMissing parameter, retry.",
+            "FAILED:record_not_found_0123"
+        ));
     }
     #[test]
     fn r04_r05_match_by_id_and_reject_bad_or_duplicate_ids() {

@@ -11,7 +11,8 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug, PartialEq, Eq)]
 pub enum Error {
     Transport,
-    Timeout,
+    TimeoutBeforeHeaders,
+    TimeoutReadingBody,
     Auth,
     RateLimit,
     Http(u16),
@@ -20,15 +21,20 @@ pub enum Error {
     Protocol,
     TooLarge,
 }
+impl Error {
+    pub fn confirmed_external(&self) -> bool {
+        matches!(self, Self::RateLimit | Self::Http(504))
+    }
+}
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{self:?}")
     }
 }
 impl std::error::Error for Error {}
-fn network(e: reqwest::Error) -> Error {
+fn network(e: reqwest::Error, timeout: Error) -> Error {
     if e.is_timeout() {
-        Error::Timeout
+        timeout
     } else {
         Error::Transport
     }
@@ -263,20 +269,24 @@ pub async fn send(request: &Value) -> Result<(Reply, Vec<u8>)> {
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(45))
         .build()
-        .map_err(network)?;
+        .map_err(|e| network(e, Error::TimeoutBeforeHeaders))?;
     let mut res = client
         .post(ENDPOINT)
         .json(request)
         .send()
         .await
-        .map_err(network)?;
+        .map_err(|e| network(e, Error::TimeoutBeforeHeaders))?;
     if !res.status().is_success() {
         return Err(status(res.status()));
     }
     let stream = request["stream"] == true;
     let mut sse = Sse::default();
     let mut raw = Vec::new();
-    while let Some(chunk) = res.chunk().await.map_err(network)? {
+    while let Some(chunk) = res
+        .chunk()
+        .await
+        .map_err(|e| network(e, Error::TimeoutReadingBody))?
+    {
         if raw.len() + chunk.len() > CAP {
             return Err(Error::TooLarge);
         }

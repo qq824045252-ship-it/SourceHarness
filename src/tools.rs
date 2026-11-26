@@ -1,6 +1,52 @@
 use crate::model::{self, ToolCall};
 use serde_json::{json, Value};
 
+const RESULT_CAP: usize = 1024;
+
+pub fn failure(code: &str, stage: &str, message: &str, field: Option<&str>) -> Value {
+    let mut value = json!({"ok":false,"error":{
+        "code":code,"stage":stage,"message":message,"retryable":false
+    }});
+    if let Some(field) = field {
+        value["error"]["field"] = json!(field);
+    }
+    value
+}
+
+// Do not cut serialized JSON or send raw artifacts to the agent.
+pub fn agent_content(result: &Value) -> String {
+    let content = result.to_string();
+    if content.len() <= RESULT_CAP {
+        content
+    } else {
+        failure(
+            "RESULT_TOO_LARGE",
+            "result",
+            "Result exceeds the inline limit; request a smaller selection.",
+            None,
+        )
+        .to_string()
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ValidationError(&'static str, Option<&'static str>);
+impl ValidationError {
+    fn result(&self) -> Value {
+        let message = match self.0 {
+            "UNKNOWN_TOOL" => "Tool is not registered.",
+            "MISSING_CALL_ID" => "Tool call ID is missing.",
+            "MISSING_ARGUMENT" => "Provide this required argument.",
+            "INVALID_ARGUMENT_TYPE" => "Argument must be a signed integer.",
+            "ARGUMENT_OUT_OF_RANGE" => "Argument must be between -1000000 and 1000000.",
+            "UNEXPECTED_ARGUMENT" => "Only arguments a and b are allowed.",
+            "DUPLICATE_ARGUMENT" => "An argument must not be specified twice.",
+            _ => "Arguments must be a valid JSON object.",
+        };
+        failure(self.0, "validation", message, self.1)
+    }
+}
+
 const NAME: &str = "add_numbers";
 const LIMIT: i64 = 1_000_000;
 pub fn add_schema() -> Value {
@@ -68,6 +114,10 @@ pub async fn smoke(execute: bool) -> Result<(), Box<dyn std::error::Error>> {
                     [call] if call.name == NAME => args(call).ok(),
                     _ => None,
                 };
+                let validation_error = match reply.calls.as_slice() {
+                    [call] => args(call).err().map(|e| e.result()),
+                    _ => None,
+                };
                 let exec_result = if execute && got == Some(pair) {
                     execute_add(&reply.calls[0]).ok()
                 } else {
@@ -80,7 +130,7 @@ pub async fn smoke(execute: bool) -> Result<(), Box<dyn std::error::Error>> {
                 };
                 (
                     pass,
-                    json!({"reply":reply,"response":model::safe_wire(&wire,stream).ok(),"args_valid":got.is_some(),"tool_result":exec_result}),
+                    json!({"reply":reply,"response":model::safe_wire(&wire,stream).ok(),"args_valid":got.is_some(),"tool_result":exec_result,"validation_error":validation_error}),
                 )
             }
             Err(e) => (false, json!({"error_class":e.to_string()})),
@@ -102,24 +152,50 @@ pub async fn smoke(execute: bool) -> Result<(), Box<dyn std::error::Error>> {
         Err("Tool smoke did not pass".into())
     }
 }
-fn args(call: &ToolCall) -> Result<(i64, i64), &'static str> {
+fn args(call: &ToolCall) -> Result<(i64, i64), ValidationError> {
     if call.name != NAME {
-        return Err("unknown_tool");
+        return Err(ValidationError("UNKNOWN_TOOL", None));
+    }
+    if call.id.trim().is_empty() {
+        return Err(ValidationError("MISSING_CALL_ID", None));
     }
     #[derive(serde::Deserialize)]
     #[serde(deny_unknown_fields)]
     struct AddArgs {
-        a: i64,
-        b: i64,
+        #[serde(default, deserialize_with = "present")]
+        a: Option<Value>,
+        #[serde(default, deserialize_with = "present")]
+        b: Option<Value>,
     }
-    let AddArgs { a, b } =
-        serde_json::from_str(&call.arguments).map_err(|_| "invalid_arguments")?;
-    if !(-LIMIT..=LIMIT).contains(&a) || !(-LIMIT..=LIMIT).contains(&b) {
-        return Err("invalid_arguments");
+    fn present<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Value>, D::Error> {
+        serde::Deserialize::deserialize(d).map(Some)
     }
-    Ok((a, b))
+    if !call.arguments.trim_start().starts_with('{') {
+        return Err(ValidationError("INVALID_ARGUMENTS", None));
+    }
+    let AddArgs { a, b } = serde_json::from_str(&call.arguments).map_err(|e| {
+        let text = e.to_string();
+        if text.starts_with("duplicate field") {
+            ValidationError("DUPLICATE_ARGUMENT", None)
+        } else if text.starts_with("unknown field") {
+            ValidationError("UNEXPECTED_ARGUMENT", None)
+        } else {
+            ValidationError("INVALID_ARGUMENTS", None)
+        }
+    })?;
+    fn read(value: Option<Value>, field: &'static str) -> Result<i64, ValidationError> {
+        let n = value
+            .ok_or(ValidationError("MISSING_ARGUMENT", Some(field)))?
+            .as_i64()
+            .ok_or(ValidationError("INVALID_ARGUMENT_TYPE", Some(field)))?;
+        if !(-LIMIT..=LIMIT).contains(&n) {
+            return Err(ValidationError("ARGUMENT_OUT_OF_RANGE", Some(field)));
+        }
+        Ok(n)
+    }
+    Ok((read(a, "a")?, read(b, "b")?))
 }
-fn execute_add(call: &ToolCall) -> Result<i64, &'static str> {
+fn execute_add(call: &ToolCall) -> Result<i64, ValidationError> {
     let (a, b) = args(call)?;
     Ok(a + b)
 }
@@ -153,19 +229,34 @@ mod tests {
     }
     #[test]
     fn e02_invalid_and_e03_unknown() {
-        for x in [
-            r#"{"a":"5","b":7}"#,
-            r#"{"a":1}"#,
-            r#"{"a":1,"a":2,"b":3}"#,
-            r#"{"a":1000001,"b":0}"#,
-            r#"{"a":3,"b":4,"c":1}"#,
-            "{",
+        for (x, code, field) in [
+            (r#"{"a":"5","b":7}"#, "INVALID_ARGUMENT_TYPE", Some("a")),
+            (r#"{"a":null,"b":7}"#, "INVALID_ARGUMENT_TYPE", Some("a")),
+            (r#"{"a":1}"#, "MISSING_ARGUMENT", Some("b")),
+            (r#"{"a":1,"a":2,"b":3}"#, "DUPLICATE_ARGUMENT", None),
+            (r#"{"a":1000001,"b":0}"#, "ARGUMENT_OUT_OF_RANGE", Some("a")),
+            (r#"{"a":3,"b":4,"c":1}"#, "UNEXPECTED_ARGUMENT", None),
+            ("{", "INVALID_ARGUMENTS", None),
+            ("[1,2]", "INVALID_ARGUMENTS", None),
         ] {
-            assert_eq!(execute_add(&call(NAME, x)), Err("invalid_arguments"));
+            let e = execute_add(&call(NAME, x)).unwrap_err();
+            assert_eq!(e, ValidationError(code, field));
+            assert_eq!(e.result()["error"]["code"], code);
         }
         assert_eq!(
-            execute_add(&call("unknown_tool", r#"{"a":5,"b":7}"#)),
-            Err("unknown_tool")
+            execute_add(&call("unknown_tool", "{}")),
+            Err(ValidationError("UNKNOWN_TOOL", None))
+        );
+    }
+
+    #[test]
+    fn oversized_result_does_not_leak_original_content() {
+        let raw = "sensitive-log".repeat(1000);
+        let content = agent_content(&json!({"out":raw}));
+        assert!(!content.contains("sensitive-log"));
+        assert_eq!(
+            serde_json::from_str::<Value>(&content).unwrap()["error"]["code"],
+            "RESULT_TOO_LARGE"
         );
     }
 }
