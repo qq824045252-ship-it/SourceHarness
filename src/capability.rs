@@ -1,4 +1,8 @@
-use crate::{model, result_pages::ResultPages, roundtrip::reply_messages};
+use crate::{
+    model,
+    result_pages::{ResultPages, SequentialPages},
+    roundtrip::reply_messages,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
@@ -230,7 +234,7 @@ struct PageArgs {
 pub async fn smoke_page() -> Result<(), Box<dyn std::error::Error>> {
     let mut req=model::request(false,"Use the fixture result tool. The text has a confirmation code on the page starting at byte offset 256. If the first result is paged, call the supplied page tool with that output_ref as ref and offset 256. Once you obtain the code, reply with only that code.");
     let page_schema = json!({"type":"function","function":{"name":PAGE,"description":"Get one page of this task's in-memory result.","parameters":{
-        "type":"object","properties": {"ref":{"type":"string"},"offset":{"type":"integer","minimum":0}},
+        "type":"object","properties": {"ref":{"type":"string","description":"Use the result output_ref."},"offset":{"type":"integer","minimum":0,"description":"For the next page, copy the result next_offset. For a direct jump, use the requested byte offset."}},
         "required":["ref","offset"],"additionalProperties":false}}});
     req["tools"] = json!([empty_schema(SOURCE, "Get the fixture text."), page_schema]);
     req["tool_choice"] = json!("auto");
@@ -279,6 +283,64 @@ pub async fn smoke_page() -> Result<(), Box<dyn std::error::Error>> {
         return Err("model did not copy the code from the later page".into());
     }
     println!("PASS: model retrieved the later in-memory page and returned its fresh code");
+    Ok(())
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CursorArgs {
+    next_cursor: String,
+}
+
+pub async fn smoke_cursor() -> Result<(), Box<dyn std::error::Error>> {
+    let mut request = model::request(
+        false,
+        "Read the fixture report and its next page. Give me the confirmation code from that page.",
+    );
+    request["tools"] = json!([
+        empty_schema(SOURCE, "Read the first part of the fixture report."),
+        {"type":"function","function":{"name":PAGE,"description":"Fetch the next page of a retained result.","parameters":{
+            "type":"object","properties":{"next_cursor":{"type":"string","description":"Copy the result's next_cursor exactly."}},
+            "required":["next_cursor"],"additionalProperties":false}}}
+    ]);
+    request["tool_choice"] = json!("auto");
+    let (initial, raw) = model::send(&request).await?;
+    let initial_call = validated_call(&initial, SOURCE).ok_or("wrong initial tool call")?;
+    let code = token()?;
+    let mut pages = SequentialPages::default();
+    let page = pages.publish(format!(
+        "{}Confirmation: {code}\n{}",
+        "x".repeat(128),
+        "z".repeat(2048)
+    ));
+    let wanted = page["next_cursor"]
+        .as_str()
+        .ok_or("missing next_cursor")?
+        .to_owned();
+    let follow = reply_messages(
+        &request,
+        assistant(&raw)?,
+        &[(initial_call.id.clone(), page)],
+    )?;
+    let (second, raw) = model::send(&follow).await?;
+    let [call] = second.calls.as_slice() else {
+        return Err("expected one next-page call".into());
+    };
+    let args: CursorArgs = serde_json::from_str(&call.arguments)?;
+    if call.name != PAGE || call.id == initial_call.id || args.next_cursor != wanted {
+        return Err("wrong continuation tool, ID, or cursor".into());
+    }
+    let mut last = reply_messages(
+        &follow,
+        assistant(&raw)?,
+        &[(call.id.clone(), pages.next(&args.next_cursor))],
+    )?;
+    last["tool_choice"] = json!("none");
+    let (reply, _) = model::send(&last).await?;
+    if !reply.calls.is_empty() || !reply.text.contains(&code) {
+        return Err("model did not deliver the code from the next page".into());
+    }
+    println!("PASS: model used a retained-result cursor and returned the next-page code");
     Ok(())
 }
 

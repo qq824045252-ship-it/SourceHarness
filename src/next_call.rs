@@ -81,6 +81,11 @@ fn schema(name: &str) -> Value {
     if !field.is_empty() {
         properties[field] = json!({"type":"string"});
     }
+    if name == "find_prefix" {
+        properties["prefix"]["description"] = json!(
+            "For family-wide search, include the family's final separator and omit the last item component."
+        );
+    }
     json!({"type":"function","function":{"name":name,"description":desc,"parameters":{
       "type":"object","properties":properties,"required":if required {vec![field]} else {Vec::<&str>::new()},"additionalProperties":false}}})
 }

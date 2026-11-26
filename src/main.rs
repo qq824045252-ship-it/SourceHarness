@@ -23,7 +23,7 @@ async fn main() -> ExitCode {
         .as_slice()
     {
         [] | ["--help" | "-h"] => {
-            println!("SourceHarness: Rust tool-calling test harness\n\nUsage: sourceharness [--help | --version | smoke-model | smoke-declare | smoke-execute | roundtrip <3..100> | compare-error-contract <3..100> | check-decisions <1..100> | smoke-result-page | check-next-call <1..100>]");
+            println!("SourceHarness: Rust tool-calling test harness\n\nUsage: sourceharness [--help | --version | smoke-model | smoke-declare | smoke-execute | roundtrip <3..100> | compare-error-contract <3..100> | check-decisions <1..100> | smoke-result-page | smoke-result-cursor | check-next-call <1..100>]");
             ExitCode::SUCCESS
         }
         ["--version" | "-V"] => {
@@ -54,6 +54,13 @@ async fn main() -> ExitCode {
             _ => {
                 eprintln!("Use a sample count from 3 to 100.");
                 ExitCode::from(2)
+            }
+        },
+        ["smoke-result-cursor"] => match capability::smoke_cursor().await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("{e}");
+                ExitCode::FAILURE
             }
         },
         ["smoke-result-page"] => match capability::smoke_page().await {

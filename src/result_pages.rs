@@ -60,6 +60,57 @@ impl ResultPages {
     }
 }
 
+#[derive(Default)]
+pub struct SequentialPages {
+    store: ResultPages,
+    by_cursor: BTreeMap<String, (String, usize)>,
+    by_page: BTreeMap<(String, usize), String>,
+}
+
+impl SequentialPages {
+    pub fn publish(&mut self, text: String) -> Value {
+        let page = self.store.publish(text);
+        self.compact(page)
+    }
+
+    pub fn next(&mut self, cursor: &str) -> Value {
+        let Some((reference, offset)) = self.by_cursor.get(cursor) else {
+            return wire::error("INVALID_RESULT_CURSOR");
+        };
+        let page = self.store.page(reference, *offset);
+        self.compact(page)
+    }
+
+    fn compact(&mut self, mut page: Value) -> Value {
+        let (Some(reference), Some(offset)) =
+            (page["output_ref"].as_str(), page["next_offset"].as_u64())
+        else {
+            if page["output_ref"].is_string() {
+                return wire::ok(page["data"].take());
+            }
+            return page;
+        };
+        let location = (reference.to_owned(), offset as usize);
+        let cursor = if let Some(token) = self.by_page.get(&location) {
+            token.clone()
+        } else {
+            // At most one cursor per retained forward page boundary, even on replay.
+            let mut bytes = [0u8; 16];
+            if getrandom::fill(&mut bytes).is_err() {
+                return json!({"status":"ok","data":page["data"].take(),"next_page_status":"cursor_unavailable"});
+            }
+            let token: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+            if self.by_cursor.contains_key(&token) {
+                return json!({"status":"ok","data":page["data"].take(),"next_page_status":"cursor_unavailable"});
+            }
+            self.by_cursor.insert(token.clone(), location.clone());
+            self.by_page.insert(location, token.clone());
+            token
+        };
+        json!({"status":"ok","data":page["data"].take(),"next_cursor":cursor})
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -94,6 +145,33 @@ mod tests {
             ResultPages::default().page(&reference, 0)["code"],
             "RESULT_NOT_FOUND"
         );
+    }
+
+    #[test]
+    fn cursor_reconstructs_unicode_and_does_not_cross_between_runs() {
+        let mut store = SequentialPages::default();
+        let text = "甲🙂z".repeat(350);
+        let mut page = store.publish(text.clone());
+        let first = page["next_cursor"].as_str().unwrap().to_owned();
+        assert_eq!(store.next("0"), wire::error("INVALID_RESULT_CURSOR"));
+        assert_eq!(
+            SequentialPages::default().next(&first),
+            wire::error("INVALID_RESULT_CURSOR")
+        );
+        let one = store.next(&first);
+        assert_eq!(store.next(&first), one);
+        let mut rebuilt = String::new();
+        loop {
+            assert_eq!(page["status"], "ok");
+            assert!(page.get("offset").is_none());
+            assert!(page.to_string().len() <= INLINE);
+            rebuilt.push_str(page["data"]["chunk"].as_str().unwrap());
+            let Some(cursor) = page["next_cursor"].as_str() else {
+                break;
+            };
+            page = store.next(cursor);
+        }
+        assert_eq!(rebuilt, text);
     }
 
     #[test]
