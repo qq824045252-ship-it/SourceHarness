@@ -363,7 +363,30 @@ async fn evaluate(k: usize) -> Outcome {
     e
 }
 
-pub async fn run(n: usize) -> Result<(), AnyError> {
+async fn evaluate_wave<T, F, Fut>(
+    indices: std::ops::Range<usize>,
+    evaluate_sample: F,
+) -> Result<Vec<(usize, T)>, tokio::task::JoinError>
+where
+    T: Send + 'static,
+    F: Fn(usize) -> Fut,
+    Fut: std::future::Future<Output = T> + Send + 'static,
+{
+    let mut set = tokio::task::JoinSet::new();
+    for i in indices {
+        let job = evaluate_sample(i);
+        set.spawn(async move { (i, job.await) });
+    }
+    let mut done = Vec::new();
+    while let Some(row) = set.join_next().await {
+        done.push(row?);
+    }
+    done.sort_unstable_by_key(|(i, _)| *i);
+    Ok(done)
+}
+pub const DEFAULT_WORKERS: usize = 4;
+
+pub async fn run(n: usize, workers: usize) -> Result<(), AnyError> {
     fs::create_dir_all("evidence")?;
     let path = format!(
         "evidence/next-call-{}-{}.jsonl",
@@ -379,29 +402,43 @@ pub async fn run(n: usize) -> Result<(), AnyError> {
     }
     let mut out = opts.open(&path)?;
     let mut tally = [[0usize; 4]; 8];
-    for i in 0..8 * n {
-        let k = i % 8;
-        let now = Instant::now();
-        let e = evaluate(k).await;
-        let s = &mut tally[k];
-        if !e.upstream {
-            s[0] += 1;
-            s[1] += usize::from(e.tool);
-            s[2] += usize::from(e.decision);
-            s[3] += usize::from(e.delivered);
+    let total = CASES.len() * n;
+    let started = Instant::now();
+    for from in (0..total).step_by(workers) {
+        let to = (from + workers).min(total);
+        let rows = evaluate_wave(from..to, |i| async move {
+            let start = Instant::now();
+            let outcome = evaluate(i % CASES.len()).await;
+            (outcome, start.elapsed().as_millis())
+        })
+        .await?;
+        for (i, (e, elapsed_ms)) in rows {
+            let k = i % CASES.len();
+            let s = &mut tally[k];
+            if !e.upstream {
+                s[0] += 1;
+                s[1] += usize::from(e.tool);
+                s[2] += usize::from(e.decision);
+                s[3] += usize::from(e.delivered);
+            }
+            writeln!(
+                out,
+                "{}",
+                json!({"case":CASES[k],"sample":i/CASES.len(),"workers":workers,"external":e.upstream,
+                 "selected":e.selected,"tool_ok":e.tool,"decision_ok":e.decision,"delivery_ok":e.delivered,
+                 "elapsed_ms":elapsed_ms,"requests":e.trace,"observed":e.observed})
+            )?;
         }
-        writeln!(
-            out,
-            "{}",
-            json!({"case":CASES[k],"sample":i/8,"external":e.upstream,
-             "selected":e.selected,"tool_ok":e.tool,"decision_ok":e.decision,"delivery_ok":e.delivered,
-             "elapsed_ms":now.elapsed().as_millis(),"requests":e.trace,"observed":e.observed})
-        )?;
         out.flush()?;
-        if i + 1 < 8 * n {
+        if to < total {
             tokio::time::sleep(Duration::from_millis(850)).await;
         }
     }
+    println!(
+        "Workers: {workers}; wall time: {} ms",
+        started.elapsed().as_millis()
+    );
+
     for (label, [valid, tool, decision, delivery]) in CASES.into_iter().zip(tally) {
         println!("{label}: tool {tool}/{valid}, next {decision}/{valid}, delivery {delivery}/{valid}, excluded {}",n-valid);
     }
@@ -469,6 +506,25 @@ mod tests {
         ] {
             assert_eq!(search_with("find_prefix", bad), None);
         }
+    }
+
+    #[tokio::test]
+    async fn four_jobs_can_overlap_and_keep_their_original_sample_ids() {
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(DEFAULT_WORKERS));
+        let result = evaluate_wave(4..8, |i| {
+            let barrier = barrier.clone();
+            async move {
+                barrier.wait().await;
+                i * 10
+            }
+        });
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), result)
+                .await
+                .unwrap()
+                .unwrap(),
+            vec![(4, 40), (5, 50), (6, 60), (7, 70)]
+        );
     }
 
     #[test]

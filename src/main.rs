@@ -23,7 +23,7 @@ async fn main() -> ExitCode {
         .as_slice()
     {
         [] | ["--help" | "-h"] => {
-            println!("SourceHarness: Rust tool-calling test harness\n\nUsage: sourceharness [--help | --version | smoke-model | smoke-declare | smoke-execute | roundtrip <3..100> | compare-error-contract <3..100> | check-decisions <1..100> | smoke-result-page | smoke-result-cursor | check-next-call <1..100>]");
+            println!("SourceHarness: Rust tool-calling test harness\n\nUsage: sourceharness [--help | --version | smoke-model | smoke-declare | smoke-execute | roundtrip <3..100> | compare-error-contract <3..100> | check-decisions <1..100> | smoke-result-page | smoke-result-cursor | check-next-call <1..100> [workers:1..4]]");
             ExitCode::SUCCESS
         }
         ["--version" | "-V"] => {
@@ -70,16 +70,15 @@ async fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
-        ["check-next-call", n] => match n.parse::<usize>() {
-            Ok(n @ 1..=100) => match next_call::run(n).await {
-                Ok(()) => ExitCode::SUCCESS,
-                Err(e) => {
-                    eprintln!("{e}");
-                    ExitCode::FAILURE
-                }
-            },
-            _ => ExitCode::from(2),
+        ["check-next-call", n] => run_next_call(n, next_call::DEFAULT_WORKERS).await,
+        ["check-next-call", n, workers] => match workers.parse::<usize>() {
+            Ok(workers @ 1..=4) => run_next_call(n, workers).await,
+            _ => {
+                eprintln!("Use 1 to 4 concurrent test workers.");
+                ExitCode::from(2)
+            }
         },
+
         ["check-decisions", n] => match n.parse::<usize>() {
             Ok(n @ 1..=100) => match capability::run(n).await {
                 Ok(()) => ExitCode::SUCCESS,
@@ -99,6 +98,22 @@ async fn main() -> ExitCode {
         },
         _ => {
             eprintln!("Unknown arguments; use --help.");
+            ExitCode::from(2)
+        }
+    }
+}
+
+async fn run_next_call(n: &str, workers: usize) -> ExitCode {
+    match n.parse::<usize>() {
+        Ok(n @ 1..=100) => match next_call::run(n, workers).await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("{e}");
+                ExitCode::FAILURE
+            }
+        },
+        _ => {
+            eprintln!("Use a sample count from 1 to 100.");
             ExitCode::from(2)
         }
     }
