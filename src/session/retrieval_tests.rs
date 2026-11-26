@@ -1,7 +1,10 @@
-use super::{read, research, search_result, Journal};
+use super::{
+    inspect_artifact_content, read, research, search_result, Journal, ResearchReport,
+    RESEARCH_BATCH_SIZE,
+};
 use crate::budget::{json_byte_len, MAX_RESPONSE_BYTES};
 use crate::workspace::{WorkspaceConfig, WorkspaceContext};
-use serde_json::json;
+use serde_json::{json, Value};
 use std::fs;
 
 #[test]
@@ -101,6 +104,154 @@ fn all_result_hits_are_pageable_after_the_workspace_changes() {
 }
 
 #[test]
+fn the_report_ref_exposes_matches_after_the_first_batch_to_each_content_tool() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("many.txt");
+    let text: String = (0..300)
+        .map(|line| {
+            let marker = if line < RESEARCH_BATCH_SIZE {
+                "marker-alpha"
+            } else {
+                "marker-bravo"
+            };
+            format!("label={marker}\n")
+        })
+        .collect();
+    fs::write(&path, text).unwrap();
+    let ctx = WorkspaceContext::new(WorkspaceConfig::with_root(root.path())).unwrap();
+    let mut journal = Journal::open(&root.path().join(".sourceharness")).unwrap();
+    let report = research(
+        &ctx,
+        &mut journal,
+        1,
+        &json!({"scope":"workspace","path":"many.txt","query":"label="}),
+    )
+    .unwrap();
+    let reference = report["result_ref"].as_str().unwrap();
+    let manifest = journal.resolve(reference).unwrap();
+    let preview = journal.resolve(report["preview_ref"].as_str().unwrap()).unwrap();
+    assert_eq!(preview.source["kind"], "research_preview");
+    assert_eq!(preview.source["presentation"]["shown"], RESEARCH_BATCH_SIZE);
+    assert_eq!(preview.source["presentation"]["matching_items"], 300);
+    assert_eq!(preview.source["presentation"]["complete"], false);
+    let preview_bytes = journal.get(&preview.revision).unwrap();
+    let legacy = journal
+        .artifact(
+            1,
+            json!({"kind":"research","scope":"workspace","research_report":manifest.revision}),
+            &preview_bytes,
+        )
+        .unwrap();
+    fs::write(path, "The file changed after the search.\n").unwrap();
+
+    for artifact in [manifest, legacy] {
+        let reference = &artifact.result_ref;
+        let full = inspect_artifact_content(&artifact, |hash| journal.get(hash)).unwrap();
+        let hits: Vec<Value> = serde_json::from_str(&full).unwrap();
+        assert_eq!(hits.len(), 300);
+        assert!(hits[299]["text"].as_str().unwrap().contains("marker-bravo"));
+
+        let start = full.find("marker-bravo").unwrap();
+        let fragment = read(
+            &ctx,
+            &mut journal,
+            1,
+            &json!({"result_ref":reference,"start_byte":start,"end_byte":start+"marker-bravo".len()}),
+        )
+        .unwrap();
+        assert_eq!(fragment["content"], "marker-bravo");
+        assert_eq!(fragment["coverage"]["complete"], true);
+        let indexed = search_result(
+            &journal,
+            &json!({"result_ref":reference,"query":"marker-bravo","max_hits":0}),
+        )
+        .unwrap();
+        assert_eq!(indexed["data"]["complete"], true);
+        assert_eq!(indexed["data"]["total_occurrences"], 172);
+        assert_eq!(indexed["revision"], fragment["revision"]);
+        let narrowed = research(
+            &ctx,
+            &mut journal,
+            1,
+            &json!({"scope":"result","result_ref":reference,"query":"marker-bravo"}),
+        )
+        .unwrap();
+        assert_eq!(narrowed["presentation"]["matching_items"], 172);
+    }
+}
+
+#[test]
+fn oversized_reports_give_all_content_tools_a_real_cursor_and_scoped_preview() {
+    let root = tempfile::tempdir().unwrap();
+    let ctx = WorkspaceContext::new(WorkspaceConfig::with_root(root.path())).unwrap();
+    let mut journal = Journal::open(&root.path().join(".sourceharness")).unwrap();
+    let hit = json!({"text":"label=".repeat(235)});
+    let batch = vec![hit.clone(); RESEARCH_BATCH_SIZE];
+    let hash = journal.store_json(&json!(batch)).unwrap();
+    let count = RESEARCH_BATCH_SIZE * 80;
+    let report = ResearchReport {
+        coverage: json!({"scan_complete":true}),
+        count,
+        batches: vec![hash; 80],
+    };
+    let preview = journal
+        .artifact(
+            1,
+            json!({"kind":"research_preview","presentation":{
+                "offset":0,"shown":1,"matching_items":count,"complete":false
+            }}),
+            &serde_json::to_vec_pretty(&[hit]).unwrap(),
+        )
+        .unwrap();
+    let bytes = serde_json::to_vec(&report).unwrap();
+    let report = journal
+        .artifact(
+            1,
+            json!({"kind":"research","research_report":super::revision(&bytes),
+                "preview_ref":preview.result_ref}),
+            &bytes,
+        )
+        .unwrap();
+    let reference = &report.result_ref;
+    let query = json!({"result_ref":reference,"query":"label=","max_hits":0});
+    let replies = [
+        read(&ctx, &mut journal, 1, &json!({"result_ref":reference})).unwrap(),
+        search_result(&journal, &query).unwrap(),
+        research(
+            &ctx,
+            &mut journal,
+            1,
+            &json!({"scope":"result","result_ref":reference,"query":"label="}),
+        )
+        .unwrap(),
+        serde_json::from_str(
+            &inspect_artifact_content(&report, |hash| journal.get(hash)).unwrap(),
+        )
+        .unwrap(),
+    ];
+    for reply in &replies {
+        assert_eq!(reply["code"], "RESEARCH_PAGED");
+        assert_eq!(reply["matching_items"], count);
+        assert_eq!(reply["preview_ref"], preview.result_ref);
+        assert_eq!(reply["next"]["result_ref"], *reference);
+    }
+    let page = research(&ctx, &mut journal, 1, &replies[0]["next"]).unwrap();
+    assert_eq!(page["status"], "ok");
+    assert_eq!(page["presentation"]["offset"], 0);
+    assert_eq!(page["presentation"]["matching_items"], count);
+    assert!(page["next"]["offset"].as_u64().unwrap() > 0);
+    let sample = read(
+        &ctx,
+        &mut journal,
+        1,
+        &json!({"result_ref":preview.result_ref}),
+    )
+    .unwrap();
+    assert_eq!(sample["source"]["presentation"]["shown"], 1);
+    assert_eq!(sample["source"]["presentation"]["complete"], false);
+}
+
+#[test]
 fn archived_history_pages_keep_exact_argument_references_past_128_hits() {
     let root = tempfile::tempdir().unwrap();
     let ctx = WorkspaceContext::new(WorkspaceConfig::with_root(root.path())).unwrap();
@@ -151,6 +302,53 @@ fn archived_history_pages_keep_exact_argument_references_past_128_hits() {
         page = research(&ctx, &mut journal, 1, &page["next"]).unwrap();
     }
     assert_eq!(next_index, 0);
+}
+
+#[test]
+fn history_exposes_the_arguments_and_outcomes_of_redirected_calls() {
+    let root = tempfile::tempdir().unwrap();
+    let ctx = WorkspaceContext::new(WorkspaceConfig::with_root(root.path())).unwrap();
+    let mut journal = Journal::open(&root.path().join(".sourceharness")).unwrap();
+    let raw = "{ \"path\": \"steer-marker/file.txt\" }\r\n";
+    let arguments = journal.put(raw.as_bytes()).unwrap();
+    for (kind, status) in [("tool_skipped", "skipped"), ("tool_reconciled", "ok")] {
+        let output = journal.store_json(&json!({"status":status})).unwrap();
+        journal
+            .append(1, kind, json!({"name":"write","arguments":arguments,"output":output}))
+            .unwrap();
+    }
+    journal
+        .append(1, "steer", json!({"text":"Review the steer-marker run."}))
+        .unwrap();
+    let result = research(
+        &ctx,
+        &mut journal,
+        1,
+        &json!({"scope":"history","query":"steer-marker"}),
+    )
+    .unwrap();
+    let hits = result["hits"].as_array().unwrap();
+    assert_eq!(hits.len(), 3);
+    assert_eq!(hits[0]["kind"], "steer");
+    for (hit, status) in hits[1..].iter().zip(["ok", "skipped"]) {
+        let args = read(
+            &ctx,
+            &mut journal,
+            1,
+            &json!({"result_ref":hit["arguments_ref"]}),
+        )
+        .unwrap();
+        assert_eq!(args["content"], raw);
+        let output = read(
+            &ctx,
+            &mut journal,
+            1,
+            &json!({"result_ref":hit["output_ref"]}),
+        )
+        .unwrap();
+        let output: Value = serde_json::from_str(output["content"].as_str().unwrap()).unwrap();
+        assert_eq!(output["status"], status);
+    }
 }
 
 #[test]

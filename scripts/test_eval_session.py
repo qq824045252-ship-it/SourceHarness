@@ -1,9 +1,10 @@
 import tempfile
 import unittest
+import json
 from pathlib import Path
 
-from eval_session import request_cost
-from session_eval_cases import BASE_B, grade, policy_case
+from eval_session import feedback_audit, request_cache, request_cost
+from session_eval_cases import BASE_B, build_case, grade, policy_case
 
 
 class SessionGradingTests(unittest.TestCase):
@@ -52,6 +53,77 @@ class SessionGradingTests(unittest.TestCase):
         self.assertEqual(len(config), 65536)
         self.assertGreater(config.index(b"[primary]"), 32000)
         self.assertLess(config.index(b"[primary]"), 33000)
+
+    def test_nested_deliverable_is_graded_at_the_requested_path(self):
+        case = policy_case(BASE_B, report_path="deliverables/release/evidence.md")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name, contents in case.expected.items():
+                if name != case.report_path:
+                    (root / name).write_bytes(contents)
+            self.assertFalse(grade(root, case)["passed"])
+            output = root / case.report_path
+            output.parent.mkdir(parents=True)
+            output.write_bytes(case.expected[case.report_path])
+            self.assertTrue(grade(root, case)["passed"])
+
+    def test_request_cache_separates_missing_telemetry_from_zero_hits(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            blobs = root / ".sourceharness/sessions/work/blobs"
+            blobs.mkdir(parents=True)
+            (blobs / "hit").write_text('{"usage":{"input_tokens_details":{"cached_tokens":64}}}', encoding="utf8")
+            (blobs / "miss").write_text('{"usage":{"input_tokens_details":{"cached_tokens":0}}}', encoding="utf8")
+            events = [
+                {"kind": "model_request", "seq": i, "data": {}} for i in range(1, 4)
+            ] + [
+                {"kind": "model_response", "data": {"request": 1, "raw_response": "hit"}},
+                {"kind": "model_rejected", "data": {"request": 2, "raw_response": "miss"}},
+                {"kind": "model_error", "data": {"request": 3}},
+            ]
+            self.assertEqual(request_cache(root, events), {
+                "known_cached_input_tokens": 64, "requests_with_cache_usage": 2, "requests_without_cache_usage": 1,
+            })
+
+    def test_equivalent_cli_implementation_passes_and_wrong_behavior_fails(self):
+        case = build_case()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name, raw in case.expected.items():
+                (root / name).write_bytes(raw)
+            (root / "evidence.md").write_bytes(b"SYMBOL=render_count\nOUTPUT=count=3\n")
+            implementation = root / "formatter.py"
+            implementation.write_bytes(b'def render_count(total):\n    return "count=" + str(total)\n')
+            self.assertTrue(grade(root, case)["passed"])
+            implementation.write_bytes(b'def render_count(total):\n    return "count=3"\n')
+            result = grade(root, case)
+            self.assertFalse(result["passed"])
+            self.assertEqual(result["mismatched_paths"], [])
+            self.assertIn("render_count(0)", result["behavior_errors"][0])
+
+    def test_feedback_checks_actual_wire_receipt_and_reread(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            blobs = root / ".sourceharness/sessions/work/blobs"
+            blobs.mkdir(parents=True)
+            source = {"kind": "workspace", "path": "config.txt"}
+            raw = {"status": "ok", "source": source, "outcome": "committed", "diff": "-old\n+new", "revision": "r2"}
+            delivered = {key: raw[key] for key in ("status", "source", "outcome", "diff")}
+            (blobs / "raw").write_text(json.dumps(raw), encoding="utf8")
+            (blobs / "request").write_text(json.dumps({
+                "tools": [], "input": [{"role": "user", "content": "Do the task"},
+                    {"type": "function_call_output", "call_id": "call", "output": json.dumps(delivered)}],
+            }), encoding="utf8")
+            events = [
+                {"kind": "tool_result", "data": {"status": "ok", "name": "edit", "operation": "op",
+                    "call_id": "call", "output": "raw", "source": source}},
+                {"kind": "model_request", "data": {"input": "request"}},
+                {"kind": "tool_result", "data": {"status": "ok", "name": "read", "source": source}},
+            ]
+            result = feedback_audit(root, events, "diff")
+            self.assertTrue(result["verified_delivery"])
+            self.assertEqual(result["post_mutation_reads"], 1)
+            self.assertFalse(feedback_audit(root, events, "versioned")["verified_delivery"])
 
 
 if __name__ == "__main__":

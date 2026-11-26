@@ -1,13 +1,19 @@
+use std::collections::VecDeque;
 use std::fs;
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::process;
+use std::sync::mpsc::{self, Receiver};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
 use source_harness::bench;
 use source_harness::eval;
 use source_harness::registry;
-use source_harness::session::{self, Commands, EditMode, HistoryMode, Options, Session, DEFAULT_HISTORY_BUDGET};
+use source_harness::session::{
+    self, Commands, EditMode, HistoryMode, Options, ReceiptMode, Session, SteeringInput,
+    DEFAULT_HISTORY_BUDGET,
+};
 use source_harness::store::{FoldStore, IngestOutcome};
 use source_harness::transport::injection::{
     EnvelopeInjector, InlineUserMessageInjector, NativeFunctionCallInjector,
@@ -182,6 +188,12 @@ fn session_options(args: &[String]) -> Result<Options, String> {
         Some("conversation") => HistoryMode::Conversation,
         _ => return Err("Expected --history-mode conversation, events, or facts".to_owned()),
     };
+    let receipt_mode = match parse_flag(args, "--receipt-mode")?.as_deref() {
+        Some("summary") => ReceiptMode::Summary,
+        Some("diff") => ReceiptMode::Diff,
+        None | Some("versioned") => ReceiptMode::Versioned,
+        _ => return Err("Expected --receipt-mode summary, diff, or versioned".to_owned()),
+    };
     let commands = parse_flag(args, "--checks")?.map(|path| Commands::from_file(&PathBuf::from(path)))
         .transpose()?.unwrap_or_default();
     let switch = |flag| match parse_flag(args, flag)?.as_deref() {
@@ -201,34 +213,114 @@ fn session_options(args: &[String]) -> Result<Options, String> {
         commands,
         freshness_instructions: switch("--freshness-instructions")?,
         stale_projection: switch("--stale-projection")?,
+        workspace_change_notices: switch("--workspace-change-notices")?,
         history_budget,
+        receipt_mode,
     })
 }
 
 fn run_session_chat(mut session: Session, client: ResponsesClient) -> Result<(), String> {
+    let (sender, input) = mpsc::channel();
+    std::thread::spawn(move || {
+        for line in io::stdin().lock().lines() {
+            let line = line.map(|text| ChatLine {
+                text,
+                received_ms: SystemTime::now().duration_since(UNIX_EPOCH)
+                    .unwrap_or_default().as_millis() as u64,
+            }).map_err(|err| err.to_string());
+            let correction = line.as_ref().is_ok_and(|line| steer_text(line.text.trim()).is_some());
+            if sender.send(line).is_err() {
+                break;
+            }
+            if correction {
+                eprintln!("Correction received.");
+            }
+        }
+    });
+    let mut queued = VecDeque::new();
+    eprintln!("Use :steer <instruction> to redirect an active run, :resume to resume, or :quit to exit.");
     if session.is_pending()? {
-        println!("{}", session.run(&client, None)?);
+        run_chat_turn(&mut session, &client, None, None, &input, &mut queued);
     }
-    for line in io::stdin().lock().lines() {
-        let line = line.map_err(|err|err.to_string())?;
-        match line.trim() {
+    while let Some(line) = queued.pop_front().or_else(|| input.recv().ok()) {
+        let line = line?;
+        let text = line.text.trim();
+        match text {
             "" => continue,
             ":quit" | ":exit" => break,
-            ":resume" => println!("{}", session.run(&client, None)?),
-            prompt => println!("{}", session.run(&client, Some(prompt))?),
+            ":resume" => run_chat_turn(&mut session, &client, None, None, &input, &mut queued),
+            ":steer" => eprintln!("Supply the instruction after :steer."),
+            prompt => match steer_text(prompt) {
+                Some(steer) if session.is_pending()? => run_chat_turn(
+                    &mut session, &client, None,
+                    Some(SteeringInput { text: steer.to_owned(), received_ms: line.received_ms }),
+                    &input, &mut queued,
+                ),
+                text => run_chat_turn(
+                    &mut session, &client, Some(text.unwrap_or(prompt)), None, &input, &mut queued
+                ),
+            },
         }
     }
     Ok(())
 }
 
+struct ChatLine {
+    text: String,
+    received_ms: u64,
+}
+
+fn steer_text(text: &str) -> Option<&str> {
+    let (command, instruction) = text.split_once(char::is_whitespace)?;
+    let instruction = instruction.trim();
+    (command == ":steer" && !instruction.is_empty()).then_some(instruction)
+}
+
+fn run_chat_turn(
+    session: &mut Session,
+    client: &ResponsesClient,
+    prompt: Option<&str>,
+    mut initial_steering: Option<SteeringInput>,
+    input: &Receiver<Result<ChatLine, String>>,
+    queued: &mut VecDeque<Result<ChatLine, String>>,
+) {
+    let mut observer = StreamingTerminalObserver::new();
+    let response = session.run_observed(client, prompt, &mut observer, &mut || {
+        if let Some(first) = initial_steering.take() {
+            return Some(first);
+        }
+        while let Ok(line) = input.try_recv() {
+            if let Ok(line) = &line {
+                if let Some(text) = steer_text(line.text.trim()) {
+                    return Some(SteeringInput { text: text.to_owned(), received_ms: line.received_ms });
+                }
+            }
+            queued.push_back(line);
+        }
+        None
+    });
+    match response {
+        Ok(text) if !observer.streamed_text_this_turn => println!("{text}"),
+        Ok(_) => {}
+        Err(err) => {
+            if observer.printed_text_this_turn {
+                println!();
+            }
+            eprintln!("Error: {err}");
+        }
+    }
+}
+
 struct StreamingTerminalObserver {
     printed_text_this_turn: bool,
+    streamed_text_this_turn: bool,
 }
 
 impl StreamingTerminalObserver {
     fn new() -> Self {
         Self {
             printed_text_this_turn: false,
+            streamed_text_this_turn: false,
         }
     }
 }
@@ -236,12 +328,14 @@ impl StreamingTerminalObserver {
 impl RunObserver for StreamingTerminalObserver {
     fn on_turn_start(&mut self, _turn: usize) {
         self.printed_text_this_turn = false;
+        self.streamed_text_this_turn = false;
     }
 
     fn on_text_delta(&mut self, delta: &str) {
         print!("{delta}");
         let _ = io::stdout().flush();
         self.printed_text_this_turn = true;
+        self.streamed_text_this_turn = true;
     }
 
     fn on_tool_call(&mut self, trace: &ToolCallTrace) {
@@ -541,7 +635,9 @@ fn print_usage() {
          source_harness chat --root <dir> [--model <m>] [--effort <e>]\n  \
          source_harness agent --root <dir> --session <name> [--prompt <text> | --resume | --continue [--prompt <correction>]] [--checks <file>]\n  \
          Session options: [--edit-mode text|range|patch] [--history-mode conversation|events|facts]\n  \
-                          [--freshness-instructions on|off] [--stale-projection on|off] [--history-budget <bytes>]\n  \
+                          [--receipt-mode summary|diff|versioned]\n  \
+                          [--freshness-instructions on|off] [--stale-projection on|off]\n  \
+                          [--workspace-change-notices on|off] [--history-budget <bytes>]\n  \
          source_harness history --root <dir> --session <name> [--event <n> | --ref <ref>]\n  \
          source_harness fork --root <dir> --session <name> --revision <hash> --to <new-dir>\n  \
          source_harness eval [--root <dir>] [--model <m>] [--effort <e>] [--out <json_path>]\n  \

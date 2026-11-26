@@ -160,8 +160,10 @@ pub struct BenchCaseResult {
     pub passed: bool,
     pub failure_reasons: Vec<String>,
     pub ideal_tool_rounds: usize,
+    /// Round metrics refer to the final attempt, which determines the case outcome.
     pub llm_turns: usize,
     pub tool_rounds: usize,
+    /// Tool counts and traces include all attempts.
     pub total_tool_calls: usize,
     pub over_called: bool,
     pub tool_sequence_by_turn: Vec<Vec<String>>,
@@ -177,12 +179,29 @@ pub struct BenchCaseResult {
     pub unknown_usage_requests: usize,
     /// Total attempt elapsed time, excluding inter-attempt backoff.
     pub latency_ms: u128,
-    pub tool_traces: Vec<ToolCallTrace>,
+    pub tool_traces: Vec<BenchToolTrace>,
     pub attempts: Vec<BenchAttempt>,
+}
+
+impl BenchCaseResult {
+    fn final_attempt_completed(&self) -> bool {
+        self.attempts
+            .last()
+            .is_some_and(|attempt| attempt.error.is_none())
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BenchToolTrace {
+    pub attempt: usize,
+    #[serde(flatten)]
+    pub trace: ToolCallTrace,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct BenchAttempt {
+    /// 1-based attempt number within its case.
+    pub attempt: usize,
     pub passed: bool,
     pub error: Option<String>,
     pub total_tokens: Option<u64>,
@@ -190,6 +209,13 @@ pub struct BenchAttempt {
     pub model_requests: usize,
     pub unknown_usage_requests: usize,
     pub elapsed_ms: u128,
+    pub total_tool_calls: usize,
+    pub error_tool_calls: usize,
+    /// Zero-based [start, end) slice in the case's tool_traces.
+    pub tool_trace_range: [usize; 2],
+    pub hint_triggered: bool,
+    pub sharded_reads: usize,
+    pub sorted_aggregations: usize,
 }
 
 #[derive(Default)]
@@ -197,6 +223,10 @@ struct AttemptObserver {
     model_requests: usize,
     reported_requests: usize,
     known_usage: UsageMetrics,
+    tool_traces: Vec<ToolCallTrace>,
+    hint_triggered: bool,
+    sharded_reads: usize,
+    sorted_aggregations: usize,
 }
 
 impl RunObserver for AttemptObserver {
@@ -209,6 +239,10 @@ impl RunObserver for AttemptObserver {
             self.reported_requests += 1;
             add_usage(&mut self.known_usage, usage);
         }
+    }
+
+    fn on_tool_call(&mut self, trace: &ToolCallTrace) {
+        self.tool_traces.push(trace.clone());
     }
 }
 
@@ -225,6 +259,7 @@ pub struct BenchAggregateStats {
     pub passed: usize,
     pub within_ideal_rounds: usize,
     pub over_called: usize,
+    pub total_tool_calls: usize,
     pub error_tool_calls: usize,
     pub hint_triggers: usize,
     pub sharded_reads: usize,
@@ -248,6 +283,7 @@ pub struct BenchReport {
     pub folded_one_round_rate: String,
     pub within_ideal_rate: String,
     pub over_called_count: usize,
+    pub total_tool_calls: usize,
     pub total_tool_errors: usize,
     pub error_code_counts: BTreeMap<String, usize>,
     pub total_hint_triggers: usize,
@@ -424,12 +460,28 @@ fn execute_case_with_retry(
 ) -> BenchCaseResult {
     let delays = [500u64, 1500u64];
     let mut attempts = Vec::with_capacity(delays.len() + 1);
+    let mut tool_traces = Vec::new();
     for attempt in 0..=delays.len() {
         let started = Instant::now();
         let mut observer = AttemptObserver::default();
         let outcome = execute_single_case(client, case, strategy, &mut observer);
         let unknown_usage_requests = observer.model_requests - observer.reported_requests;
+        let attempt_number = attempt + 1;
+        let trace_start = tool_traces.len();
+        let total_tool_calls = observer.tool_traces.len();
+        let error_tool_calls = observer
+            .tool_traces
+            .iter()
+            .filter(|trace| trace.status == "error")
+            .count();
+        tool_traces.extend(
+            observer.tool_traces.into_iter().map(|trace| BenchToolTrace {
+                attempt: attempt_number,
+                trace,
+            }),
+        );
         attempts.push(BenchAttempt {
+            attempt: attempt_number,
             passed: outcome.as_ref().is_ok_and(|result| result.passed),
             error: outcome.as_ref().err().map(ToString::to_string),
             total_tokens: (unknown_usage_requests == 0).then_some(observer.known_usage.total_tokens),
@@ -437,6 +489,12 @@ fn execute_case_with_retry(
             model_requests: observer.model_requests,
             unknown_usage_requests,
             elapsed_ms: started.elapsed().as_millis(),
+            total_tool_calls,
+            error_tool_calls,
+            tool_trace_range: [trace_start, tool_traces.len()],
+            hint_triggered: observer.hint_triggered,
+            sharded_reads: observer.sharded_reads,
+            sorted_aggregations: observer.sorted_aggregations,
         });
         let mut result = match outcome {
             Ok(result) => result,
@@ -483,7 +541,23 @@ fn execute_case_with_retry(
             add_usage(&mut result.usage, &attempt.known_usage);
             result.unknown_usage_requests += attempt.unknown_usage_requests;
             result.latency_ms += attempt.elapsed_ms;
+            result.hint_triggered |= attempt.hint_triggered;
+            result.sharded_reads += attempt.sharded_reads;
+            result.sorted_aggregations += attempt.sorted_aggregations;
         }
+        result.total_tool_calls = tool_traces.len();
+        result.error_codes = tool_traces
+            .iter()
+            .filter(|record| record.trace.status == "error")
+            .map(|record| record.trace.error_code.clone().unwrap_or_else(|| "UNKNOWN".to_owned()))
+            .collect();
+        result.error_tool_calls = result.error_codes.len();
+        result.max_tool_response_bytes = tool_traces
+            .iter()
+            .map(|record| record.trace.response_bytes)
+            .max()
+            .unwrap_or(0);
+        result.tool_traces = tool_traces;
         result.attempts = attempts;
         return result;
     }
@@ -520,12 +594,16 @@ fn execute_single_case(
 
     let executor = TracingExecutor::new(&store, extra_tools);
 
-    let run = client.run_with_executor(
+    let outcome = client.run_with_executor(
         input,
         Some("Answer accurately and concisely using the provided content or result tools."),
         &executor,
         observer,
-    )?;
+    );
+    observer.hint_triggered = executor.hint_triggers.load(Ordering::Relaxed) > 0;
+    observer.sharded_reads = executor.sharded_reads.load(Ordering::Relaxed);
+    observer.sorted_aggregations = executor.sorted_aggregations.load(Ordering::Relaxed);
+    let run = outcome?;
 
     let mut failure_reasons = Vec::new();
     for check in &case.checks {
@@ -551,7 +629,6 @@ fn execute_single_case(
         .iter()
         .filter(|t| !t.function_calls.is_empty())
         .count();
-    let total_tool_calls = run.tool_traces.len();
     let tool_sequence_by_turn: Vec<Vec<String>> = run
         .turns
         .iter()
@@ -559,13 +636,6 @@ fn execute_single_case(
         .map(|t| t.function_calls.clone())
         .collect();
 
-    let error_codes: Vec<String> = run
-        .tool_traces
-        .iter()
-        .filter(|t| t.status == "error")
-        .map(|t| t.error_code.clone().unwrap_or_else(|| "UNKNOWN".to_owned()))
-        .collect();
-    let error_tool_calls = error_codes.len();
     let reasoning_items = run.turns.iter().map(|t| t.reasoning_item_count).sum();
 
     let passed = failure_reasons.is_empty();
@@ -580,20 +650,20 @@ fn execute_single_case(
         ideal_tool_rounds: case.ideal_tool_rounds,
         llm_turns: run.turns.len(),
         tool_rounds,
-        total_tool_calls,
+        total_tool_calls: 0,
         over_called: tool_rounds > case.ideal_tool_rounds,
         tool_sequence_by_turn,
-        error_tool_calls,
-        error_codes,
-        hint_triggered: executor.hint_triggers.load(Ordering::Relaxed) > 0,
-        sharded_reads: executor.sharded_reads.load(Ordering::Relaxed),
-        sorted_aggregations: executor.sorted_aggregations.load(Ordering::Relaxed),
-        max_tool_response_bytes,
+        error_tool_calls: 0,
+        error_codes: Vec::new(),
+        hint_triggered: false,
+        sharded_reads: 0,
+        sorted_aggregations: 0,
+        max_tool_response_bytes: 0,
         reasoning_items,
         usage: UsageMetrics::default(),
         unknown_usage_requests: 0,
         latency_ms: 0,
-        tool_traces: run.tool_traces,
+        tool_traces: Vec::new(),
         attempts: Vec::new(),
     })
 }
@@ -603,6 +673,7 @@ fn aggregate_slice<'a>(items: impl Iterator<Item = &'a BenchCaseResult>) -> Benc
     let mut passed = 0usize;
     let mut within_ideal_rounds = 0usize;
     let mut over_called = 0usize;
+    let mut total_tool_calls = 0usize;
     let mut error_tool_calls = 0usize;
     let mut hint_triggers = 0usize;
     let mut sharded_reads = 0usize;
@@ -617,12 +688,13 @@ fn aggregate_slice<'a>(items: impl Iterator<Item = &'a BenchCaseResult>) -> Benc
         if r.passed {
             passed += 1;
         }
-        if r.tool_rounds <= r.ideal_tool_rounds {
+        if r.final_attempt_completed() && r.tool_rounds <= r.ideal_tool_rounds {
             within_ideal_rounds += 1;
         }
         if r.over_called {
             over_called += 1;
         }
+        total_tool_calls += r.total_tool_calls;
         error_tool_calls += r.error_tool_calls;
         if r.hint_triggered {
             hint_triggers += 1;
@@ -640,6 +712,7 @@ fn aggregate_slice<'a>(items: impl Iterator<Item = &'a BenchCaseResult>) -> Benc
         passed,
         within_ideal_rounds,
         over_called,
+        total_tool_calls,
         error_tool_calls,
         hint_triggers,
         sharded_reads,
@@ -667,7 +740,10 @@ fn build_report(
 
     let inline_cases: Vec<&BenchCaseResult> =
         results.iter().filter(|r| r.delivery == "inline").collect();
-    let inline_zero = inline_cases.iter().filter(|r| r.tool_rounds == 0).count();
+    let inline_zero = inline_cases
+        .iter()
+        .filter(|r| r.final_attempt_completed() && r.tool_rounds == 0)
+        .count();
 
     let single_round_folded: Vec<&BenchCaseResult> = results
         .iter()
@@ -680,7 +756,7 @@ fn build_report(
 
     let within_ideal = results
         .iter()
-        .filter(|r| r.tool_rounds <= r.ideal_tool_rounds)
+        .filter(|r| r.final_attempt_completed() && r.tool_rounds <= r.ideal_tool_rounds)
         .count();
     let over_called_count = results.iter().filter(|r| r.over_called).count();
 
@@ -727,6 +803,7 @@ fn build_report(
         folded_one_round_rate: format!("{folded_one}/{}", single_round_folded.len()),
         within_ideal_rate: format!("{within_ideal}/{total}"),
         over_called_count,
+        total_tool_calls: results.iter().map(|r| r.total_tool_calls).sum(),
         total_tool_errors,
         error_code_counts,
         total_hint_triggers: results.iter().filter(|r| r.hint_triggered).count(),
@@ -756,7 +833,8 @@ fn print_bench_summary(report: &BenchReport) {
         report.folded_one_round_rate
     );
     println!(
-        "tool_errors={} {:?} | hint_triggers={} | sharded_reads={} | sorted_aggregations={} | known_tokens={} (reason={}) | unknown_usage_requests={} | attempts={}",
+        "tool_calls={} | tool_errors={} {:?} | hint_triggers={} | sharded_reads={} | sorted_aggregations={} | known_tokens={} (reason={}) | unknown_usage_requests={} | attempts={}",
+        report.total_tool_calls,
         report.total_tool_errors,
         report.error_code_counts,
         report.total_hint_triggers,

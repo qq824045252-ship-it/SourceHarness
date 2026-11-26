@@ -11,6 +11,8 @@ use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+type InputRevisions = BTreeMap<PathBuf, String>;
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Commands(pub BTreeMap<String, Validation>);
@@ -25,7 +27,31 @@ pub struct Validation {
     pub description: String,
     #[serde(default)]
     pub artifacts: Vec<PathBuf>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inputs: Vec<PathBuf>,
     pub timeout_seconds: Option<u64>,
+}
+
+impl Validation {
+    fn input_revisions(&self) -> Result<Option<InputRevisions>, String> {
+        if self.inputs.is_empty() {
+            return Ok(None);
+        }
+        self.inputs
+            .iter()
+            .map(|path| {
+                if !path.is_absolute() || !path.is_file() {
+                    return Err(format!(
+                        "Validation input must be a readable absolute file: {}",
+                        path.display()
+                    ));
+                }
+                let bytes = fs::read(path).map_err(|err| format!("{}: {err}", path.display()))?;
+                Ok((path.clone(), revision(&bytes)))
+            })
+            .collect::<Result<InputRevisions, String>>()
+            .map(Some)
+    }
 }
 
 impl Commands {
@@ -46,6 +72,9 @@ impl Commands {
                 return Err(format!(
                     "{name} artifact paths must stay inside the workspace"
                 ));
+            }
+            if command.inputs.iter().any(|path| !path.is_absolute()) {
+                return Err(format!("{name} inputs must be absolute file paths"));
             }
             if !matches!(command.timeout_seconds.unwrap_or(120), 1..=900) {
                 return Err(format!("{name} timeout_seconds must be in 1..=900"));
@@ -76,6 +105,18 @@ impl Commands {
 
     pub(crate) fn program_revisions(&self) -> BTreeMap<&str, Option<String>> {
         self.0.keys().map(|check| (check.as_str(), self.program_revision(check))).collect()
+    }
+
+    pub(crate) fn input_revisions(&self, check: &str) -> Option<InputRevisions> {
+        self.0.get(check)?.input_revisions().ok().flatten()
+    }
+
+    pub(crate) fn input_revision_profile(&self) -> BTreeMap<&str, Option<InputRevisions>> {
+        self.0
+            .iter()
+            .filter(|(_, command)| !command.inputs.is_empty())
+            .map(|(check, command)| (check.as_str(), command.input_revisions().ok().flatten()))
+            .collect()
     }
 }
 
@@ -161,9 +202,18 @@ pub fn run(
     let before = manifest(ctx, journal, Some(snapshot.path()))?;
     let program = fs::read(&config.program).map_err(|err| err.to_string())?;
     let program_revision = revision(&program);
-    let inputs = json!({"check":check,"workspace_revision":before,"program_revision":program_revision,
-                        "config":config,"operation":operation});
-    journal.append(run, "validation_intent", inputs)?;
+    let input_revisions = match config.input_revisions() {
+        Ok(revisions) => revisions,
+        Err(reason) => return Ok(json!({
+            "status":"error","code":"VALIDATION_INPUT_UNAVAILABLE","check":check,"reason":reason
+        })),
+    };
+    let mut intent = json!({"check":check,"workspace_revision":before,"program_revision":program_revision,
+                           "config":config,"operation":operation});
+    if let Some(revisions) = &input_revisions {
+        intent["input_revisions"] = json!(revisions);
+    }
+    journal.append(run, "validation_intent", intent)?;
     let mut stdout = tempfile::tempfile().map_err(|err| err.to_string())?;
     let mut stderr = tempfile::tempfile().map_err(|err| err.to_string())?;
     let launched = Command::new(&config.program)
@@ -192,6 +242,9 @@ pub fn run(
         }
         Err(err) => (None, false, Some(err.to_string())),
     };
+    let input_revisions_after = config.input_revisions();
+    let input_revisions_stable =
+        matches!(&input_revisions_after, Ok(after) if *after == input_revisions);
     let mut bytes = Vec::new();
     let mut streams = BTreeMap::new();
     let mut output_complete = true;
@@ -222,11 +275,26 @@ pub fn run(
             }
         }
     }
-    let result = json!({"status":"ok","check":check,"operation":operation,"passed":status==Some(0),
+    let mut result = json!({"status":"ok","check":check,"operation":operation,"passed":status==Some(0)&&input_revisions_stable,
         "exit_code":status,"timed_out":timed_out,"launch_error":launch_error,"workspace_revision":before,
         "workspace_changed_during_check":before!=after,"program_revision":program_revision,"artifacts":artifacts,
         "result_ref":report.result_ref,"output_complete":output_complete,"streams":streams,
         "preview":truncate_utf8_bytes(&output,512).0});
+    if let Some(revisions) = input_revisions {
+        result["input_revisions"] = json!(revisions);
+        result["input_revisions_stable"] = json!(input_revisions_stable);
+        if !input_revisions_stable {
+            result["reason"] = json!("A declared validation input changed or was unavailable after execution. Run the check again against the current inputs.");
+            match input_revisions_after {
+                Ok(after) => result["input_revisions_after"] = json!(after),
+                Err(error) => result["input_revisions_after_error"] = json!(error),
+            }
+        }
+    }
     journal.append(run, "validation_receipt", result.clone())?;
     Ok(result)
 }
+
+#[cfg(test)]
+#[path = "validation_input_tests.rs"]
+mod input_tests;

@@ -1,17 +1,22 @@
 mod history;
 mod journal;
+mod receipt;
 #[cfg(test)]
 mod tests;
 mod tools;
 mod validation;
 
 pub use history::{DEFAULT_BUDGET as DEFAULT_HISTORY_BUDGET, MAX_BUDGET as MAX_HISTORY_BUDGET, MIN_BUDGET as MIN_HISTORY_BUDGET};
+pub use receipt::ReceiptMode;
 pub use tools::EditMode;
 pub use validation::Commands;
 
 use crate::budget::{json_byte_len, truncate_utf8_bytes, MAX_RESPONSE_BYTES};
 use crate::transport::sse::ParsedResponse;
-use crate::transport::{extract_final_text, NoopRunObserver, ResponsesClient, TransportError};
+use crate::transport::{
+    extract_final_text, NoopRunObserver, ResponsesClient, RunObserver, ToolCallTrace, TransportError,
+    TurnMetrics,
+};
 use crate::workspace::{WorkspaceConfig, WorkspaceContext};
 use journal::{get_blob, read_events, revision, Journal};
 use serde_json::{json, Value};
@@ -47,7 +52,9 @@ pub struct Options {
     pub commands: Commands,
     pub freshness_instructions: Option<bool>,
     pub stale_projection: Option<bool>,
+    pub workspace_change_notices: Option<bool>,
     pub history_budget: usize,
+    pub receipt_mode: ReceiptMode,
 }
 
 impl Default for Options {
@@ -58,7 +65,9 @@ impl Default for Options {
             commands: Commands::default(),
             freshness_instructions: None,
             stale_projection: None,
+            workspace_change_notices: None,
             history_budget: DEFAULT_HISTORY_BUDGET,
+            receipt_mode: ReceiptMode::Versioned,
         }
     }
 }
@@ -88,6 +97,22 @@ struct Checkpoint {
     pending: VecDeque<Call>,
     final_text: Option<String>,
     profile: Value,
+    queued_steering: Vec<(usize, Value)>,
+    attached_steering: Vec<usize>,
+}
+
+impl Checkpoint {
+    fn attach_steering(&mut self) {
+        for (event, text) in self.queued_steering.drain(..) {
+            self.input.push(json!({"role":"user","content":text}));
+            self.attached_steering.push(event);
+        }
+    }
+}
+
+pub struct SteeringInput {
+    pub text: String,
+    pub received_ms: u64,
 }
 
 enum Start<'a> {
@@ -168,7 +193,17 @@ impl Session {
         client: &ResponsesClient,
         prompt: Option<&str>,
     ) -> Result<String, String> {
-        self.run_with_start(client, prompt.map_or(Start::Resume, Start::Prompt))
+        self.run_observed(client, prompt, &mut NoopRunObserver, &mut || None)
+    }
+
+    pub fn run_observed(
+        &mut self,
+        client: &ResponsesClient,
+        prompt: Option<&str>,
+        observer: &mut dyn RunObserver,
+        poll_steering: &mut dyn FnMut() -> Option<SteeringInput>,
+    ) -> Result<String, String> {
+        self.run_with_start(client, prompt.map_or(Start::Resume, Start::Prompt), observer, poll_steering)
     }
 
     pub fn continue_pending(
@@ -176,21 +211,38 @@ impl Session {
         client: &ResponsesClient,
         correction: Option<&str>,
     ) -> Result<String, String> {
-        self.run_with_start(client, Start::Continue(correction))
+        self.run_with_start(client, Start::Continue(correction), &mut NoopRunObserver, &mut || None)
     }
 
-    fn run_with_start(&mut self, client: &ResponsesClient, start: Start<'_>) -> Result<String, String> {
+    fn run_with_start(
+        &mut self,
+        client: &ResponsesClient,
+        start: Start<'_>,
+        observer: &mut dyn RunObserver,
+        poll_steering: &mut dyn FnMut() -> Option<SteeringInput>,
+    ) -> Result<String, String> {
         let mut definitions = tools::definitions(self.options.edit);
         definitions.extend(self.options.commands.definition());
         let history_enabled = !matches!(self.options.history, HistoryMode::Conversation);
         let freshness = self.options.freshness_instructions.unwrap_or(history_enabled);
         let projection = self.options.stale_projection.unwrap_or(history_enabled);
-        let profile = json!({"model":client.config().model,"effort":client.config().reasoning_effort,
+        let notices = self.options.workspace_change_notices.unwrap_or(projection);
+        let mut profile = json!({"model":client.config().model,"effort":client.config().reasoning_effort,
             "gateway":client.config().base_url,"tools_revision":revision(&serde_json::to_vec(&definitions).map_err(|e|e.to_string())?),
             "binary_revision":self.binary_revision,"history_mode":format!("{:?}",self.options.history),
             "freshness_instructions":freshness,"stale_projection":projection,"history_budget_bytes":self.options.history_budget,
             "validation":self.options.commands,"validation_programs":self.options.commands.program_revisions(),
             "workspace":self.ctx.root()});
+        if self.options.receipt_mode != ReceiptMode::Versioned {
+            profile["receipt_mode"] = json!(self.options.receipt_mode.label());
+        }
+        if notices != projection {
+            profile["workspace_change_notices"] = json!(notices);
+        }
+        let validation_inputs = self.options.commands.input_revision_profile();
+        if !validation_inputs.is_empty() {
+            profile["validation_inputs"] = json!(validation_inputs);
+        }
         let mut checkpoint = self.checkpoint()?;
         let entry = match start {
             Start::Prompt(prompt) => {
@@ -219,20 +271,33 @@ impl Session {
             self.apply_user(&mut checkpoint, run, &data)?;
         }
         let run = checkpoint.run;
+        let mut turn = None::<(TurnMetrics, Instant)>;
         for step in 0..=client.config().max_turns {
             while let Some(call) = checkpoint.pending.pop_front() {
-                checkpoint
-                    .input
-                    .push(self.execute(run, checkpoint.round, &call)?);
+                self.collect_steering(&mut checkpoint, poll_steering)?;
+                let output = if checkpoint.queued_steering.is_empty() {
+                    self.execute(run, checkpoint.round, &call, observer)?
+                } else {
+                    self.close_steered_call(run, checkpoint.round, &call, observer)?
+                };
+                checkpoint.input.push(output);
             }
+            if let Some((mut metrics, start)) = turn.take() {
+                metrics.latency_ms = start.elapsed().as_millis();
+                observer.on_turn_complete(&metrics);
+            }
+            self.collect_steering(&mut checkpoint, poll_steering)?;
             if step == client.config().max_turns {
                 break;
             }
 
+            checkpoint.attach_steering();
             let round = checkpoint.round + 1;
+            let turn_start = Instant::now();
+            observer.on_turn_start(round);
             let mut body = client.request_body(&checkpoint.input, None, &definitions);
-            let changes = if projection {
-                self.project_workspace_evidence(&mut body["input"], checkpoint.prior_len)
+            let changes = if projection || notices {
+                self.project_workspace_evidence(&mut body["input"], checkpoint.prior_len, projection, notices)
             } else {
                 Vec::new()
             };
@@ -250,9 +315,16 @@ impl Session {
                 records,
             );
             body["instructions"] = json!(format!("{INSTRUCTIONS}{}", auxiliary.suffix));
-            let (request, response, elapsed_ms) = self.request(client, run, round, &profile, &body, &auxiliary.audit)?;
+            let exchange = self.request(client, &checkpoint, &body, &auxiliary.audit, observer);
+            if exchange.is_err() {
+                self.collect_steering(&mut checkpoint, poll_steering)?;
+            }
+            let (request, response, elapsed_ms) = exchange?;
+            observer.on_model_response_usage(response.usage_reported.then_some(&response.usage));
             let output = self.journal.store_json(&json!(response.output_items))?;
             let raw_response = self.journal.store_json(&response.response)?;
+            checkpoint.round = round;
+            self.collect_steering(&mut checkpoint, poll_steering)?;
             let calls = match calls_from(&response.output_items, run, round) {
                 Ok(calls) => calls,
                 Err(error) => {
@@ -266,19 +338,27 @@ impl Session {
                     return Err(error);
                 }
             };
-            let final_text = calls
-                .is_empty()
+            let final_text = (calls.is_empty() && checkpoint.queued_steering.is_empty())
                 .then(|| extract_final_text(&response.output_items));
             let usage = response.usage_reported.then_some(response.usage);
             self.journal.append(run,"model_response",json!({"request":request,"round":round,"output":output,
                 "raw_response":raw_response,"response_id":response.response_id,"usage":usage,"elapsed_ms":elapsed_ms,
                 "final_text":final_text}))?;
+            let metrics = TurnMetrics {
+                turn: round,
+                reasoning_item_count: response.output_items.iter().filter(|item| item["type"] == "reasoning").count(),
+                function_calls: calls.iter().map(|call| call.name.clone()).collect(),
+                usage: response.usage,
+                latency_ms: turn_start.elapsed().as_millis(),
+            };
             if let Some(final_text) = final_text {
+                observer.on_turn_complete(&metrics);
                 return Ok(final_text);
             }
+            turn = Some((metrics, turn_start));
             checkpoint.input.extend(response.output_items);
-            checkpoint.round = round;
             checkpoint.pending = calls;
+            checkpoint.attached_steering.clear();
         }
         self.journal.append(
             run,
@@ -291,20 +371,25 @@ impl Session {
     fn request(
         &mut self,
         client: &ResponsesClient,
-        run: usize,
-        round: usize,
-        profile: &Value,
+        checkpoint: &Checkpoint,
         body: &Value,
         history_auxiliary: &Value,
+        observer: &mut dyn RunObserver,
     ) -> Result<(usize, ParsedResponse, u128), String> {
         let payload = self.journal.store_json(body)?;
-        let mut observer = NoopRunObserver;
+        let run = checkpoint.run;
+        let round = checkpoint.round + 1;
         for attempt in 1..=2 {
-            let request=self.journal.append(run,"model_request",json!({"round":round,"attempt":attempt,"input":payload,
-                "model":client.config().model,"tools_revision":profile["tools_revision"],"effort":client.config().reasoning_effort,
-                "history_auxiliary":history_auxiliary}))?;
+            let mut data = json!({"round":round,"attempt":attempt,"input":payload,
+                "model":client.config().model,"tools_revision":checkpoint.profile["tools_revision"],"effort":client.config().reasoning_effort,
+                "history_auxiliary":history_auxiliary});
+            if !checkpoint.attached_steering.is_empty() {
+                data["steer_events"] = json!(checkpoint.attached_steering);
+                data["steer_input_start"] = json!(checkpoint.input.len() - checkpoint.attached_steering.len());
+            }
+            let request = self.journal.append(run, "model_request", data)?;
             let started = Instant::now();
-            match client.send_turn(body, &mut observer) {
+            match client.send_turn(body, observer) {
                 Ok(response) => return Ok((request, response, started.elapsed().as_millis())),
                 Err(error) => {
                     self.journal.append(run,"model_error",json!({"request":request,"round":round,"error":error.to_string(),"usage":null,
@@ -321,11 +406,33 @@ impl Session {
         unreachable!()
     }
 
+    fn collect_steering(
+        &mut self,
+        checkpoint: &mut Checkpoint,
+        poll: &mut dyn FnMut() -> Option<SteeringInput>,
+    ) -> Result<(), String> {
+        while let Some(input) = poll() {
+            let data = json!({"text":input.text,"received_ms":input.received_ms,"after_round":checkpoint.round});
+            let event = self.journal.append(checkpoint.run, "steer", data.clone())?;
+            checkpoint.queued_steering.push((event, data["text"].clone()));
+        }
+        Ok(())
+    }
+
     fn checkpoint(&self) -> Result<Checkpoint, String> {
         let mut checkpoint = Checkpoint::default();
         for event in &self.journal.events {
             match event.kind.as_str() {
                 "user" => self.apply_user(&mut checkpoint, event.run, &event.data)?,
+                "steer" => checkpoint.queued_steering.push((event.seq, event.data["text"].clone())),
+                "model_request" => {
+                    checkpoint.attach_steering();
+                    if !checkpoint.attached_steering.is_empty()
+                        && event.data["steer_events"] != json!(checkpoint.attached_steering)
+                    {
+                        return Err("Model request does not match the recorded corrections".to_owned());
+                    }
+                }
                 "model_response" => {
                     let output = self.journal.load_json(&event.data["output"])?;
                     let items = output
@@ -338,16 +445,18 @@ impl Session {
                     checkpoint.pending = calls_from(items, event.run, checkpoint.round)?;
                     checkpoint.input.extend(items.iter().cloned());
                     checkpoint.final_text = event.data["final_text"].as_str().map(str::to_owned);
+                    checkpoint.attached_steering.clear();
                 }
-                "tool_result" => {
+                "tool_result" | "tool_skipped" | "tool_reconciled" => {
+                    let index = checkpoint.pending.iter()
+                        .position(|call| event.data["operation"] == call.operation)
+                        .ok_or("Receipt has no matching pending operation")?;
                     let call = checkpoint
                         .pending
-                        .pop_front()
+                        .remove(index)
                         .ok_or("Receipt has no pending tool")?;
-                    if event.data["operation"] != call.operation {
-                        return Err("Tool receipts are out of order".to_owned());
-                    }
-                    let value = self.journal.load_json(&event.data["output"])?;
+                    let hash = event.data.get("model_output").unwrap_or(&event.data["output"]);
+                    let value = self.journal.load_json(hash)?;
                     checkpoint.input.push(function_output(&call, &value));
                 }
                 _ => {}
@@ -357,6 +466,7 @@ impl Session {
     }
 
     fn apply_user(&self, checkpoint: &mut Checkpoint, run: usize, data: &Value) -> Result<(), String> {
+        checkpoint.attached_steering.clear();
         if let Some(link) = data.get("continuation") {
             let output = self.journal.load_json(&link["outputs"])?;
             let outputs = output.as_array().ok_or("Continuation has no output array")?;
@@ -370,6 +480,7 @@ impl Session {
                 return Err("Continuation does not match the prior pending calls.".to_owned());
             }
             checkpoint.input.extend(outputs.iter().cloned());
+            checkpoint.attach_steering();
         }
         checkpoint.run = run;
         checkpoint.round = 0;
@@ -431,7 +542,40 @@ impl Session {
             "reason":"The pending call was superseded at the start of the linked continuation."})
     }
 
-    fn execute(&mut self, run: usize, round: usize, call: &Call) -> Result<Value, String> {
+    fn close_steered_call(
+        &mut self,
+        run: usize,
+        round: usize,
+        call: &Call,
+        observer: &mut dyn RunObserver,
+    ) -> Result<Value, String> {
+        let attempt = self.journal.events.iter().rev()
+            .find(|e| e.kind == "tool_attempt" && e.data["operation"] == call.operation)
+            .map(|e| e.seq);
+        let (kind, result) = if attempt.is_some() {
+            let mut value = self.observe_pending(call);
+            if value["code"] == "CALL_SUPERSEDED" {
+                value["code"] = json!("STEER_UNCONFIRMED");
+                value["reason"] = json!("The user redirected the run. This earlier attempt has no recorded outcome.");
+            }
+            ("tool_reconciled", value)
+        } else {
+            ("tool_skipped", json!({
+                "status":"skipped", "code":"SUPERSEDED_BY_STEER",
+                "reason":"The user redirected the run before this call started. Check the latest user message."
+            }))
+        };
+        let args = self.journal.put(call.raw_args.as_bytes())?;
+        let output = self.journal.store_json(&result)?;
+        self.journal.append(run, kind, json!({
+            "operation":call.operation,"attempt":attempt,"round":round,"call_id":call.call_id,
+            "name":call.name,"arguments":args,"output":output,"status":result["status"],"code":result["code"]
+        }))?;
+        observer.on_tool_call(&tool_trace(call, round, &result, 0));
+        Ok(function_output(call, &result))
+    }
+
+    fn execute(&mut self, run: usize, round: usize, call: &Call, observer: &mut dyn RunObserver) -> Result<Value, String> {
         let args: Result<Value, _> = serde_json::from_str(&call.raw_args);
         let input = self.journal.put(call.raw_args.as_bytes())?;
         let attempt = self.journal.append(
@@ -441,7 +585,7 @@ impl Session {
             "call_id":call.call_id,"name":call.name,"arguments":input}),
         )?;
         let started = Instant::now();
-        let mut result = match (call.name.as_str(), args) {
+        let result = match (call.name.as_str(), args) {
             (_, Err(err)) => {
                 json!({"status":"error","code":"INVALID_ARGUMENT","reason":err.to_string()})
             }
@@ -467,29 +611,45 @@ impl Session {
             )?,
             _ => json!({"status":"error","code":"UNKNOWN_TOOL","reason":"Use an available tool."}),
         };
-        if json_byte_len(&result) > MAX_RESPONSE_BYTES {
-            let status = result["status"].clone();
-            let code = result.get("code").cloned();
+        let mut model_output = receipt::project(self.options.receipt_mode, &call.name, &result);
+        let presented = model_output.as_ref().unwrap_or(&result);
+        if json_byte_len(presented) > MAX_RESPONSE_BYTES {
+            let status = presented["status"].clone();
+            let code = presented.get("code").cloned();
             let artifact = self.journal.artifact(
                 run,
                 json!({"kind":"tool_output","operation":call.operation}),
-                &serde_json::to_vec_pretty(&result).map_err(|e| e.to_string())?,
+                &serde_json::to_vec_pretty(presented).map_err(|e| e.to_string())?,
             )?;
-            result = json!({"status":status,"delivery":"folded","result_ref":artifact.result_ref,"source":artifact.source,
+            let mut envelope = json!({"status":status,"delivery":"folded","result_ref":artifact.result_ref,"source":artifact.source,
                           "revision":artifact.revision,"reason":"Full tool response is available through read."});
             if let Some(code) = code {
-                result["code"] = code;
+                envelope["code"] = code;
             }
+            model_output = Some(envelope);
         }
         let output = self.journal.store_json(&result)?;
-        self.journal.append(run,"tool_result",json!({"operation":call.operation,"attempt":attempt,"round":round,
+        let elapsed = started.elapsed().as_millis();
+        let mut data = json!({"operation":call.operation,"attempt":attempt,"round":round,
             "call_id":call.call_id,"name":call.name,"output":output,"status":result["status"],"code":result["code"],
             "source":result["source"],"revision":result["revision"],"result_ref":result["result_ref"],
-            "elapsed_ms":started.elapsed().as_millis()}))?;
-        Ok(function_output(call, &result))
+            "elapsed_ms":elapsed});
+        if let Some(output) = &model_output {
+            data["model_output"] = json!(self.journal.store_json(output)?);
+        }
+        self.journal.append(run, "tool_result", data)?;
+        let delivered = model_output.as_ref().unwrap_or(&result);
+        observer.on_tool_call(&tool_trace(call, round, delivered, elapsed));
+        Ok(function_output(call, delivered))
     }
 
-    fn project_workspace_evidence(&self, input: &mut Value, prior_len: usize) -> Vec<Value> {
+    fn project_workspace_evidence(
+        &self,
+        input: &mut Value,
+        prior_len: usize,
+        redact: bool,
+        notices: bool,
+    ) -> Vec<Value> {
         let Some(items) = input.as_array_mut() else {
             return Vec::new();
         };
@@ -510,20 +670,23 @@ impl Session {
         let mut changes = Vec::new();
         for (path, before) in observed {
             if let Some(current) = tools::workspace_revision(&self.ctx, &path) {
-                if before != current {
+                if notices && before != current {
                     changes.push(json!({"path":path,"last_observed_revision":before,"current_revision":current}));
                 }
                 checked.insert(path, current);
             }
         }
+        if !redact {
+            return changes;
+        }
         for item in items.iter_mut().take(prior_len) {
             let Some(mut output) = tool_payload(item) else {
                 continue;
             };
-            let mut adjusted = project_historical_source(&mut output, &checked);
+            let mut adjusted = project_historical_source(&mut output, &checked, notices);
             if let Some(hits) = output.get_mut("hits").and_then(Value::as_array_mut) {
                 for hit in hits {
-                    adjusted |= project_historical_source(hit, &checked);
+                    adjusted |= project_historical_source(hit, &checked, notices);
                 }
             }
             if adjusted {
@@ -550,7 +713,9 @@ fn workspace_source(evidence: &Value) -> Option<&str> {
     }
 }
 
-fn project_historical_source(evidence: &mut Value, checked: &BTreeMap<String, Value>) -> bool {
+fn project_historical_source(
+    evidence: &mut Value, checked: &BTreeMap<String, Value>, notices: bool,
+) -> bool {
     let Some(current) = workspace_source(evidence)
         .and_then(|path| checked.get(path))
         .filter(|current| **current != evidence["revision"])
@@ -573,7 +738,9 @@ fn project_historical_source(evidence: &mut Value, checked: &BTreeMap<String, Va
         fields.remove(field);
     }
     fields.insert("historical".to_owned(), json!(true));
-    fields.insert("current_revision".to_owned(), current.clone());
+    if notices {
+        fields.insert("current_revision".to_owned(), current.clone());
+    }
     true
 }
 
@@ -611,6 +778,20 @@ fn function_output(call: &Call, value: &Value) -> Value {
     json!({"type":"function_call_output","call_id":call.call_id,"output":value.to_string()})
 }
 
+fn tool_trace(call: &Call, turn: usize, result: &Value, duration_ms: u128) -> ToolCallTrace {
+    ToolCallTrace {
+        turn,
+        name: call.name.clone(),
+        arguments: call.raw_args.clone(),
+        response_bytes: json_byte_len(result),
+        status: result["status"].as_str().unwrap_or("unknown").to_owned(),
+        delivery: result["delivery"].as_str().map(str::to_owned),
+        result_ref: result["result_ref"].as_str().map(str::to_owned),
+        error_code: result["code"].as_str().map(str::to_owned),
+        duration_ms,
+    }
+}
+
 pub fn inspect(
     root: &Path,
     name: &str,
@@ -624,10 +805,8 @@ pub fn inspect(
             .iter()
             .find(|event| event.kind == "artifact" && event.data["result_ref"] == reference)
             .ok_or("Unknown result_ref in this session")?;
-        let hash = item.data["revision"]
-            .as_str()
-            .ok_or("Missing artifact version")?;
-        return String::from_utf8(get_blob(&dir, hash)?).map_err(|err| err.to_string());
+        let artifact = serde_json::from_value(item.data.clone()).map_err(|err| err.to_string())?;
+        return tools::inspect_artifact_content(&artifact, |hash| get_blob(&dir, hash));
     }
     if let Some(seq) = event {
         let entry = events
@@ -637,7 +816,7 @@ pub fn inspect(
         let payload = match entry.kind.as_str() {
             "user" => entry.data["continuation"]["outputs"].as_str(),
             "tool_attempt" => entry.data["arguments"].as_str(),
-            "tool_result" => entry.data["output"].as_str(),
+            "tool_result" | "tool_skipped" | "tool_reconciled" => entry.data["output"].as_str(),
             "model_request" => entry.data["input"].as_str(),
             "model_response" => entry.data["raw_response"].as_str(),
             _ => None,
@@ -658,14 +837,18 @@ pub fn inspect(
             }
             output["detail"] = detail;
         }
+        if let Some(hash) = entry.data["model_output"].as_str() {
+            output["model_detail"] = serde_json::from_slice(&get_blob(&dir, hash)?)
+                .map_err(|err| err.to_string())?;
+        }
         return serde_json::to_string_pretty(&output).map_err(|err| err.to_string());
     }
     Ok(events
         .iter()
         .map(|entry| {
             let detail = match entry.kind.as_str() {
-                "user" => entry.data["text"].as_str().unwrap_or_default().to_owned(),
-                "tool_attempt" | "tool_result" => format!(
+                "user" | "steer" => entry.data["text"].as_str().unwrap_or_default().to_owned(),
+                "tool_attempt" | "tool_result" | "tool_skipped" | "tool_reconciled" => format!(
                     "{} {} {}",
                     entry.data["operation"],
                     entry.data["name"],

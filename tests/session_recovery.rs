@@ -3,7 +3,8 @@ use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
+use std::sync::mpsc;
 use std::time::Duration;
 
 fn request(stream: &mut TcpStream) -> Value {
@@ -34,6 +35,98 @@ fn respond(mut stream: TcpStream, item: Value) {
 
 fn call(id: &str, name: &str, args: Value) -> Value {
     json!({"type":"function_call","call_id":id,"name":name,"arguments":args.to_string()})
+}
+
+#[test]
+fn streams_a_running_session_and_steers_without_starting_queued_writes() {
+    let root = tempfile::tempdir().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let gateway = format!("http://{}/v1", listener.local_addr().unwrap());
+    let (release, correction_received) = mpsc::channel();
+    let server = std::thread::spawn(move || {
+        let (mut initial, _) = listener.accept().unwrap();
+        let first = request(&mut initial);
+        assert_eq!(first["input"][0]["content"], "Write the original files");
+        let delta = "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"Working on the original files\\n\"}\n\n";
+        let original = json!({"type":"response.completed","response":{"output":[
+            call("first_old", "write", json!({"path":"old-a.txt","mode":"create","content":"old"})),
+            call("second_old", "write", json!({"path":"old-b.txt","mode":"create","content":"old"})),
+        ],"usage":{"total_tokens":15}}});
+        let end = format!("event: response.completed\ndata: {original}\n\n");
+        write!(initial, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{delta}", delta.len() + end.len()).unwrap();
+        initial.flush().unwrap();
+        correction_received.recv_timeout(Duration::from_secs(10)).unwrap();
+        initial.write_all(end.as_bytes()).unwrap();
+        drop(initial);
+
+        let (mut redirected, _) = listener.accept().unwrap();
+        let body = request(&mut redirected);
+        let input = body["input"].as_array().unwrap();
+        assert_eq!(input.len(), 6);
+        for (index, id) in [(3, "first_old"), (4, "second_old")] {
+            assert_eq!(input[index]["call_id"], id);
+            let reply: Value = serde_json::from_str(input[index]["output"].as_str().unwrap()).unwrap();
+            assert_eq!(reply["code"], "SUPERSEDED_BY_STEER");
+        }
+        assert_eq!(input[5], json!({"role":"user","content":"Write corrected.txt instead"}));
+        respond(redirected, call("corrected", "write",
+            json!({"path":"corrected.txt","mode":"create","content":"corrected"})));
+
+        let (mut last, _) = listener.accept().unwrap();
+        let final_request = request(&mut last);
+        let receipt: Value =
+            serde_json::from_str(final_request["input"][7]["output"].as_str().unwrap()).unwrap();
+        assert_eq!(receipt["outcome"], "committed");
+        respond(last, json!({"type":"message","role":"assistant","content":[
+            {"type":"output_text","text":"Updated corrected.txt."}
+        ]}));
+    });
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_source_harness"))
+        .args(["chat", "--root", root.path().to_str().unwrap(), "--session", "steering"])
+        .env("OPENAI_BASE_URL", &gateway).env("OPENAI_MODEL", "fixture")
+        .env_remove("SOURCE_HARNESS_TEST_INTERRUPT")
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
+    let (text, lines) = mpsc::channel();
+    let (progress, logs) = mpsc::channel();
+    let read_stdout = std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            if text.send(line.unwrap()).is_err() { break; }
+        }
+    });
+    let read_stderr = std::thread::spawn(move || {
+        for line in BufReader::new(stderr).lines() {
+            if progress.send(line.unwrap()).is_err() { break; }
+        }
+    });
+    writeln!(stdin, "Write the original files").unwrap();
+    let signal = lines.recv_timeout(Duration::from_secs(10)).unwrap();
+    assert_eq!(signal, "Working on the original files");
+    writeln!(stdin, ":steer Write corrected.txt instead").unwrap();
+    let wait = Duration::from_secs(10);
+    while logs.recv_timeout(wait).unwrap() != "Correction received." {}
+    release.send(()).unwrap();
+    drop(stdin);
+    assert!(child.wait().unwrap().success());
+    server.join().unwrap();
+    read_stdout.join().unwrap();
+    read_stderr.join().unwrap();
+    assert_eq!(lines.try_iter().filter(|line| line == "Updated corrected.txt.").count(), 1);
+    assert!(!root.path().join("old-a.txt").exists());
+    assert!(!root.path().join("old-b.txt").exists());
+    assert_eq!(fs::read(root.path().join("corrected.txt")).unwrap(), b"corrected");
+    let journal = fs::read_to_string(root.path().join(".sourceharness/sessions/steering/events.jsonl")).unwrap();
+    let events: Vec<Value> = journal.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+    let steer = events.iter().find(|event| event["kind"] == "steer").unwrap();
+    let redirected = events.iter().find(|event| event["kind"] == "model_request" && event["data"]["round"] == 2).unwrap();
+    assert_eq!(steer["data"]["after_round"], 1);
+    assert_eq!(redirected["data"]["steer_events"], json!([steer["seq"]]));
+    assert_eq!(redirected["data"]["steer_input_start"], 5);
+    assert_eq!(events.iter().filter(|event| event["kind"] == "tool_skipped").count(), 2);
+    assert_eq!(events.iter().filter(|event| event["kind"] == "tool_attempt").count(), 1);
 }
 
 fn invoke(root: &Path, gateway: &str, interrupt: bool, args: &[&str]) -> Output {

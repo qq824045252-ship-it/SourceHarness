@@ -11,6 +11,9 @@ use std::path::{Component, Path, PathBuf};
 #[cfg(test)]
 #[path = "retrieval_tests.rs"]
 mod retrieval_tests;
+#[cfg(test)]
+#[path = "write_tests.rs"]
+mod write_tests;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub enum EditMode {
@@ -38,7 +41,7 @@ pub fn definitions(mode: EditMode) -> Vec<Value> {
         EditMode::Range => definition("edit", "Replace non-overlapping 1-based inclusive source line ranges in one file revision. new_text replaces the exact raw range, including its ending newline when present.",
             json!({"path":path,"expected_revision":version,"changes":{"type":"array","items":{"type":"object","properties":{
                 "start_line":{"type":"integer","minimum":1},"end_line":{"type":"integer","minimum":1},"new_text":{"type":"string"}},"required":["start_line","end_line","new_text"],"additionalProperties":false}}}), &["path","expected_revision","changes"]),
-        EditMode::Patch => definition("edit", "Apply a unified text patch to exactly one file revision. Use the supplied path as the target and preserve unrelated content.",
+        EditMode::Patch => definition("edit", "Apply a unified text patch to exactly one file revision. Include a standard hunk header such as @@ -1,2 +1,2 @@ and prefix context lines with a space. Use the supplied path as the target and preserve unrelated content.",
             json!({"path":path,"expected_revision":version,"patch":{"type":"string"}}), &["path","expected_revision","patch"]),
     };
     let mut indexed_search = crate::registry::search_result_schema();
@@ -57,7 +60,7 @@ pub fn definitions(mode: EditMode) -> Vec<Value> {
             json!({"path":path,"result_ref":reference,"start_line":{"type":"integer","minimum":1},
                 "line_count":{"type":"integer","minimum":1},"start_byte":{"type":"integer","minimum":0},"end_byte":{"type":"integer","minimum":0}}), &[]),
         edit,
-        definition("write", "Create a UTF-8 file at an absent path with mode=create. For create, omit expected_revision. For a full replacement, use mode=replace and pass the observed revision of that same file. Parent directory must exist. Returns a verified revision and diff.",
+        definition("write", "Create a UTF-8 file and any missing workspace parent directories with mode=create. For create, omit expected_revision. For a full replacement, use mode=replace and pass the observed revision of that same file. Returns a verified revision and diff.",
             json!({"path":path,"content":{"type":"string"},"mode":{"type":"string","enum":["create","replace"]},
                 "expected_revision":{"type":"string","description":"Use the observed file revision for mode=replace. Omit this parameter for mode=create."}}), &["path","content","mode"]),
         indexed_search,
@@ -164,10 +167,17 @@ pub(crate) fn permitted(path: &Path) -> bool {
     })
 }
 
-pub(crate) fn workspace_path(
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ResolvePath {
+    Existing,
+    MissingFile,
+    MissingParents,
+}
+
+fn workspace_path(
     ctx: &WorkspaceContext,
     path: &str,
-    allow_new: bool,
+    mode: ResolvePath,
 ) -> Result<(PathBuf, String), Value> {
     let requested = Path::new(path);
     if path.is_empty() || !permitted(requested) {
@@ -179,13 +189,16 @@ pub(crate) fn workspace_path(
     let candidate = ctx.root().join(requested);
     let canonical = match fs::symlink_metadata(&candidate) {
         Ok(_) => candidate.canonicalize(),
-        Err(err) if allow_new && err.kind() == io::ErrorKind::NotFound => {
+        Err(err) if mode != ResolvePath::Existing && err.kind() == io::ErrorKind::NotFound => {
             let parent = candidate
                 .parent()
                 .ok_or_else(|| rejected("INVALID_PATH", "Missing parent"))?;
-            parent
-                .canonicalize()
-                .map(|parent| parent.join(candidate.file_name().unwrap_or_default()))
+            let parent = if mode == ResolvePath::MissingParents {
+                resolve_missing_parent(parent)
+            } else {
+                parent.canonicalize()
+            };
+            parent.map(|parent| parent.join(candidate.file_name().unwrap_or_default()))
         }
         Err(err) if err.kind()==io::ErrorKind::NotFound => {
             return Err(rejected("FILE_NOT_FOUND","This workspace path is absent. Use write with mode=create if the task calls for a new file."));
@@ -203,6 +216,61 @@ pub(crate) fn workspace_path(
         ));
     }
     Ok((canonical.clone(), ctx.relative_display(&canonical)))
+}
+
+fn resolve_missing_parent(mut parent: &Path) -> io::Result<PathBuf> {
+    let mut missing = Vec::new();
+    loop {
+        match fs::symlink_metadata(parent) {
+            Ok(_) => {
+                let mut directory = parent.canonicalize()?;
+                if !fs::metadata(&directory)?.is_dir() {
+                    return Err(io::ErrorKind::NotADirectory.into());
+                }
+                directory.extend(missing.into_iter().rev());
+                return Ok(directory);
+            }
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                missing.push(parent.file_name().ok_or(io::ErrorKind::NotFound)?);
+                parent = parent.parent().ok_or(io::ErrorKind::NotFound)?;
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
+fn verify_parent(path: &Path) -> Result<(), Value> {
+    let canonical = path
+        .canonicalize()
+        .map_err(|err| rejected("PATH_UNAVAILABLE", &err.to_string()))?;
+    if canonical != path {
+        return Err(rejected(
+            "PATH_CHANGED",
+            "A parent directory resolved to a different location.",
+        ));
+    }
+    if !canonical.is_dir() {
+        return Err(rejected("PATH_UNAVAILABLE", "Expected a parent directory."));
+    }
+    Ok(())
+}
+
+fn create_parents(ctx: &WorkspaceContext, parent: &Path) -> Result<(), Value> {
+    let relative = parent
+        .strip_prefix(ctx.root())
+        .map_err(|_| rejected("INVALID_PATH", "Resolved parent leaves the workspace."))?;
+    let mut current = ctx.root().to_path_buf();
+    verify_parent(&current)?;
+    for component in relative.components() {
+        current.push(component);
+        match fs::create_dir(&current) {
+            Ok(()) => {}
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(err) => return Err(rejected("WRITE_ERROR", &err.to_string())),
+        }
+        verify_parent(&current)?;
+    }
+    Ok(())
 }
 
 pub(crate) fn walk(root: &Path, limit: usize) -> Result<(Vec<PathBuf>, bool), String> {
@@ -272,7 +340,7 @@ fn file_snapshot(
 }
 
 pub(super) fn workspace_revision(ctx: &WorkspaceContext, path: &str) -> Option<Value> {
-    let (file, _) = match workspace_path(ctx, path, false) {
+    let (file, _) = match workspace_path(ctx, path, ResolvePath::Existing) {
         Ok(target) => target,
         Err(error) if error["code"] == "FILE_NOT_FOUND" => return Some(Value::Null),
         Err(_) => return None,
@@ -295,9 +363,8 @@ fn line_location(lines: &[usize], byte: usize) -> usize {
         .max(1)
 }
 
-fn read_page(journal: &Journal, artifact: &Artifact, args: &ReadArgs) -> Reply {
-    let raw = journal.get(&artifact.revision)?;
-    let text = std::str::from_utf8(&raw).map_err(|e| e.to_string())?;
+fn read_page(raw: &[u8], artifact: &Artifact, args: &ReadArgs) -> Reply {
+    let text = std::str::from_utf8(raw).map_err(|e| e.to_string())?;
     let lines = line_offsets(text);
     let count = lines.len() - 1;
     let user = match (
@@ -370,7 +437,7 @@ pub fn read(ctx: &WorkspaceContext, journal: &mut Journal, run: usize, args: &Va
     };
     let artifact = match (&args.path, &args.result_ref) {
         (Some(path), None) => {
-            let (file, path) = match workspace_path(ctx, path, false) {
+            let (file, path) = match workspace_path(ctx, path, ResolvePath::Existing) {
                 Ok(p) => p,
                 Err(e) => return Ok(e),
             };
@@ -409,7 +476,12 @@ pub fn read(ctx: &WorkspaceContext, journal: &mut Journal, run: usize, args: &Va
             ))
         }
     };
-    read_page(journal, &artifact, &args)
+    match artifact_content(&artifact, |hash| journal.get(hash))? {
+        ArtifactContent::Full { bytes, revision } => {
+            read_page(&bytes, &Artifact { revision, ..artifact }, &args)
+        }
+        ArtifactContent::Paged(reply) => Ok(reply),
+    }
 }
 
 pub fn search_result(journal: &Journal, args: &Value) -> Reply {
@@ -424,15 +496,25 @@ pub fn search_result(journal: &Journal, args: &Value) -> Reply {
         ));
     }
     let mut metadata = json!({});
+    let mut paged = None;
     let outcome = crate::search::execute_snapshot(&args.to_string(), |reference| {
         let Some(artifact) = journal.resolve(reference) else {
             return Ok(None);
         };
-        let raw =
-            String::from_utf8(journal.get(&artifact.revision)?).map_err(|err| err.to_string())?;
-        metadata = json!({"source":artifact.source,"revision":artifact.revision,"result_ref":artifact.result_ref});
+        let (bytes, revision) = match artifact_content(&artifact, |hash| journal.get(hash))? {
+            ArtifactContent::Full { bytes, revision } => (bytes, revision),
+            ArtifactContent::Paged(reply) => {
+                paged = Some(reply);
+                return Ok(None);
+            }
+        };
+        let raw = String::from_utf8(bytes).map_err(|err| err.to_string())?;
+        metadata = json!({"source":artifact.source,"revision":revision,"result_ref":artifact.result_ref});
         Ok(Some(Snapshot::new(artifact.result_ref, raw)))
     })?;
+    if let Some(reply) = paged {
+        return Ok(reply);
+    }
     let mut envelope = match outcome {
         Ok(envelope) => envelope,
         Err(error) => return serde_json::to_value(error).map_err(|err| err.to_string()),
@@ -454,6 +536,7 @@ pub fn search_result(journal: &Journal, args: &Value) -> Reply {
 }
 
 const RESEARCH_BATCH_SIZE: usize = 128;
+const RESEARCH_FLAT_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Default)]
 struct ResearchHits {
@@ -498,6 +581,46 @@ impl ResearchReport {
         serde_json::from_slice(&journal.get(hash)?).map_err(|err| err.to_string())
     }
 
+    fn flatten(
+        &self,
+        load: &impl Fn(&str) -> Result<Vec<u8>, String>,
+    ) -> Result<Option<Vec<u8>>, String> {
+        let mut full = vec![b'['];
+        let mut count = 0;
+        for hash in &self.batches {
+            let batch: Vec<Value> =
+                serde_json::from_slice(&load(hash)?).map_err(|err| err.to_string())?;
+            if batch.is_empty() {
+                return Err("Empty archived research batch".to_owned());
+            }
+            let pretty = serde_json::to_vec_pretty(&batch).map_err(|err| err.to_string())?;
+            // Keep the exact pretty-printed array layout without building one unbounded Value.
+            let hits = &pretty[2..pretty.len() - 2];
+            let overhead = if count == 0 { 3 } else { 4 };
+            if full.len() + hits.len() + overhead > RESEARCH_FLAT_BYTES {
+                return Ok(None);
+            }
+            if count != 0 {
+                full.push(b',');
+            }
+            full.push(b'\n');
+            full.extend_from_slice(hits);
+            count += batch.len();
+        }
+        if count != self.count {
+            return Err("Incomplete archived research report".to_owned());
+        }
+        if count != 0 {
+            full.push(b'\n');
+        }
+        full.push(b']');
+        Ok(Some(full))
+    }
+
+    fn next(artifact: &Artifact, offset: usize, limit: usize) -> Value {
+        json!({"scope":"page","result_ref":artifact.result_ref,"offset":offset,"limit":limit})
+    }
+
     fn page(
         &self,
         journal: &mut Journal,
@@ -530,12 +653,14 @@ impl ResearchReport {
             let shown = hits.len();
             let next_offset = offset + shown;
             let mut value = json!({"status":"ok","source":{"kind":"research","scope":artifact.source["scope"]},
-                "revision":artifact.revision,"result_ref":artifact.result_ref,
+                "revision":artifact.revision,"result_ref":artifact.result_ref,"result_kind":"research_report",
                 "coverage":self.coverage,"presentation":{"matching_items":self.count,"retained":self.count,
                     "offset":offset,"shown":shown,"complete":offset==0 && shown==self.count},"hits":hits});
+            if let Some(preview) = artifact.source.get("preview_ref") {
+                value["preview_ref"] = preview.clone();
+            }
             if next_offset < self.count {
-                value["next"] = json!({"scope":"page","result_ref":artifact.result_ref,
-                    "offset":next_offset,"limit":limit});
+                value["next"] = Self::next(artifact, next_offset, limit);
             }
             if json_byte_len(&value) <= MAX_RESPONSE_BYTES {
                 return Ok(value);
@@ -550,6 +675,56 @@ impl ResearchReport {
             } else {
                 hits.pop();
             }
+        }
+    }
+}
+
+enum ArtifactContent {
+    Full { bytes: Vec<u8>, revision: String },
+    Paged(Value),
+}
+
+fn artifact_content(
+    artifact: &Artifact,
+    load: impl Fn(&str) -> Result<Vec<u8>, String>,
+) -> Result<ArtifactContent, String> {
+    let Some(report) = artifact.source["research_report"].as_str() else {
+        return Ok(ArtifactContent::Full {
+            bytes: load(&artifact.revision)?,
+            revision: artifact.revision.clone(),
+        });
+    };
+    let report: ResearchReport =
+        serde_json::from_slice(&load(report)?).map_err(|err| err.to_string())?;
+    if let Some(bytes) = report.flatten(&load)? {
+        return Ok(ArtifactContent::Full {
+            revision: revision(&bytes),
+            bytes,
+        });
+    }
+    let mut reply = rejected(
+        "RESEARCH_PAGED",
+        "The full research report exceeds the flat content limit. Pass next to research to enumerate its saved matches.",
+    );
+    reply["result_ref"] = json!(artifact.result_ref);
+    reply["matching_items"] = json!(report.count);
+    reply["next"] = ResearchReport::next(artifact, 0, 8);
+    if let Some(preview) = artifact.source.get("preview_ref") {
+        reply["preview_ref"] = preview.clone();
+    }
+    Ok(ArtifactContent::Paged(reply))
+}
+
+pub(super) fn inspect_artifact_content(
+    artifact: &Artifact,
+    load: impl Fn(&str) -> Result<Vec<u8>, String>,
+) -> Result<String, String> {
+    match artifact_content(artifact, load)? {
+        ArtifactContent::Full { bytes, .. } => {
+            String::from_utf8(bytes).map_err(|err| err.to_string())
+        }
+        ArtifactContent::Paged(reply) => {
+            serde_json::to_string_pretty(&reply).map_err(|err| err.to_string())
         }
     }
 }
@@ -663,7 +838,11 @@ pub fn research(ctx: &WorkspaceContext, journal: &mut Journal, run: usize, args:
     let mut scanned_all = true;
     match args.scope.as_str() {
         "workspace" if args.result_ref.is_none() => {
-            let (root, _) = match workspace_path(ctx, args.path.as_deref().unwrap_or("."), false) {
+            let (root, _) = match workspace_path(
+                ctx,
+                args.path.as_deref().unwrap_or("."),
+                ResolvePath::Existing,
+            ) {
                 Ok(v) => v,
                 Err(e) => return Ok(e),
             };
@@ -714,12 +893,15 @@ pub fn research(ctx: &WorkspaceContext, journal: &mut Journal, run: usize, args:
                     "Supply a result_ref from this session.",
                 ));
             };
-            let raw = journal.get(&artifact.revision)?;
+            let (raw, revision) = match artifact_content(&artifact, |hash| journal.get(hash))? {
+                ArtifactContent::Full { bytes, revision } => (bytes, revision),
+                ArtifactContent::Paged(reply) => return Ok(reply),
+            };
             match_lines(
                 journal,
                 std::str::from_utf8(&raw).map_err(|e| e.to_string())?,
                 query,
-                &artifact,
+                &Artifact { revision, ..artifact },
                 &mut hits,
             )?;
             inspected = 1;
@@ -734,11 +916,14 @@ pub fn research(ctx: &WorkspaceContext, journal: &mut Journal, run: usize, args:
                         e.kind.as_str(),
                         "artifact"
                             | "tool_result"
+                            | "tool_skipped"
+                            | "tool_reconciled"
                             | "tool_attempt"
                             | "validation_receipt"
                             | "validation_intent"
                             | "edit_intent"
                             | "user"
+                            | "steer"
                     ) && !(e.kind == "artifact"
                         && matches!(
                             e.data["source"]["kind"].as_str(),
@@ -748,6 +933,7 @@ pub fn research(ctx: &WorkspaceContext, journal: &mut Journal, run: usize, args:
                                     | "history_result"
                                     | "research"
                                     | "research_hit"
+                                    | "research_preview"
                             )
                         ))
                 })
@@ -757,14 +943,17 @@ pub fn research(ctx: &WorkspaceContext, journal: &mut Journal, run: usize, args:
                 inspected += 1;
                 let mut record =
                     json!({"seq":event.seq,"run":event.run,"kind":event.kind,"data":event.data});
+                let kind = event.kind.as_str();
+                let has_output = matches!(kind, "tool_result" | "tool_skipped" | "tool_reconciled");
+                let has_arguments = matches!(kind, "tool_attempt" | "tool_skipped" | "tool_reconciled");
                 let mut found = record.to_string().contains(query);
-                if !found && event.kind == "tool_result" {
+                if !found && has_output {
                     found = journal
                         .load_json(&event.data["output"])?
                         .to_string()
                         .contains(query);
                 }
-                if !found && event.kind == "tool_attempt" {
+                if !found && has_arguments {
                     let hash = event.data["arguments"]
                         .as_str()
                         .ok_or("Missing recorded arguments")?;
@@ -772,8 +961,8 @@ pub fn research(ctx: &WorkspaceContext, journal: &mut Journal, run: usize, args:
                 }
                 if found {
                     let source = json!({"kind":"history","event":event.seq});
-                    let attempt = match event.kind.as_str() {
-                        "tool_attempt" => Some(&event),
+                    let attempt = match kind {
+                        "tool_attempt" | "tool_skipped" | "tool_reconciled" => Some(&event),
                         "tool_result" => event.data["attempt"]
                             .as_u64()
                             .and_then(|seq| usize::try_from(seq).ok())
@@ -793,7 +982,7 @@ pub fn research(ctx: &WorkspaceContext, journal: &mut Journal, run: usize, args:
                         let artifact = journal.artifact(run, arguments_source, &arguments)?;
                         record["arguments_ref"] = json!(artifact.result_ref);
                     }
-                    if event.kind == "tool_result" {
+                    if has_output {
                         let output = journal.load_json(&event.data["output"])?;
                         let payload = journal.artifact(
                             run,
@@ -829,17 +1018,23 @@ pub fn research(ctx: &WorkspaceContext, journal: &mut Journal, run: usize, args:
         count: hits.count,
         batches: hits.batches,
     };
-    let preview = if report.count == 0 {
-        Vec::new()
-    } else {
-        report.batch(journal, 0)?
-    };
-    let hash = journal.put(&serde_json::to_vec(&report).map_err(|err| err.to_string())?)?;
-    let artifact = journal.artifact(
-        run,
-        json!({"kind":"research","scope":args.scope,"research_report":hash}),
-        &serde_json::to_vec_pretty(&preview).map_err(|err| err.to_string())?,
-    )?;
+    let manifest = serde_json::to_vec(&report).map_err(|err| err.to_string())?;
+    let hash = revision(&manifest);
+    let mut source = json!({"kind":"research","scope":args.scope,"research_report":hash});
+    if report.count > RESEARCH_BATCH_SIZE {
+        let preview = report.batch(journal, 0)?;
+        let preview_bytes = serde_json::to_vec_pretty(&preview).map_err(|err| err.to_string())?;
+        if preview_bytes.len() <= RESEARCH_FLAT_BYTES {
+            let artifact = journal.artifact(
+                run,
+                json!({"kind":"research_preview","scope":args.scope,"report_revision":hash,
+                    "presentation":{"offset":0,"shown":preview.len(),"matching_items":report.count,"complete":false}}),
+                &preview_bytes,
+            )?;
+            source["preview_ref"] = json!(artifact.result_ref);
+        }
+    }
+    let artifact = journal.artifact(run, source, &manifest)?;
     report.page(journal, run, &artifact, 0, limit)
 }
 
@@ -1039,7 +1234,12 @@ pub fn modify(
         };
         (path, Some(rev), Some(edit), None)
     };
-    let (target, path) = match workspace_path(ctx, &path, true) {
+    let resolve = if before.is_none() {
+        ResolvePath::MissingParents
+    } else {
+        ResolvePath::MissingFile
+    };
+    let (target, path) = match workspace_path(ctx, &path, resolve) {
         Ok(p) => p,
         Err(e) => return Ok(e),
     };
@@ -1056,12 +1256,24 @@ pub fn modify(
     let next = match edit {
         Some(Edit::Text(changes)) => edit_text(old, changes),
         Some(Edit::Range(changes)) => edit_range(old, changes),
-        Some(Edit::Patch(patch)) => diffy::Patch::from_str(&patch)
-            .map_err(|err| rejected("INVALID_PATCH", &err.to_string()))
-            .and_then(|patch| {
-                diffy::apply(old, &patch)
-                    .map_err(|err| rejected("PATCH_MISMATCH", &err.to_string()))
-            }),
+        Some(Edit::Patch(mut patch)) => {
+            // An omitted transport delimiter is different from a diff's explicit no-newline marker.
+            if !patch.ends_with('\n') {
+                patch.push('\n');
+            }
+            diffy::Patch::from_str(&patch)
+                .map_err(|err| rejected("INVALID_PATCH", &format!("{err}. Use a standard @@ -1,2 +1,2 @@ hunk header and prefix context lines with a space.")))
+                .and_then(|patch| {
+                    if patch.hunks().is_empty() {
+                        return Err(rejected(
+                            "INVALID_PATCH",
+                            "Provide at least one unified-diff hunk. Use a standard header such as @@ -1,2 +1,2 @@, a space for context lines, - for removed lines, and + for added lines.",
+                        ));
+                    }
+                    diffy::apply(old, &patch)
+                        .map_err(|err| rejected("PATCH_MISMATCH", &err.to_string()))
+                })
+        }
         None => Ok(content.ok_or("Missing write content")?),
     };
     let next = match next {
@@ -1106,7 +1318,13 @@ fn commit(
     intent: &Intent,
     recovering: bool,
 ) -> Reply {
-    let (target, path) = match workspace_path(ctx, &intent.path, true) {
+    let creating = intent.before.is_none();
+    let resolve = if creating {
+        ResolvePath::MissingParents
+    } else {
+        ResolvePath::MissingFile
+    };
+    let (target, path) = match workspace_path(ctx, &intent.path, resolve) {
         Ok(p) => p,
         Err(e) => return Ok(e),
     };
@@ -1150,6 +1368,11 @@ fn commit(
         return Ok(result);
     } else {
         let parent = target.parent().ok_or("Missing target parent")?;
+        if creating {
+            if let Err(error) = create_parents(ctx, parent) {
+                return Ok(error);
+            }
+        }
         let mut temp = tempfile::Builder::new()
             .prefix(".sourceharness-write-")
             .tempfile_in(parent)
@@ -1164,6 +1387,11 @@ fn commit(
                 .map_err(|e| e.to_string())?;
         }
         temp.as_file().sync_all().map_err(|e| e.to_string())?;
+        if creating {
+            if let Err(error) = verify_parent(parent) {
+                return Ok(error);
+            }
+        }
         let latest = match file_bytes(&target, ctx.config().max_file_bytes) {
             Ok(v) => v,
             Err(e) => return Ok(e),

@@ -2,6 +2,10 @@
 
 import hashlib
 import json
+import os
+import subprocess
+import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -38,6 +42,8 @@ class Case:
     expected: dict[str, bytes]
     prompt: str
     report_fields: dict[str, str]
+    report_path: str = "evidence.md"
+    behavior: dict | None = None
 
     def seed(self, root):
         root.mkdir(parents=True, exist_ok=True)
@@ -47,16 +53,25 @@ class Case:
             path.write_bytes(contents)
 
     def grader_config(self):
+        semantic_paths = {self.behavior["module"]} if self.behavior else set()
         return {
-            "expected_sha256": {name: sha(raw) for name, raw in self.expected.items() if name != "evidence.md"},
+            "expected_sha256": {
+                name: sha(raw) for name, raw in self.expected.items()
+                if name != self.report_path and name not in semantic_paths
+            },
             "report_fields": self.report_fields,
+            "report_path": self.report_path,
+            "behavior": self.behavior,
         }
 
     def workspace_revision(self, root):
         return sha(encode({name: sha(raw) for name, raw in workspace_files(root).items()}))
 
     def with_maintainer_note(self, path, note):
-        return Case(self.inputs, self.expected | {path: self.expected[path] + note}, self.prompt, self.report_fields)
+        return Case(
+            self.inputs, self.expected | {path: self.expected[path] + note},
+            self.prompt, self.report_fields, self.report_path, self.behavior,
+        )
 
 
 BASE_A = Policy("POL-031", 30, 2)
@@ -74,7 +89,7 @@ POLICY_PROMPT = (
 )
 
 
-def policy_case(policy, *, middle=False, large=False, create=False):
+def policy_case(policy, *, middle=False, large=False, create=False, report_path="evidence.md"):
     primary = b"[primary]\ntimeout=30\nretries=2\n"
     archive = b"[archive]\ntimeout=30\nretries=2\n"
     filler = b"".join(f"# preserved settings note {i:04d}\n".encode() for i in range(230))
@@ -92,9 +107,9 @@ def policy_case(policy, *, middle=False, large=False, create=False):
         inputs["evidence.md"] = BASE_A.evidence()
     changed = primary.replace(b"timeout=30", f"timeout={policy.timeout}".encode())
     changed = changed.replace(b"retries=2", f"retries={policy.retries}".encode())
-    expected = inputs | {"service.cfg": original.replace(primary, changed, 1), "evidence.md": policy.evidence()}
+    expected = inputs | {"service.cfg": original.replace(primary, changed, 1), report_path: policy.evidence()}
     fields = {"POLICY": policy.identifier, "TIMEOUT": str(policy.timeout), "RETRIES": str(policy.retries)}
-    return Case(inputs, expected, POLICY_PROMPT, fields)
+    return Case(inputs, expected, POLICY_PROMPT.replace("evidence.md", report_path), fields, report_path)
 
 
 def bytes_for_comments(size):
@@ -124,7 +139,14 @@ def build_case():
         "the usage example. Preserve the caller and all unrelated text. Deliver evidence.md with exactly "
         "two KEY=VALUE lines, SYMBOL and OUTPUT. Run the acceptance check again and report the result."
     )
-    return Case(inputs, expected, prompt, {"SYMBOL": "render_count", "OUTPUT": "count=3"})
+    behavior = {
+        "app": "app.py",
+        "app_output": "count=3",
+        "module": "formatter.py",
+        "symbol": "render_count",
+        "examples": [[value, f"count={value}"] for value in (0, 3, -7, 42)],
+    }
+    return Case(inputs, expected, prompt, {"SYMBOL": "render_count", "OUTPUT": "count=3"}, behavior=behavior)
 
 
 def workspace_files(root):
@@ -145,13 +167,65 @@ def evidence_matches(raw, fields):
     return len(pairs) == len(fields) and all(len(pair) == 2 for pair in pairs) and dict(pairs) == fields
 
 
+_CHECK_INTERFACE = """
+import importlib.util
+import json
+import sys
+
+target = json.load(sys.stdin)
+spec = importlib.util.spec_from_file_location("fixture_module", target["module"])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+function = getattr(module, target["symbol"])
+for argument, expected in target["examples"]:
+    actual = function(argument)
+    if actual != expected:
+        sys.exit(f"{target['symbol']}({argument!r}) returned {actual!r}; expected {expected!r}")
+"""
+
+
+def behavior_failures(root, config):
+    if config is None:
+        return []
+    env = os.environ.copy()
+    env.pop("OPENAI_API_KEY", None)
+    options = {"capture_output": True, "cwd": root, "env": env, "timeout": 10}
+    try:
+        app = subprocess.run([sys.executable, "-B", config["app"]], **options)
+        if app.returncode != 0:
+            return [app.stderr.decode("utf-8", "replace").strip() or f"CLI exited with {app.returncode}"]
+        if app.stdout.decode("utf-8", "replace").splitlines() != [config["app_output"]]:
+            return ["CLI output does not match the contract"]
+        interface = subprocess.run(
+            [sys.executable, "-B", "-c", _CHECK_INTERFACE], input=encode(config), **options,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return [str(error)]
+    if interface.returncode != 0:
+        return [interface.stderr.decode("utf-8", "replace").strip() or f"Interface check exited with {interface.returncode}"]
+    return []
+
+
 def grade(root, case):
     actual = workspace_files(root)
     expected = case.expected
+    semantic_paths = {case.behavior["module"]} if case.behavior else set()
     mismatches = [
         name
-        for name in sorted((expected.keys() | actual.keys()) - {"evidence.md"})
+        for name in sorted((expected.keys() | actual.keys()) - {case.report_path} - semantic_paths)
         if actual.get(name) != expected.get(name)
     ]
-    evidence_ok = evidence_matches(actual.get("evidence.md"), case.report_fields)
-    return {"passed": not mismatches and evidence_ok, "mismatched_paths": mismatches, "evidence_exact": evidence_ok}
+    evidence_ok = evidence_matches(actual.get(case.report_path), case.report_fields)
+    failures = []
+    if case.behavior:
+        with tempfile.TemporaryDirectory() as directory:
+            snapshot = Path(directory)
+            for name, contents in actual.items():
+                path = snapshot / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(contents)
+            failures = behavior_failures(snapshot, case.behavior)
+    return {
+        "passed": not mismatches and evidence_ok and not failures,
+        "mismatched_paths": mismatches, "evidence_exact": evidence_ok, "behavior_errors": failures,
+    }

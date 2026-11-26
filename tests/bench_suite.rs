@@ -188,23 +188,27 @@ fn bench_response(stream: &mut TcpStream, output: Value, usage: Value) {
     write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{sse}", sse.len()).unwrap();
 }
 
-#[test]
-fn bench_reports_known_tokens_and_missing_usage_across_retries() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let config = GatewayConfig {
+fn bench_gateway(listener: &TcpListener, max_turns: usize) -> GatewayConfig {
+    GatewayConfig {
         base_url: format!("http://{}/v1", listener.local_addr().unwrap()),
         api_key: "fixture".into(),
         model: "fixture".into(),
         reasoning_effort: Some("low".into()),
-        max_turns: 2,
+        max_turns,
         timeout_secs: 5,
-    };
+    }
+}
+
+#[test]
+fn bench_reports_tool_traces_and_costs_across_retries() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let config = bench_gateway(&listener, 2);
     let server = std::thread::spawn(move || {
         let call = json!({"type":"function_call","call_id":"call_1","name":"search_result",
             "arguments":"{}"});
         bench_response(
             &mut accept_bench_request(&listener),
-            call.clone(),
+            call,
             json!({"input_tokens":50,"output_tokens":10,"total_tokens":60,
                 "output_tokens_details":{"reasoning_tokens":5}}),
         );
@@ -216,7 +220,11 @@ fn bench_reports_known_tokens_and_missing_usage_across_retries() {
         )
         .unwrap();
         drop(failing);
-        bench_response(&mut accept_bench_request(&listener), call, Value::Null);
+        bench_response(
+            &mut accept_bench_request(&listener),
+            json!({"type":"function_call","call_id":"call_1","name":"read_result","arguments":"{}"}),
+            Value::Null,
+        );
         bench_response(
             &mut accept_bench_request(&listener),
             json!({"type":"message","role":"assistant","content":[{"type":"output_text",
@@ -233,13 +241,36 @@ fn bench_reports_known_tokens_and_missing_usage_across_retries() {
     let report: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
     assert_eq!(report["passed"], 1);
     assert_eq!(report["total_attempts"], 2);
+    assert_eq!(report["total_tool_calls"], 2);
+    assert_eq!(report["total_tool_errors"], 2);
+    assert_eq!(report["error_code_counts"], json!({"INVALID_ARGUMENT":2}));
     assert_eq!(report["total_tokens"], 160);
     assert_eq!(report["total_reasoning_tokens"], 9);
     assert_eq!(report["unknown_usage_requests"], 2);
     let case = &report["results"][0];
+    assert_eq!(case["total_tool_calls"], 2);
+    assert_eq!(case["error_tool_calls"], 2);
+    assert_eq!(case["tool_rounds"], 1);
+    assert_eq!(case["tool_sequence_by_turn"], json!([["read_result"]]));
     let attempts = case["attempts"].as_array().unwrap();
+    let traces = case["tool_traces"].as_array().unwrap();
+    assert_eq!(traces.len(), 2);
     assert!(attempts[0]["error"].as_str().unwrap().contains("503"));
-    for (attempt, known) in attempts.iter().zip([60, 100]) {
+    for (index, (known, name)) in [(60, "search_result"), (100, "read_result")]
+        .into_iter()
+        .enumerate()
+    {
+        let attempt = &attempts[index];
+        assert_eq!(attempt["attempt"], index + 1);
+        assert_eq!(attempt["total_tool_calls"], 1);
+        assert_eq!(attempt["error_tool_calls"], 1);
+        assert_eq!(attempt["tool_trace_range"], json!([index, index + 1]));
+        let trace = &traces[index];
+        assert_eq!(trace["attempt"], index + 1);
+        assert_eq!(trace["turn"], 1);
+        assert_eq!(trace["name"], name);
+        assert_eq!(trace["status"], "error");
+        assert_eq!(trace["error_code"], "INVALID_ARGUMENT");
         assert_eq!(attempt["known_usage"]["total_tokens"], known);
         assert_eq!(attempt["total_tokens"], Value::Null);
         assert_eq!(attempt["model_requests"], 2);
@@ -254,5 +285,30 @@ fn bench_reports_known_tokens_and_missing_usage_across_retries() {
     assert_eq!(report["total_elapsed_ms"], total_elapsed);
     assert_eq!(report["by_tier"]["1k"]["avg_latency_ms"], total_elapsed);
     assert_eq!(report["by_tier"]["1k"]["total_tokens"], 160);
+    assert_eq!(report["by_tier"]["1k"]["total_tool_calls"], 2);
+    assert_eq!(report["by_tier"]["1k"]["error_tool_calls"], 2);
     assert_eq!(report["by_tier"]["1k"]["unknown_usage_requests"], 2);
+}
+
+#[test]
+fn bench_preserves_calls_when_the_final_attempt_has_no_outcome() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let config = bench_gateway(&listener, 1);
+    let server = std::thread::spawn(move || {
+        bench_response(
+            &mut accept_bench_request(&listener),
+            json!({"type":"function_call","call_id":"call_1","name":"search_result","arguments":"{}"}),
+            json!({"total_tokens":25}),
+        );
+    });
+
+    let report = run_bench_suite(config, "inline", 1, Some(1), None).unwrap();
+    server.join().unwrap();
+    assert_eq!(report.failed, 1);
+    assert_eq!(report.total_tool_calls, 1);
+    assert_eq!(report.total_tool_errors, 1);
+    assert_eq!(report.total_tokens, 25);
+    assert_eq!(report.inline_zero_round_rate, "0/1");
+    assert_eq!(report.within_ideal_rate, "0/1");
+    assert_eq!(report.by_tier["1k"].error_tool_calls, 1);
 }

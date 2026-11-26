@@ -123,6 +123,11 @@ fn provenance(
         "validation_program_revision".to_owned(),
         compare(&receipt.data["program_revision"], &current_program),
     );
+    let current_inputs = json!(commands.input_revisions(check));
+    comparisons.insert(
+        "validation_input_revisions".to_owned(),
+        compare(&receipt.data["input_revisions"], &current_inputs),
+    );
     let model_request = journal
         .events
         .iter()
@@ -148,6 +153,7 @@ fn provenance(
         "check":receipt.data["check"],
         "result_ref":receipt.data["result_ref"],
         "check_configured_now":!new_config.is_null(),
+        "validation_inputs_matched_after_check":receipt.data["input_revisions_stable"],
         "workspace_revision_comparison":compare(&receipt.data["workspace_revision"], workspace),
         "comparisons":comparisons,
     })

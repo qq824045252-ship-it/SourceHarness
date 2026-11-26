@@ -7,6 +7,30 @@ use serde_json::{json, Value};
 use std::fs;
 
 #[test]
+fn restores_receipts_by_operation_in_recorded_completion_order() {
+    let root = tempfile::tempdir().unwrap();
+    let mut session = Session::open(root.path(), "work", Options::default()).unwrap();
+    session.journal.append(1, "user", json!({"text":"Read both files","profile":{}})).unwrap();
+    let response = session.journal.store_json(&json!([
+        {"type":"function_call","call_id":"read_a","name":"read","arguments":"{}"},
+        {"type":"function_call","call_id":"read_b","name":"read","arguments":"{}"}
+    ])).unwrap();
+    session.journal.append(1, "model_response", json!({"round":1,"output":response})).unwrap();
+    for (operation, actual, delivered) in [("1.1.2", "raw b", "visible b"), ("1.1.1", "a", "a")] {
+        let raw = session.journal.store_json(&json!({"content":actual})).unwrap();
+        let model = session.journal.store_json(&json!({"content":delivered})).unwrap();
+        session.journal.append(1, "tool_result", json!({
+            "operation":operation,"output":raw,"model_output":model
+        })).unwrap();
+    }
+    let replay = session.checkpoint().unwrap();
+    assert!(replay.pending.is_empty());
+    assert_eq!(replay.input[3]["call_id"], "read_b");
+    assert_eq!(replay.input[3]["output"], json!({"content":"visible b"}).to_string());
+    assert_eq!(replay.input[4]["call_id"], "read_a");
+}
+
+#[test]
 fn create_accepts_an_empty_optional_revision_but_still_requires_an_absent_file() {
     let root = tempfile::tempdir().unwrap();
     let mut session = Session::open(root.path(), "work", Options::default()).unwrap();
@@ -208,7 +232,7 @@ fn model_request_marks_stale_history_and_keeps_the_archived_snapshot_available()
         {"role":"user","content":"What is the current limit?"},
         {"type":"function_call_output","call_id":"new","output":new.to_string()}
     ]);
-    let changed = session.project_workspace_evidence(&mut request, 3);
+    let changed = session.project_workspace_evidence(&mut request, 3, true, true);
     assert!(
         changed.is_empty(),
         "The current read supersedes the old observation."
@@ -237,7 +261,7 @@ fn model_request_marks_stale_history_and_keeps_the_archived_snapshot_available()
 
     let mut unchecked =
         json!([{"type":"function_call_output","call_id":"old","output":old.to_string()}]);
-    let changed = session.project_workspace_evidence(&mut unchecked, 1);
+    let changed = session.project_workspace_evidence(&mut unchecked, 1, true, true);
     assert_eq!(
         changed,
         vec![
@@ -245,6 +269,17 @@ fn model_request_marks_stale_history_and_keeps_the_archived_snapshot_available()
                                    "current_revision":revision(b"limit=60\n")})
         ]
     );
+    let original = json!([{"type":"function_call_output","call_id":"old","output":old.to_string()}]);
+    let mut notices_only = original.clone();
+    let notices = session.project_workspace_evidence(&mut notices_only, 1, false, true);
+    assert_eq!(notices, changed);
+    assert_eq!(notices_only, original);
+    let mut projection_only = original;
+    assert!(session.project_workspace_evidence(&mut projection_only, 1, true, false).is_empty());
+    let redacted: Value = serde_json::from_str(projection_only[0]["output"].as_str().unwrap()).unwrap();
+    assert_eq!(redacted["historical"], true);
+    assert!(redacted.get("current_revision").is_none());
+    assert!(redacted.get("content").is_none());
 }
 
 #[test]
