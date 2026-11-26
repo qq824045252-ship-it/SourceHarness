@@ -43,3 +43,40 @@ cargo run -- smoke --strategy inline
 cargo run -- smoke --strategy native
 cargo run -- run --file README.md --prompt "Summarize this file."
 ```
+
+## Resumable workspace sessions
+
+Add `--session` to `agent` or `chat` to let SourceHarness research, read, edit, and write workspace files. A session stores requests, tool results, file revisions, and checkpoints under `.sourceharness/sessions/<name>` in that workspace. A session has one active writer. Ordinary `agent` and `chat` invocations retain their read-only tools.
+
+```powershell
+cargo run --locked -- agent --root . --session config-review --prompt "Apply the current configuration policy and report the changes."
+cargo run --locked -- agent --root . --session config-review --resume
+cargo run --locked -- history --root . --session config-review
+```
+
+Use `history --event <n>` to inspect a request or receipt and `history --ref <ref>` to open its original text. A `result_ref` belongs to its session and retains the old content when a live file changes. A validation receipt includes `workspace_revision`. Use `fork --revision <hash> --to <new-directory>` with the same `--root` and `--session` to open that tested file snapshot in a fresh workspace.
+
+`research` searches the workspace, stored results, and session history. `read` returns literal UTF-8 text and the source revision, with continuation coordinates when a result spans pages. `edit` matches exact old text by default. `--edit-mode range` and `--edit-mode patch` select alternative contracts. The default `--history-mode events` supplies related execution records, and `conversation` and `facts` select the other experiment conditions. Use the same model, executable, tool options, and validation configuration when resuming an unfinished run.
+
+The events and facts modes check the versions of file evidence carried into a later request. When a file has changed, the replay links to the original snapshot and directs the model to the current revision. The conversation mode replays the original tool results for comparison. A recovery conflict includes the diff from the planned file to the current file when both versions are available.
+
+To give the model a validation tool, pass `--checks <file>` with a map of check names to executable configurations. For example, the following command runs a workspace test script against a captured file snapshot and records the checked revision, program digest, stdout, stderr, and exit status.
+
+```json
+{
+  "acceptance": {
+    "program": "C:/absolute/path/to/python.exe",
+    "args": ["verify.py"],
+    "description": "Check the workspace deliverables against their acceptance criteria.",
+    "timeout_seconds": 60
+  }
+}
+```
+
+Reports distinguish a completed write receipt from a matching target observed during recovery. File revisions guard edits against observed conflicts. External editors share the filesystem, so programs that bypass the workspace lock can still race the file replacement. Session data contains workspace content and provider responses for recovery. Keep it local or review it before sharing.
+
+Run the real-model comparison with the release executable and a fresh output directory.
+
+```powershell
+python scripts/eval_session.py --exe target/release/source_harness.exe --out target/session-eval
+```

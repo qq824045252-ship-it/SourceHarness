@@ -3,7 +3,7 @@ use std::fs;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use regex::Regex;
 use serde::Serialize;
@@ -175,6 +175,15 @@ pub struct BenchCaseResult {
     pub usage: UsageMetrics,
     pub latency_ms: u128,
     pub tool_traces: Vec<ToolCallTrace>,
+    pub attempts: Vec<BenchAttempt>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BenchAttempt {
+    pub passed: bool,
+    pub error: Option<String>,
+    pub total_tokens: Option<u64>,
+    pub elapsed_ms: u128,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -374,10 +383,20 @@ fn execute_case_with_retry(
     strategy: &str,
 ) -> BenchCaseResult {
     let delays = [500u64, 1500u64];
+    let mut attempts = Vec::with_capacity(delays.len() + 1);
     for attempt in 0..=delays.len() {
+        let started = Instant::now();
         match execute_single_case(client, case, strategy) {
-            Ok(res) => return res,
+            Ok(mut res) => {
+                attempts.append(&mut res.attempts);
+                res.attempts = attempts;
+                return res;
+            }
             Err(err) => {
+                attempts.push(BenchAttempt {
+                    passed: false, error: Some(err.to_string()), total_tokens: None,
+                    elapsed_ms: started.elapsed().as_millis(),
+                });
                 let retryable = matches!(err, TransportError::Http(_) | TransportError::Io(_));
                 if retryable && attempt < delays.len() {
                     std::thread::sleep(Duration::from_millis(delays[attempt]));
@@ -411,6 +430,7 @@ fn execute_case_with_retry(
                     usage: UsageMetrics::default(),
                     latency_ms: 0,
                     tool_traces: Vec::new(),
+                    attempts,
                 };
             }
         }
@@ -496,13 +516,14 @@ fn execute_single_case(
     let error_tool_calls = error_codes.len();
     let reasoning_items = run.turns.iter().map(|t| t.reasoning_item_count).sum();
 
+    let passed = failure_reasons.is_empty();
     Ok(BenchCaseResult {
         id: case.id.clone(),
         category: case.category,
         size_tier: case.size_tier,
         raw_bytes: case.document.len(),
         delivery,
-        passed: failure_reasons.is_empty(),
+        passed,
         failure_reasons,
         ideal_tool_rounds: case.ideal_tool_rounds,
         llm_turns: run.turns.len(),
@@ -520,6 +541,10 @@ fn execute_single_case(
         usage: run.total_usage,
         latency_ms: run.total_latency_ms,
         tool_traces: run.tool_traces,
+        attempts: vec![BenchAttempt {
+            passed, error: None, total_tokens: run.usage_complete.then_some(run.total_usage.total_tokens),
+            elapsed_ms: run.total_latency_ms,
+        }],
     })
 }
 

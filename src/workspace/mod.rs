@@ -8,7 +8,7 @@ use serde_json::{Map, Value};
 use crate::budget::{json_byte_len, to_json_string, MAX_RESPONSE_BYTES};
 use crate::error::{ErrorCode, ErrorPayload};
 use crate::registry;
-use crate::store::{FoldStore, IngestOutcome};
+use crate::store::{FoldEnvelope, FoldStore, IngestOutcome};
 use crate::transport::{ToolExecutionOutput, ToolExecutor};
 
 /// Safety limits for read-only workspace producer tools.
@@ -180,8 +180,8 @@ impl WorkspaceToolRouter {
                 obj.insert("status".to_owned(), Value::String("ok".to_owned()));
                 obj.insert("delivery".to_owned(), Value::String("inline".to_owned()));
                 obj.insert("tool".to_owned(), Value::String(tool_name.to_owned()));
-                for (k, v) in meta {
-                    obj.insert(k, v);
+                for (k, v) in &meta {
+                    obj.insert(k.clone(), v.clone());
                 }
                 obj.insert("content".to_owned(), Value::String(content.clone()));
                 let envelope = Value::Object(obj);
@@ -194,18 +194,35 @@ impl WorkspaceToolRouter {
                 } else {
                     // JSON escaping expansion pushed an under-threshold payload over 8 KiB: fold safely.
                     let fold_env = self.store.insert(content);
-                    ToolExecutionOutput {
-                        output_json: to_json_string(&fold_env),
-                        delivery: Some("folded"),
-                        result_ref: Some(fold_env.result_ref),
-                    }
+                    folded_output(tool_name, meta, fold_env)
                 }
             }
-            IngestOutcome::Folded(fold_env) => ToolExecutionOutput {
-                output_json: to_json_string(&fold_env),
-                delivery: Some("folded"),
-                result_ref: Some(fold_env.result_ref),
-            },
+            IngestOutcome::Folded(fold_env) => folded_output(tool_name, meta, fold_env),
+        }
+    }
+}
+
+fn folded_output(tool: &str, meta: Map<String, Value>, mut envelope: FoldEnvelope) -> ToolExecutionOutput {
+    loop {
+        let mut value = serde_json::to_value(&envelope).expect("FoldEnvelope serialization is infallible");
+        let obj = value.as_object_mut().expect("FoldEnvelope is an object");
+        obj.extend(meta.clone());
+        obj.insert("tool".to_owned(), Value::String(tool.to_owned()));
+        obj.insert("delivery".to_owned(), Value::String("folded".to_owned()));
+        if json_byte_len(&value) <= MAX_RESPONSE_BYTES {
+            return ToolExecutionOutput {
+                output_json: to_json_string(&value), delivery: Some("folded"), result_ref: Some(envelope.result_ref),
+            };
+        }
+        if !envelope.preview.is_empty() {
+            envelope.preview.clear();
+        } else if envelope.sections.pop().is_some() {
+            envelope.index_status = "truncated";
+        } else {
+            return ToolExecutionOutput {
+                output_json: ErrorPayload::new(ErrorCode::InvalidArgument, None, "METADATA_EXCEEDS_RESPONSE_BUDGET").to_json_string(),
+                delivery: None, result_ref: None,
+            };
         }
     }
 }

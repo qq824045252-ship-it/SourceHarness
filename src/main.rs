@@ -7,6 +7,7 @@ use serde_json::{json, Value};
 use source_harness::bench;
 use source_harness::eval;
 use source_harness::registry;
+use source_harness::session::{self, Commands, EditMode, HistoryMode, Options, Session};
 use source_harness::store::{FoldStore, IngestOutcome};
 use source_harness::transport::injection::{
     EnvelopeInjector, InlineUserMessageInjector, NativeFunctionCallInjector,
@@ -56,15 +57,47 @@ fn run_cli() -> Result<(), String> {
         }
         "agent" => {
             let root = parse_flag(&args[1..], "--root")?.unwrap_or_else(|| ".".to_owned());
+            let cfg = apply_gateway_flags(GatewayConfig::from_env(), &args[1..])?;
+            if let Some(name) = parse_flag(&args[1..], "--session")? {
+                let mut session = Session::open(&PathBuf::from(root), &name, session_options(&args[1..])?)?;
+                let prompt = parse_flag(&args[1..], "--prompt")?;
+                let resume = args[1..].iter().any(|arg| arg == "--resume");
+                if resume == prompt.is_some() {
+                    return Err("Supply either --prompt or --resume for this session.".to_owned());
+                }
+                println!("{}", session.run(&ResponsesClient::new(cfg), prompt.as_deref())?);
+                return Ok(());
+            }
             let prompt = parse_flag(&args[1..], "--prompt")?
                 .ok_or_else(|| "Missing --prompt <text>".to_owned())?;
-            let cfg = apply_gateway_flags(GatewayConfig::from_env(), &args[1..])?;
             run_agent(PathBuf::from(root), &prompt, cfg)
         }
         "chat" => {
             let root = parse_flag(&args[1..], "--root")?.unwrap_or_else(|| ".".to_owned());
             let cfg = apply_gateway_flags(GatewayConfig::from_env(), &args[1..])?;
+            if let Some(name) = parse_flag(&args[1..], "--session")? {
+                let session = Session::open(&PathBuf::from(root), &name, session_options(&args[1..])?)?;
+                return run_session_chat(session, ResponsesClient::new(cfg));
+            }
             run_chat(PathBuf::from(root), cfg)
+        }
+        "history" => {
+            let root = parse_flag(&args[1..], "--root")?.unwrap_or_else(|| ".".to_owned());
+            let name = parse_flag(&args[1..], "--session")?.ok_or("Missing --session <name>")?;
+            let reference = parse_flag(&args[1..], "--ref")?;
+            let event = parse_flag(&args[1..], "--event")?.map(|raw| raw.parse()).transpose()
+                .map_err(|_| "Invalid --event number".to_owned())?;
+            print!("{}", session::inspect(&PathBuf::from(root), &name, reference.as_deref(), event)?);
+            Ok(())
+        }
+        "fork" => {
+            let root = parse_flag(&args[1..], "--root")?.unwrap_or_else(|| ".".to_owned());
+            let name = parse_flag(&args[1..], "--session")?.ok_or("Missing --session <name>")?;
+            let manifest = parse_flag(&args[1..], "--revision")?.ok_or("Missing --revision <workspace_revision>")?;
+            let dest = parse_flag(&args[1..], "--to")?.ok_or("Missing --to <new-directory>")?;
+            session::fork_snapshot(&PathBuf::from(root), &name, &manifest, &PathBuf::from(&dest))?;
+            println!("Restored snapshot {manifest} to {dest}");
+            Ok(())
         }
         "eval" => {
             let root = parse_flag(&args[1..], "--root")?.unwrap_or_else(|| ".".to_owned());
@@ -122,6 +155,40 @@ fn apply_gateway_flags(mut cfg: GatewayConfig, args: &[String]) -> Result<Gatewa
         cfg.reasoning_effort = Some(effort);
     }
     Ok(cfg)
+}
+
+fn session_options(args: &[String]) -> Result<Options, String> {
+    let edit = match parse_flag(args, "--edit-mode")?.as_deref() {
+        None | Some("text") => EditMode::Text,
+        Some("range") => EditMode::Range,
+        Some("patch") => EditMode::Patch,
+        _ => return Err("Expected --edit-mode text, range, or patch".to_owned()),
+    };
+    let history = match parse_flag(args, "--history-mode")?.as_deref() {
+        Some("facts") => HistoryMode::Facts,
+        None | Some("events") => HistoryMode::Events,
+        Some("conversation") => HistoryMode::Conversation,
+        _ => return Err("Expected --history-mode conversation, events, or facts".to_owned()),
+    };
+    let commands = parse_flag(args, "--checks")?.map(|path| Commands::from_file(&PathBuf::from(path)))
+        .transpose()?.unwrap_or_default();
+    Ok(Options { edit, history, commands })
+}
+
+fn run_session_chat(mut session: Session, client: ResponsesClient) -> Result<(), String> {
+    if session.is_pending()? {
+        println!("{}", session.run(&client, None)?);
+    }
+    for line in io::stdin().lock().lines() {
+        let line = line.map_err(|err|err.to_string())?;
+        match line.trim() {
+            "" => continue,
+            ":quit" | ":exit" => break,
+            ":resume" => println!("{}", session.run(&client, None)?),
+            prompt => println!("{}", session.run(&client, Some(prompt))?),
+        }
+    }
+    Ok(())
 }
 
 struct StreamingTerminalObserver {
@@ -442,6 +509,9 @@ fn print_usage() {
          source_harness run --file <path> --prompt <text> [--strategy inline|native] [--model <m>] [--effort <e>]\n  \
          source_harness agent --root <dir> --prompt <text> [--model <m>] [--effort <e>]\n  \
          source_harness chat --root <dir> [--model <m>] [--effort <e>]\n  \
+         source_harness agent --root <dir> --session <name> [--prompt <text> | --resume] [--checks <file>]\n  \
+         source_harness history --root <dir> --session <name> [--event <n> | --ref <ref>]\n  \
+         source_harness fork --root <dir> --session <name> --revision <hash> --to <new-dir>\n  \
          source_harness eval [--root <dir>] [--model <m>] [--effort <e>] [--out <json_path>]\n  \
          source_harness bench [--workers <n>] [--strategy inline|native] [--limit <n>] [--model <m>] [--effort <e>] [--out <json_path>]\n\n\
          Defaults: --strategy inline, --effort low (override with OPENAI_REASONING_EFFORT or --effort)."

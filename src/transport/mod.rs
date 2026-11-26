@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 
 use crate::registry;
 use crate::store::FoldStore;
-use crate::transport::sse::{parse_sse_stream_with_observer, SseObserver, UsageMetrics};
+use crate::transport::sse::{parse_sse_stream_with_observer, ParsedResponse, SseObserver, UsageMetrics};
 
 #[derive(Debug)]
 pub enum TransportError {
@@ -143,6 +143,7 @@ pub struct RunResult {
     pub final_text: String,
     pub turns: Vec<TurnMetrics>,
     pub total_usage: UsageMetrics,
+    pub usage_complete: bool,
     pub tool_traces: Vec<ToolCallTrace>,
     pub final_input: Vec<Value>,
     pub total_latency_ms: u128,
@@ -190,6 +191,36 @@ impl ResponsesClient {
         &self.config
     }
 
+    pub(crate) fn request_body(&self, input: &[Value], instructions: Option<&str>, tools: &[Value]) -> Value {
+        let mut body = json!({
+            "model": self.config.model, "input": input, "tools": tools, "stream": true,
+        });
+        if let Some(instructions) = instructions {
+            body["instructions"] = json!(instructions);
+        }
+        if let Some(effort) = &self.config.reasoning_effort {
+            body["reasoning"] = json!({ "effort": effort });
+        }
+        body
+    }
+
+    pub(crate) fn send_turn(&self, body: &Value, observer: &mut dyn RunObserver) -> Result<ParsedResponse, TransportError> {
+        let url = format!("{}/responses", self.config.base_url.trim_end_matches('/'));
+        let resp = self.agent.post(&url)
+            .set("Authorization", &format!("Bearer {}", self.config.api_key))
+            .set("Content-Type", "application/json")
+            .send_string(&body.to_string())
+            .map_err(|err| match err {
+                ureq::Error::Status(code, resp) => {
+                    let text = resp.into_string().unwrap_or_default();
+                    TransportError::Http(format!("HTTP {code}: {text}"))
+                }
+                ureq::Error::Transport(err) => TransportError::Http(err.to_string()),
+            })?;
+        let mut adapter = ObserverSseAdapter { inner: observer };
+        parse_sse_stream_with_observer(BufReader::new(resp.into_reader()), &mut adapter)
+    }
+
     pub fn run_loop(
         &self,
         input: Vec<Value>,
@@ -210,49 +241,20 @@ impl ResponsesClient {
         observer: &mut dyn RunObserver,
     ) -> Result<RunResult, TransportError> {
         let tools = executor.tool_definitions();
-        let url = format!("{}/responses", self.config.base_url.trim_end_matches('/'));
         let run_started = Instant::now();
 
         let mut turn_metrics = Vec::new();
         let mut tool_traces = Vec::new();
         let mut total_usage = UsageMetrics::default();
+        let mut usage_complete = true;
 
         for turn in 1..=self.config.max_turns {
             observer.on_turn_start(turn);
             let turn_started = Instant::now();
 
-            let mut body = json!({
-                "model": self.config.model,
-                "input": input,
-                "tools": tools,
-                "stream": true,
-            });
-            if let Some(inst) = instructions {
-                body["instructions"] = Value::String(inst.to_owned());
-            }
-            if let Some(effort) = &self.config.reasoning_effort {
-                body["reasoning"] = json!({ "effort": effort });
-            }
-
-            let resp = self
-                .agent
-                .post(&url)
-                .set("Authorization", &format!("Bearer {}", self.config.api_key))
-                .set("Content-Type", "application/json")
-                .send_string(&body.to_string())
-                .map_err(|err| match err {
-                    ureq::Error::Status(code, r) => {
-                        let text = r.into_string().unwrap_or_default();
-                        TransportError::Http(format!("HTTP {code}: {text}"))
-                    }
-                    ureq::Error::Transport(t) => TransportError::Http(t.to_string()),
-                })?;
-
-            let mut sse_adapter = ObserverSseAdapter { inner: observer };
-            let parsed = parse_sse_stream_with_observer(
-                BufReader::new(resp.into_reader()),
-                &mut sse_adapter,
-            )?;
+            let body = self.request_body(&input, instructions, &tools);
+            let parsed = self.send_turn(&body, observer)?;
+            usage_complete &= parsed.usage_reported;
 
             let reasoning_item_count = parsed
                 .output_items
@@ -345,6 +347,7 @@ impl ResponsesClient {
                     final_text,
                     turns: turn_metrics,
                     total_usage,
+                    usage_complete,
                     tool_traces,
                     final_input: input,
                     total_latency_ms: run_started.elapsed().as_millis(),
@@ -358,7 +361,7 @@ impl ResponsesClient {
     }
 }
 
-fn extract_final_text(items: &[Value]) -> String {
+pub(crate) fn extract_final_text(items: &[Value]) -> String {
     let mut parts = Vec::new();
     for item in items {
         if item.get("type").and_then(Value::as_str) == Some("message") {

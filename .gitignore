@@ -1,4 +1,5 @@
 /target
+.sourceharness/
 *.log
 .env
 .DS_Store

@@ -19,6 +19,8 @@ pub struct ParsedResponse {
     pub response_id: Option<String>,
     pub output_items: Vec<Value>,
     pub usage: UsageMetrics,
+    pub usage_reported: bool,
+    pub response: Value,
 }
 
 /// Observer notified of incremental assistant text deltas during SSE streaming.
@@ -107,11 +109,14 @@ pub fn parse_sse_stream_with_observer<R: BufRead, O: SseObserver + ?Sized>(
     };
 
     let usage = parse_usage(response.get("usage"));
+    let usage_reported = response.get("usage").is_some_and(Value::is_object);
 
     Ok(ParsedResponse {
         response_id,
         output_items,
         usage,
+        usage_reported,
+        response,
     })
 }
 
