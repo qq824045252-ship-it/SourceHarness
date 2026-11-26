@@ -29,12 +29,14 @@ $env:OPENAI_MODEL    = "auto/deepseek-v4.1-flash-1017"
 
 ## CLI Commands
 
+Folded input uses `inline` by default. Requests use `low` reasoning effort unless you set `OPENAI_REASONING_EFFORT` or pass `--effort`.
+
 ```powershell
 cargo test --all-targets
 cargo clippy --all-targets -- -D warnings
 cargo run -- schema
 cargo run -- eval --root .
-cargo run -- bench --workers 6 --strategy native
+cargo run -- bench --workers 6
 cargo run -- agent --root . --prompt "List files in src/ and summarize MAX_RESPONSE_BYTES in src/budget.rs."
 cargo run -- chat --root .
 cargo run -- smoke --strategy inline

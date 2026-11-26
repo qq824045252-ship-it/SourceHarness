@@ -74,7 +74,7 @@ fn run_cli() -> Result<(), String> {
         }
         "bench" => {
             let strategy =
-                parse_flag(&args[1..], "--strategy")?.unwrap_or_else(|| "native".to_owned());
+                parse_flag(&args[1..], "--strategy")?.unwrap_or_else(|| "inline".to_owned());
             let workers = parse_flag(&args[1..], "--workers")?
                 .map(|s| {
                     s.parse::<usize>()
@@ -316,7 +316,7 @@ fn select_injector(strategy: &str) -> Result<Box<dyn EnvelopeInjector>, String> 
     }
 }
 
-fn run_smoke(strategy: &str, mut cfg: GatewayConfig) -> Result<(), String> {
+fn run_smoke(strategy: &str, cfg: GatewayConfig) -> Result<(), String> {
     let injector = select_injector(strategy)?;
     let doc = build_smoke_document();
     let store = FoldStore::new();
@@ -334,10 +334,6 @@ Return the exact numbers concisely.";
 
     let input = injector.build_initial_input(prompt, &envelope);
     let extra_tools = injector.extra_tool_definitions();
-
-    if cfg.reasoning_effort.is_none() {
-        cfg.reasoning_effort = Some("low".to_owned());
-    }
 
     let client = ResponsesClient::new(cfg);
     let result = client
@@ -447,6 +443,7 @@ fn print_usage() {
          source_harness agent --root <dir> --prompt <text> [--model <m>] [--effort <e>]\n  \
          source_harness chat --root <dir> [--model <m>] [--effort <e>]\n  \
          source_harness eval [--root <dir>] [--model <m>] [--effort <e>] [--out <json_path>]\n  \
-         source_harness bench [--workers <n>] [--strategy native|inline] [--limit <n>] [--model <m>] [--effort <e>] [--out <json_path>]"
+         source_harness bench [--workers <n>] [--strategy inline|native] [--limit <n>] [--model <m>] [--effort <e>] [--out <json_path>]\n\n\
+         Defaults: --strategy inline, --effort low (override with OPENAI_REASONING_EFFORT or --effort)."
     );
 }

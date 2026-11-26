@@ -734,5 +734,6 @@ fn transport_sse_parsing_and_envelope_injectors() {
         .as_str()
         .unwrap()
         .contains(&env.result_ref));
-    assert_eq!(native.extra_tool_definitions().len(), 1);
+    assert_eq!(native_input[1]["call_id"], native_input[2]["call_id"]);
+    assert!(native.extra_tool_definitions().is_empty());
 }

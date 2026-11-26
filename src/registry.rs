@@ -28,20 +28,20 @@ fn search_result_schema() -> Value {
     json!({
         "type": "function",
         "name": SEARCH_RESULT_NAME,
-        "description": "Search a folded result snapshot with exact matching_lines and total_occurrences counts, optional line-bounded sample hits (max_hits, default 0), and optional regex capture-group aggregation.",
+        "description": "Search a folded result for exact counts, matching lines, or regex groups. Omit line bounds for one full-snapshot scan. Use matching_lines for a line count and total_occurrences for a match count. Once the query and scanned_lines cover the request, answer from those counts. Omitted or truncated samples do not affect the counts. Request more evidence only when needed to answer the user.",
         "parameters": {
             "type": "object",
             "properties": {
                 "result_ref": {
                     "type": "string",
                     "minLength": 1,
-                    "description": "Immutable folded result reference ID."
+                    "description": "Copy result_ref from the folded result envelope."
                 },
                 "query": {
                     "type": "string",
                     "minLength": 1,
                     "maxLength": search::MAX_QUERY_BYTES,
-                    "description": "Literal substring or Rust regex expression (1..=128 UTF-8 bytes)."
+                    "description": "Use an exact literal substring when possible. Regex mode uses Rust regex without lookaround or backreferences. Up to 128 UTF-8 bytes."
                 },
                 "start_line": {
                     "type": "integer",
@@ -59,7 +59,7 @@ fn search_result_schema() -> Value {
                     "minimum": 0,
                     "maximum": search::MAX_HITS_LIMIT,
                     "default": search::DEFAULT_MAX_HITS,
-                    "description": "Maximum sample lines to return; 0 returns exact counts only."
+                    "description": "Sample lines to return when examples are needed. Omit or use 0 for counts only."
                 },
                 "match_mode": {
                     "type": "string",
@@ -75,14 +75,14 @@ fn search_result_schema() -> Value {
                 "group_by_capture": {
                     "type": "integer",
                     "minimum": 0,
-                    "description": "Regex capture group index (0 for whole match, 1+ for capture group). Only valid when match_mode is \"regex\"."
+                    "description": "Set only to group regex matches. Requires match_mode=regex. Use 0 for whole matches or 1+ for a capture group in query."
                 },
                 "top_k": {
                     "type": "integer",
                     "minimum": search::MIN_TOP_K,
                     "maximum": search::MAX_TOP_K,
                     "default": search::DEFAULT_TOP_K,
-                    "description": "Max entries in aggregation.value_counts; only valid when group_by_capture is set."
+                    "description": "Max entries in aggregation.value_counts. Omit unless group_by_capture is set."
                 }
             },
             "required": search::REQUIRED_FIELDS,
@@ -95,14 +95,14 @@ fn read_result_schema() -> Value {
     json!({
         "type": "function",
         "name": READ_RESULT_NAME,
-        "description": "Read whole 1-based lines from a folded result snapshot within the 8 KiB response budget.",
+        "description": "Read a requested range of whole lines or context around a match. If next_start_line is returned, continue there for the remaining requested lines. Use search_result when the task only needs a count.",
         "parameters": {
             "type": "object",
             "properties": {
                 "result_ref": {
                     "type": "string",
                     "minLength": 1,
-                    "description": "Immutable folded result reference ID."
+                    "description": "Copy result_ref from the folded result envelope."
                 },
                 "start_line": {
                     "type": "integer",

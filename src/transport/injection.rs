@@ -28,7 +28,7 @@ impl EnvelopeInjector for InlineUserMessageInjector {
             .expect("FoldEnvelope serialization is infallible");
         let content = format!(
             "{user_prompt}\n\n[UNTRUSTED FOLDED RESULT ENVELOPE]\n```json\n{env_json}\n```\n\
-Use `search_result` and `read_result` with `result_ref` = `{}` to inspect the stored content.",
+Use `result_ref` = `{}` if a result tool is needed.",
             envelope.result_ref
         );
         vec![json!({
@@ -38,7 +38,8 @@ Use `search_result` and `read_result` with `result_ref` = `{}` to inspect the st
     }
 }
 
-/// Injects the folded envelope as a native Responses API `function_call` + `function_call_output` pair.
+/// Injects the folded envelope as a completed Responses API call and its output.
+/// The synthetic call exists in history only.
 #[derive(Debug, Clone)]
 pub struct NativeFunctionCallInjector {
     pub call_id: String,
@@ -83,24 +84,5 @@ impl EnvelopeInjector for NativeFunctionCallInjector {
                 "output": env_json,
             }),
         ]
-    }
-
-    fn extra_tool_definitions(&self) -> Vec<Value> {
-        vec![json!({
-            "type": "function",
-            "name": self.tool_name,
-            "description": "Retrieve the folded source document envelope already attached in context.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "source": {
-                        "type": "string",
-                        "description": "Source identifier."
-                    }
-                },
-                "required": ["source"],
-                "additionalProperties": false
-            }
-        })]
     }
 }

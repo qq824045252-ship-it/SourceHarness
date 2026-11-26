@@ -67,13 +67,14 @@ impl GatewayConfig {
             .unwrap_or_else(|| "auto/deepseek-v4.1-flash-1017".to_owned());
         let reasoning_effort = std::env::var("OPENAI_REASONING_EFFORT")
             .ok()
-            .filter(|s| !s.trim().is_empty());
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "low".to_owned());
 
         Self {
             base_url,
             api_key,
             model,
-            reasoning_effort,
+            reasoning_effort: Some(reasoning_effort),
             max_turns: 16,
             timeout_secs: 120,
         }
