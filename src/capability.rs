@@ -228,7 +228,7 @@ struct PageArgs {
 }
 
 pub async fn smoke_page() -> Result<(), Box<dyn std::error::Error>> {
-    let mut req=model::request(false,"Use the fixture result tool. The text has a confirmation code on the page starting at byte offset 256. If the first result is paged, call the supplied page tool with its ref and offset 256. Once you obtain the code, reply with only that code.");
+    let mut req=model::request(false,"Use the fixture result tool. The text has a confirmation code on the page starting at byte offset 256. If the first result is paged, call the supplied page tool with that output_ref as ref and offset 256. Once you obtain the code, reply with only that code.");
     let page_schema = json!({"type":"function","function":{"name":PAGE,"description":"Get one page of this task's in-memory result.","parameters":{
         "type":"object","properties": {"ref":{"type":"string"},"offset":{"type":"integer","minimum":0}},
         "required":["ref","offset"],"additionalProperties":false}}});
@@ -245,7 +245,7 @@ pub async fn smoke_page() -> Result<(), Box<dyn std::error::Error>> {
         code,
         "z".repeat(2048)
     ));
-    let reference = first_page["ref"]
+    let reference = first_page["output_ref"]
         .as_str()
         .ok_or("missing result reference")?;
     let follow = reply_messages(

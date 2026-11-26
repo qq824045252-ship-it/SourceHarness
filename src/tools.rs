@@ -14,18 +14,14 @@ pub fn failure(code: &str, stage: &str, message: &str, field: Option<&str>) -> V
 }
 
 // Do not cut serialized JSON or send raw artifacts to the agent.
-pub fn agent_content(result: &Value) -> String {
+pub fn agent_content(result: &Value) -> Result<String, &'static str> {
     let content = result.to_string();
     if content.len() <= RESULT_CAP {
-        content
+        Ok(content)
     } else {
-        failure(
-            "RESULT_TOO_LARGE",
-            "result",
-            "Result exceeds the inline limit; request a smaller selection.",
-            None,
-        )
-        .to_string()
+        // This is a transport invariant, not a tool result. Large producers
+        // must publish into their result store before constructing a reply.
+        Err("tool_result_exceeds_wire_budget")
     }
 }
 
@@ -195,6 +191,10 @@ fn args(call: &ToolCall) -> Result<(i64, i64), ValidationError> {
     }
     Ok((read(a, "a")?, read(b, "b")?))
 }
+pub(crate) fn sum_for_fixture(call: &ToolCall) -> Option<i64> {
+    execute_add(call).ok()
+}
+
 fn execute_add(call: &ToolCall) -> Result<i64, ValidationError> {
     let (a, b) = args(call)?;
     Ok(a + b)
@@ -252,11 +252,9 @@ mod tests {
     #[test]
     fn oversized_result_does_not_leak_original_content() {
         let raw = "sensitive-log".repeat(1000);
-        let content = agent_content(&json!({"out":raw}));
-        assert!(!content.contains("sensitive-log"));
         assert_eq!(
-            serde_json::from_str::<Value>(&content).unwrap()["error"]["code"],
-            "RESULT_TOO_LARGE"
+            agent_content(&json!({"out":raw})),
+            Err("tool_result_exceeds_wire_budget")
         );
     }
 }

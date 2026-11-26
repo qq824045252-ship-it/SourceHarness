@@ -1,8 +1,10 @@
 mod capability;
 mod model;
+mod next_call;
 mod result_pages;
 mod roundtrip;
 mod tools;
+mod wire;
 use serde_json::json;
 use std::{
     fs::{self, OpenOptions},
@@ -21,7 +23,7 @@ async fn main() -> ExitCode {
         .as_slice()
     {
         [] | ["--help" | "-h"] => {
-            println!("SourceHarness: Rust tool-calling test harness\n\nUsage: sourceharness [--help | --version | smoke-model | smoke-declare | smoke-execute | roundtrip <3..100> | compare-error-contract <3..100> | check-decisions <1..100> | smoke-result-page]");
+            println!("SourceHarness: Rust tool-calling test harness\n\nUsage: sourceharness [--help | --version | smoke-model | smoke-declare | smoke-execute | roundtrip <3..100> | compare-error-contract <3..100> | check-decisions <1..100> | smoke-result-page | check-next-call <1..100>]");
             ExitCode::SUCCESS
         }
         ["--version" | "-V"] => {
@@ -60,6 +62,16 @@ async fn main() -> ExitCode {
                 eprintln!("{e}");
                 ExitCode::FAILURE
             }
+        },
+        ["check-next-call", n] => match n.parse::<usize>() {
+            Ok(n @ 1..=100) => match next_call::run(n).await {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("{e}");
+                    ExitCode::FAILURE
+                }
+            },
+            _ => ExitCode::from(2),
         },
         ["check-decisions", n] => match n.parse::<usize>() {
             Ok(n @ 1..=100) => match capability::run(n).await {

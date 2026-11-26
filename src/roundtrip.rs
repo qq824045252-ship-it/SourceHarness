@@ -66,7 +66,7 @@ pub(crate) fn reply_messages(
     for id in known {
         let result = &results.iter().find(|(i, _)| *i == id).unwrap().1;
         messages
-            .push(json!({"role":"tool","tool_call_id":id,"content":tools::agent_content(result)}));
+            .push(json!({"role":"tool","tool_call_id":id,"content":tools::agent_content(result)?}));
     }
     Ok(request)
 }
