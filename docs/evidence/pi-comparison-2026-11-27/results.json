@@ -1,0 +1,1392 @@
+{
+  "setup": {
+    "provider": "OpenCode Go Responses",
+    "model": "deepseek-v4.1-flash",
+    "effort": "low",
+    "grader_access": "Both models see acceptance results. Pi shell has no grader or oracle mount.",
+    "fixture_scope": "Three published fixture and checker scripts at e2818d2 with programmed inputs.",
+    "sourceharness_commit": "e2818d2991119ad46b36f6ee40a68d46c8f944a1",
+    "sourceharness_exe_sha256": "1d019ad6dca0aa1bbc8ecd4b0026f94a24b3f9cfebbb31e9afffa7eeaaaa7050",
+    "pi_version": "1.6.1",
+    "phase_timeout_seconds": 600,
+    "model_request_limit_per_phase": 16,
+    "shared_prompt_suffix": "\nRun the configured acceptance check against the final workspace and report its result. Use validate with check=acceptance, or run the acceptance command if you have a shell."
+  },
+  "scenarios": {
+    "markdown-links": {
+      "paired": [
+        {
+          "pair": 1,
+          "prompts_match": true,
+          "complete": true
+        },
+        {
+          "pair": 2,
+          "prompts_match": true,
+          "complete": true
+        },
+        {
+          "pair": 3,
+          "prompts_match": true,
+          "complete": true
+        }
+      ],
+      "arms": {
+        "sourceharness": {
+          "arm": "sourceharness",
+          "sessions": 3,
+          "sessions_completed": 3,
+          "all_phases_strict_pass": 3,
+          "expected_phases": 6,
+          "attempted_phases": 6,
+          "independent_passes": 6,
+          "strict_passes": 6,
+          "natural_completions": 6,
+          "verified_final": 6,
+          "strict_pass_with_no_calls_after_final_check": 5,
+          "calls_after_verified_final": 2,
+          "tools": {
+            "research": 17,
+            "read": 36,
+            "validate": 7,
+            "edit": 9
+          },
+          "tool_attempts": 69,
+          "cost": {
+            "model_requests": 36,
+            "input_tokens": 274338,
+            "output_tokens": 10455,
+            "total_tokens": 284793,
+            "cached_input_tokens": 160640,
+            "requests_without_usage": 0,
+            "requests_without_cache_usage": 0,
+            "block_count": 0
+          },
+          "aggregate_cache_rate": 0.5855550452361685,
+          "median_session": {
+            "total_tokens": 87838,
+            "input_tokens": 84177,
+            "requests": 11,
+            "elapsed_seconds": 75.78
+          },
+          "per_session": [
+            {
+              "pair": 1,
+              "phases_accepted": 2,
+              "total_tokens": 87838,
+              "input_tokens": 84177,
+              "requests": 11,
+              "elapsed_seconds": 75.154
+            },
+            {
+              "pair": 2,
+              "phases_accepted": 2,
+              "total_tokens": 123712,
+              "input_tokens": 119643,
+              "requests": 15,
+              "elapsed_seconds": 86.874
+            },
+            {
+              "pair": 3,
+              "phases_accepted": 2,
+              "total_tokens": 73243,
+              "input_tokens": 70518,
+              "requests": 10,
+              "elapsed_seconds": 75.78
+            }
+          ]
+        },
+        "pi": {
+          "arm": "pi",
+          "sessions": 3,
+          "sessions_completed": 3,
+          "all_phases_strict_pass": 3,
+          "expected_phases": 6,
+          "attempted_phases": 6,
+          "independent_passes": 6,
+          "strict_passes": 6,
+          "natural_completions": 6,
+          "verified_final": 6,
+          "strict_pass_with_no_calls_after_final_check": 5,
+          "calls_after_verified_final": 1,
+          "tools": {
+            "bash": 29,
+            "edit": 9
+          },
+          "tool_attempts": 38,
+          "cost": {
+            "model_requests": 41,
+            "input_tokens": 161924,
+            "output_tokens": 7137,
+            "total_tokens": 169061,
+            "cached_input_tokens": 140928,
+            "requests_without_usage": 0,
+            "requests_without_cache_usage": 0,
+            "block_count": 0
+          },
+          "aggregate_cache_rate": 0.8703342308737433,
+          "median_session": {
+            "total_tokens": 54203,
+            "input_tokens": 51958,
+            "requests": 15,
+            "elapsed_seconds": 77.646
+          },
+          "per_session": [
+            {
+              "pair": 1,
+              "phases_accepted": 2,
+              "total_tokens": 73406,
+              "input_tokens": 70923,
+              "requests": 15,
+              "elapsed_seconds": 83.493
+            },
+            {
+              "pair": 2,
+              "phases_accepted": 2,
+              "total_tokens": 54203,
+              "input_tokens": 51958,
+              "requests": 15,
+              "elapsed_seconds": 77.646
+            },
+            {
+              "pair": 3,
+              "phases_accepted": 2,
+              "total_tokens": 41452,
+              "input_tokens": 39043,
+              "requests": 11,
+              "elapsed_seconds": 69.74799999999999
+            }
+          ]
+        }
+      }
+    },
+    "sample-report": {
+      "paired": [
+        {
+          "pair": 1,
+          "prompts_match": true,
+          "complete": true
+        }
+      ],
+      "arms": {
+        "sourceharness": {
+          "arm": "sourceharness",
+          "sessions": 1,
+          "sessions_completed": 1,
+          "all_phases_strict_pass": 1,
+          "expected_phases": 2,
+          "attempted_phases": 2,
+          "independent_passes": 2,
+          "strict_passes": 2,
+          "natural_completions": 2,
+          "verified_final": 2,
+          "strict_pass_with_no_calls_after_final_check": 2,
+          "calls_after_verified_final": 0,
+          "tools": {
+            "research": 2,
+            "read": 14,
+            "write": 10,
+            "edit": 2,
+            "validate": 2
+          },
+          "tool_attempts": 30,
+          "cost": {
+            "model_requests": 17,
+            "input_tokens": 298093,
+            "output_tokens": 17917,
+            "total_tokens": 316010,
+            "cached_input_tokens": 135040,
+            "requests_without_usage": 0,
+            "requests_without_cache_usage": 0,
+            "block_count": 0
+          },
+          "aggregate_cache_rate": 0.4530129858802454,
+          "median_session": {
+            "total_tokens": 316010,
+            "input_tokens": 298093,
+            "requests": 17,
+            "elapsed_seconds": 238.47199999999998
+          },
+          "per_session": [
+            {
+              "pair": 1,
+              "phases_accepted": 2,
+              "total_tokens": 316010,
+              "input_tokens": 298093,
+              "requests": 17,
+              "elapsed_seconds": 238.47199999999998
+            }
+          ]
+        },
+        "pi": {
+          "arm": "pi",
+          "sessions": 1,
+          "sessions_completed": 1,
+          "all_phases_strict_pass": 1,
+          "expected_phases": 2,
+          "attempted_phases": 2,
+          "independent_passes": 2,
+          "strict_passes": 2,
+          "natural_completions": 2,
+          "verified_final": 2,
+          "strict_pass_with_no_calls_after_final_check": 2,
+          "calls_after_verified_final": 0,
+          "tools": {
+            "bash": 22
+          },
+          "tool_attempts": 22,
+          "cost": {
+            "model_requests": 21,
+            "input_tokens": 202148,
+            "output_tokens": 11041,
+            "total_tokens": 213189,
+            "cached_input_tokens": 183168,
+            "requests_without_usage": 0,
+            "requests_without_cache_usage": 0,
+            "block_count": 0
+          },
+          "aggregate_cache_rate": 0.9061083958287987,
+          "median_session": {
+            "total_tokens": 213189,
+            "input_tokens": 202148,
+            "requests": 21,
+            "elapsed_seconds": 218.015
+          },
+          "per_session": [
+            {
+              "pair": 1,
+              "phases_accepted": 2,
+              "total_tokens": 213189,
+              "input_tokens": 202148,
+              "requests": 21,
+              "elapsed_seconds": 218.015
+            }
+          ]
+        }
+      }
+    }
+  },
+  "trials": [
+    {
+      "case": "markdown-links",
+      "pair": 1,
+      "arm": "pi",
+      "expected_phases": 2,
+      "phases": [
+        {
+          "phase": 1,
+          "prompt_sha256": "bc9b84c8f2b16d1c0d52ea9276bf343f7448bce12fda71daa3875191471bf4f6",
+          "oracle_sha256": "216949631a806d31951692bf84e608d4ec468cbcc9cb9da86fcd5462971c5bac",
+          "external_changes": [],
+          "exit": 0,
+          "seconds": 64.592,
+          "accepted": true,
+          "natural_end": true,
+          "strict_pass": true,
+          "verified_final": true,
+          "no_calls_after_verified_final": true,
+          "calls_after_verified_final": [],
+          "tool_attempts": 11,
+          "tools": {
+            "bash": 9,
+            "edit": 2
+          },
+          "checks": [
+            {
+              "index": 392,
+              "passed": true,
+              "verified_final": true
+            }
+          ],
+          "independent": {
+            "passed": true,
+            "changed_protected_paths": [],
+            "failures": {},
+            "observed": {},
+            "workspace_revision": "8b889f0cc4ef1d0b8cf7e03ccf3ba9a3d301a01b3a7dfb029f1301c2631ff428",
+            "oracle_revision": "216949631a806d31951692bf84e608d4ec468cbcc9cb9da86fcd5462971c5bac",
+            "stable_workspace": true
+          },
+          "claims": {
+            "claims_success": false,
+            "unsupported_success_claim": false,
+            "claimed_validation_revisions": [],
+            "mismatched_validation_revisions": []
+          },
+          "final_workspace_revision": "8b889f0cc4ef1d0b8cf7e03ccf3ba9a3d301a01b3a7dfb029f1301c2631ff428",
+          "cost": {
+            "model_requests": 11,
+            "requests_without_usage": 0,
+            "request_statuses": {
+              "200": 11
+            },
+            "input_tokens": 43231,
+            "cached_input_tokens": 36352,
+            "requests_without_cache_usage": 0,
+            "output_tokens": 1621,
+            "reasoning_tokens": 304,
+            "total_tokens": 44852,
+            "block_count": 0,
+            "response_models": [
+              "deepseek-v4.1-flash"
+            ]
+          },
+          "errors": []
+        },
+        {
+          "phase": 2,
+          "prompt_sha256": "1e5e17c8eabadc2a48631757f59178c39146853eeb789a98bf47663dd7c3aa5c",
+          "oracle_sha256": "35236f151a9868a48d7a55a27707bfdf865de6d0e4a14e61c24af991a6e2464d",
+          "external_changes": [
+            "references/schema.md",
+            "references/fields.md"
+          ],
+          "exit": 0,
+          "seconds": 18.901,
+          "accepted": true,
+          "natural_end": true,
+          "strict_pass": true,
+          "verified_final": true,
+          "no_calls_after_verified_final": true,
+          "calls_after_verified_final": [],
+          "tool_attempts": 3,
+          "tools": {
+            "bash": 2,
+            "edit": 1
+          },
+          "checks": [
+            {
+              "index": 139,
+              "passed": true,
+              "verified_final": true
+            }
+          ],
+          "independent": {
+            "passed": true,
+            "changed_protected_paths": [],
+            "failures": {},
+            "observed": {},
+            "workspace_revision": "32df94e44c991c718ce6cb59af7e5856c4b553196a0d180f72382ccb46ce6ec9",
+            "oracle_revision": "35236f151a9868a48d7a55a27707bfdf865de6d0e4a14e61c24af991a6e2464d",
+            "stable_workspace": true
+          },
+          "claims": {
+            "claims_success": false,
+            "unsupported_success_claim": false,
+            "claimed_validation_revisions": [],
+            "mismatched_validation_revisions": []
+          },
+          "final_workspace_revision": "32df94e44c991c718ce6cb59af7e5856c4b553196a0d180f72382ccb46ce6ec9",
+          "cost": {
+            "model_requests": 4,
+            "requests_without_usage": 0,
+            "request_statuses": {
+              "200": 4
+            },
+            "input_tokens": 27692,
+            "cached_input_tokens": 25856,
+            "requests_without_cache_usage": 0,
+            "output_tokens": 862,
+            "reasoning_tokens": 73,
+            "total_tokens": 28554,
+            "block_count": 0,
+            "response_models": [
+              "deepseek-v4.1-flash"
+            ]
+          },
+          "errors": []
+        }
+      ]
+    },
+    {
+      "case": "markdown-links",
+      "pair": 1,
+      "arm": "sourceharness",
+      "expected_phases": 2,
+      "phases": [
+        {
+          "phase": 1,
+          "prompt_sha256": "bc9b84c8f2b16d1c0d52ea9276bf343f7448bce12fda71daa3875191471bf4f6",
+          "oracle_sha256": "216949631a806d31951692bf84e608d4ec468cbcc9cb9da86fcd5462971c5bac",
+          "external_changes": [],
+          "exit": 0,
+          "seconds": 46.313,
+          "accepted": true,
+          "natural_end": true,
+          "strict_pass": true,
+          "verified_final": true,
+          "no_calls_after_verified_final": true,
+          "calls_after_verified_final": [],
+          "tool_attempts": 12,
+          "tools": {
+            "research": 2,
+            "read": 6,
+            "validate": 2,
+            "edit": 2
+          },
+          "checks": [
+            {
+              "index": 29,
+              "passed": false,
+              "verified_final": false
+            },
+            {
+              "index": 54,
+              "passed": true,
+              "verified_final": true
+            }
+          ],
+          "independent": {
+            "passed": true,
+            "changed_protected_paths": [],
+            "failures": {},
+            "observed": {},
+            "workspace_revision": "8b889f0cc4ef1d0b8cf7e03ccf3ba9a3d301a01b3a7dfb029f1301c2631ff428",
+            "oracle_revision": "216949631a806d31951692bf84e608d4ec468cbcc9cb9da86fcd5462971c5bac",
+            "stable_workspace": true
+          },
+          "claims": {
+            "claims_success": true,
+            "unsupported_success_claim": false,
+            "claimed_validation_revisions": [],
+            "mismatched_validation_revisions": []
+          },
+          "final_workspace_revision": "8b889f0cc4ef1d0b8cf7e03ccf3ba9a3d301a01b3a7dfb029f1301c2631ff428",
+          "cost": {
+            "model_requests": 6,
+            "requests_without_usage": 0,
+            "request_statuses": {
+              "200": 6
+            },
+            "input_tokens": 29585,
+            "cached_input_tokens": 16896,
+            "requests_without_cache_usage": 0,
+            "output_tokens": 1702,
+            "reasoning_tokens": 254,
+            "total_tokens": 31287,
+            "block_count": 0,
+            "response_models": [
+              "deepseek-v4.1-flash"
+            ]
+          },
+          "errors": []
+        },
+        {
+          "phase": 2,
+          "prompt_sha256": "1e5e17c8eabadc2a48631757f59178c39146853eeb789a98bf47663dd7c3aa5c",
+          "oracle_sha256": "35236f151a9868a48d7a55a27707bfdf865de6d0e4a14e61c24af991a6e2464d",
+          "external_changes": [
+            "references/schema.md",
+            "references/fields.md"
+          ],
+          "exit": 0,
+          "seconds": 28.841,
+          "accepted": true,
+          "natural_end": true,
+          "strict_pass": true,
+          "verified_final": true,
+          "no_calls_after_verified_final": true,
+          "calls_after_verified_final": [],
+          "tool_attempts": 10,
+          "tools": {
+            "research": 3,
+            "read": 5,
+            "edit": 1,
+            "validate": 1
+          },
+          "checks": [
+            {
+              "index": 96,
+              "passed": true,
+              "verified_final": true
+            }
+          ],
+          "independent": {
+            "passed": true,
+            "changed_protected_paths": [],
+            "failures": {},
+            "observed": {},
+            "workspace_revision": "32df94e44c991c718ce6cb59af7e5856c4b553196a0d180f72382ccb46ce6ec9",
+            "oracle_revision": "35236f151a9868a48d7a55a27707bfdf865de6d0e4a14e61c24af991a6e2464d",
+            "stable_workspace": true
+          },
+          "claims": {
+            "claims_success": false,
+            "unsupported_success_claim": false,
+            "claimed_validation_revisions": [
+              "32df94e4"
+            ],
+            "mismatched_validation_revisions": []
+          },
+          "final_workspace_revision": "32df94e44c991c718ce6cb59af7e5856c4b553196a0d180f72382ccb46ce6ec9",
+          "cost": {
+            "model_requests": 5,
+            "requests_without_usage": 0,
+            "request_statuses": {
+              "200": 5
+            },
+            "input_tokens": 54592,
+            "cached_input_tokens": 28672,
+            "requests_without_cache_usage": 0,
+            "output_tokens": 1959,
+            "reasoning_tokens": 573,
+            "total_tokens": 56551,
+            "block_count": 0,
+            "response_models": [
+              "deepseek-v4.1-flash"
+            ]
+          },
+          "errors": []
+        }
+      ]
+    },
+    {
+      "case": "markdown-links",
+      "pair": 2,
+      "arm": "pi",
+      "expected_phases": 2,
+      "phases": [
+        {
+          "phase": 1,
+          "prompt_sha256": "bc9b84c8f2b16d1c0d52ea9276bf343f7448bce12fda71daa3875191471bf4f6",
+          "oracle_sha256": "216949631a806d31951692bf84e608d4ec468cbcc9cb9da86fcd5462971c5bac",
+          "external_changes": [],
+          "exit": 0,
+          "seconds": 55.72,
+          "accepted": true,
+          "natural_end": true,
+          "strict_pass": true,
+          "verified_final": true,
+          "no_calls_after_verified_final": false,
+          "calls_after_verified_final": [
+            "bash"
+          ],
+          "tool_attempts": 9,
+          "tools": {
+            "bash": 7,
+            "edit": 2
+          },
+          "checks": [
+            {
+              "index": 311,
+              "passed": true,
+              "verified_final": true
+            }
+          ],
+          "independent": {
+            "passed": true,
+            "changed_protected_paths": [],
+            "failures": {},
+            "observed": {},
+            "workspace_revision": "8b889f0cc4ef1d0b8cf7e03ccf3ba9a3d301a01b3a7dfb029f1301c2631ff428",
+            "oracle_revision": "216949631a806d31951692bf84e608d4ec468cbcc9cb9da86fcd5462971c5bac",
+            "stable_workspace": true
+          },
+          "claims": {
+            "claims_success": false,
+            "unsupported_success_claim": false,
+            "claimed_validation_revisions": [],
+            "mismatched_validation_revisions": []
+          },
+          "final_workspace_revision": "8b889f0cc4ef1d0b8cf7e03ccf3ba9a3d301a01b3a7dfb029f1301c2631ff428",
+          "cost": {
+            "model_requests": 9,
+            "requests_without_usage": 0,
+            "request_statuses": {
+              "200": 9
+            },
+            "input_tokens": 23836,
+            "cached_input_tokens": 19456,
+            "requests_without_cache_usage": 0,
+            "output_tokens": 1439,
+            "reasoning_tokens": 345,
+            "total_tokens": 25275,
+            "block_count": 0,
+            "response_models": [
+              "deepseek-v4.1-flash"
+            ]
+          },
+          "errors": []
+        },
+        {
+          "phase": 2,
+          "prompt_sha256": "1e5e17c8eabadc2a48631757f59178c39146853eeb789a98bf47663dd7c3aa5c",
+          "oracle_sha256": "35236f151a9868a48d7a55a27707bfdf865de6d0e4a14e61c24af991a6e2464d",
+          "external_changes": [
+            "references/schema.md",
+            "references/fields.md"
+          ],
+          "exit": 0,
+          "seconds": 21.926,
+          "accepted": true,
+          "natural_end": true,
+          "strict_pass": true,
+          "verified_final": true,
+          "no_calls_after_verified_final": true,
+          "calls_after_verified_final": [],
+          "tool_attempts": 5,
+          "tools": {
+            "bash": 4,
+            "edit": 1
+          },
+          "checks": [
+            {
+              "index": 180,
+              "passed": true,
+              "verified_final": true
+            }
+          ],
+          "independent": {
+            "passed": true,
+            "changed_protected_paths": [],
+            "failures": {},
+            "observed": {},
+            "workspace_revision": "32df94e44c991c718ce6cb59af7e5856c4b553196a0d180f72382ccb46ce6ec9",
+            "oracle_revision": "35236f151a9868a48d7a55a27707bfdf865de6d0e4a14e61c24af991a6e2464d",
+            "stable_workspace": true
+          },
+          "claims": {
+            "claims_success": false,
+            "unsupported_success_claim": false,
+            "claimed_validation_revisions": [],
+            "mismatched_validation_revisions": []
+          },
+          "final_workspace_revision": "32df94e44c991c718ce6cb59af7e5856c4b553196a0d180f72382ccb46ce6ec9",
+          "cost": {
+            "model_requests": 6,
+            "requests_without_usage": 0,
+            "request_statuses": {
+              "200": 6
+            },
+            "input_tokens": 28122,
+            "cached_input_tokens": 26368,
+            "requests_without_cache_usage": 0,
+            "output_tokens": 806,
+            "reasoning_tokens": 94,
+            "total_tokens": 28928,
+            "block_count": 0,
+            "response_models": [
+              "deepseek-v4.1-flash"
+            ]
+          },
+          "errors": []
+        }
+      ]
+    },
+    {
+      "case": "markdown-links",
+      "pair": 2,
+      "arm": "sourceharness",
+      "expected_phases": 2,
+      "phases": [
+        {
+          "phase": 1,
+          "prompt_sha256": "bc9b84c8f2b16d1c0d52ea9276bf343f7448bce12fda71daa3875191471bf4f6",
+          "oracle_sha256": "216949631a806d31951692bf84e608d4ec468cbcc9cb9da86fcd5462971c5bac",
+          "external_changes": [],
+          "exit": 0,
+          "seconds": 54.616,
+          "accepted": true,
+          "natural_end": true,
+          "strict_pass": true,
+          "verified_final": true,
+          "no_calls_after_verified_final": false,
+          "calls_after_verified_final": [
+            "read",
+            "read"
+          ],
+          "tool_attempts": 14,
+          "tools": {
+            "research": 5,
+            "read": 6,
+            "edit": 2,
+            "validate": 1
+          },
+          "checks": [
+            {
+              "index": 55,
+              "passed": true,
+              "verified_final": true
+            }
+          ],
+          "independent": {
+            "passed": true,
+            "changed_protected_paths": [],
+            "failures": {},
+            "observed": {},
+            "workspace_revision": "8b889f0cc4ef1d0b8cf7e03ccf3ba9a3d301a01b3a7dfb029f1301c2631ff428",
+            "oracle_revision": "216949631a806d31951692bf84e608d4ec468cbcc9cb9da86fcd5462971c5bac",
+            "stable_workspace": true
+          },
+          "claims": {
+            "claims_success": false,
+            "unsupported_success_claim": false,
+            "claimed_validation_revisions": [
+              "8b889f0cc4ef1d0b8cf7e03ccf3ba9a3d301a01b3a7dfb029f1301c2631ff428"
+            ],
+            "mismatched_validation_revisions": []
+          },
+          "final_workspace_revision": "8b889f0cc4ef1d0b8cf7e03ccf3ba9a3d301a01b3a7dfb029f1301c2631ff428",
+          "cost": {
+            "model_requests": 8,
+            "requests_without_usage": 0,
+            "request_statuses": {
+              "200": 8
+            },
+            "input_tokens": 37263,
+            "cached_input_tokens": 26112,
+            "requests_without_cache_usage": 0,
+            "output_tokens": 1852,
+            "reasoning_tokens": 412,
+            "total_tokens": 39115,
+            "block_count": 0,
+            "response_models": [
+              "deepseek-v4.1-flash"
+            ]
+          },
+          "errors": []
+        },
+        {
+          "phase": 2,
+          "prompt_sha256": "1e5e17c8eabadc2a48631757f59178c39146853eeb789a98bf47663dd7c3aa5c",
+          "oracle_sha256": "35236f151a9868a48d7a55a27707bfdf865de6d0e4a14e61c24af991a6e2464d",
+          "external_changes": [
+            "references/schema.md",
+            "references/fields.md"
+          ],
+          "exit": 0,
+          "seconds": 32.258,
+          "accepted": true,
+          "natural_end": true,
+          "strict_pass": true,
+          "verified_final": true,
+          "no_calls_after_verified_final": true,
+          "calls_after_verified_final": [],
+          "tool_attempts": 11,
+          "tools": {
+            "research": 4,
+            "read": 5,
+            "edit": 1,
+            "validate": 1
+          },
+          "checks": [
+            {
+              "index": 109,
+              "passed": true,
+              "verified_final": true
+            }
+          ],
+          "independent": {
+            "passed": true,
+            "changed_protected_paths": [],
+            "failures": {},
+            "observed": {},
+            "workspace_revision": "32df94e44c991c718ce6cb59af7e5856c4b553196a0d180f72382ccb46ce6ec9",
+            "oracle_revision": "35236f151a9868a48d7a55a27707bfdf865de6d0e4a14e61c24af991a6e2464d",
+            "stable_workspace": true
+          },
+          "claims": {
+            "claims_success": false,
+            "unsupported_success_claim": false,
+            "claimed_validation_revisions": [
+              "32df94e44c991c718ce6cb59af7e5856c4b553196a0d180f72382ccb46ce6ec9"
+            ],
+            "mismatched_validation_revisions": []
+          },
+          "final_workspace_revision": "32df94e44c991c718ce6cb59af7e5856c4b553196a0d180f72382ccb46ce6ec9",
+          "cost": {
+            "model_requests": 7,
+            "requests_without_usage": 0,
+            "request_statuses": {
+              "200": 7
+            },
+            "input_tokens": 82380,
+            "cached_input_tokens": 50432,
+            "requests_without_cache_usage": 0,
+            "output_tokens": 2217,
+            "reasoning_tokens": 801,
+            "total_tokens": 84597,
+            "block_count": 0,
+            "response_models": [
+              "deepseek-v4.1-flash"
+            ]
+          },
+          "errors": []
+        }
+      ]
+    },
+    {
+      "case": "markdown-links",
+      "pair": 3,
+      "arm": "pi",
+      "expected_phases": 2,
+      "phases": [
+        {
+          "phase": 1,
+          "prompt_sha256": "bc9b84c8f2b16d1c0d52ea9276bf343f7448bce12fda71daa3875191471bf4f6",
+          "oracle_sha256": "216949631a806d31951692bf84e608d4ec468cbcc9cb9da86fcd5462971c5bac",
+          "external_changes": [],
+          "exit": 0,
+          "seconds": 48.4,
+          "accepted": true,
+          "natural_end": true,
+          "strict_pass": true,
+          "verified_final": true,
+          "no_calls_after_verified_final": true,
+          "calls_after_verified_final": [],
+          "tool_attempts": 7,
+          "tools": {
+            "bash": 5,
+            "edit": 2
+          },
+          "checks": [
+            {
+              "index": 364,
+              "passed": true,
+              "verified_final": true
+            }
+          ],
+          "independent": {
+            "passed": true,
+            "changed_protected_paths": [],
+            "failures": {},
+            "observed": {},
+            "workspace_revision": "8b889f0cc4ef1d0b8cf7e03ccf3ba9a3d301a01b3a7dfb029f1301c2631ff428",
+            "oracle_revision": "216949631a806d31951692bf84e608d4ec468cbcc9cb9da86fcd5462971c5bac",
+            "stable_workspace": true
+          },
+          "claims": {
+            "claims_success": true,
+            "unsupported_success_claim": false,
+            "claimed_validation_revisions": [],
+            "mismatched_validation_revisions": []
+          },
+          "final_workspace_revision": "8b889f0cc4ef1d0b8cf7e03ccf3ba9a3d301a01b3a7dfb029f1301c2631ff428",
+          "cost": {
+            "model_requests": 7,
+            "requests_without_usage": 0,
+            "request_statuses": {
+              "200": 7
+            },
+            "input_tokens": 19154,
+            "cached_input_tokens": 14592,
+            "requests_without_cache_usage": 0,
+            "output_tokens": 1545,
+            "reasoning_tokens": 440,
+            "total_tokens": 20699,
+            "block_count": 0,
+            "response_models": [
+              "deepseek-v4.1-flash"
+            ]
+          },
+          "errors": []
+        },
+        {
+          "phase": 2,
+          "prompt_sha256": "1e5e17c8eabadc2a48631757f59178c39146853eeb789a98bf47663dd7c3aa5c",
+          "oracle_sha256": "35236f151a9868a48d7a55a27707bfdf865de6d0e4a14e61c24af991a6e2464d",
+          "external_changes": [
+            "references/schema.md",
+            "references/fields.md"
+          ],
+          "exit": 0,
+          "seconds": 21.348,
+          "accepted": true,
+          "natural_end": true,
+          "strict_pass": true,
+          "verified_final": true,
+          "no_calls_after_verified_final": true,
+          "calls_after_verified_final": [],
+          "tool_attempts": 3,
+          "tools": {
+            "bash": 2,
+            "edit": 1
+          },
+          "checks": [
+            {
+              "index": 152,
+              "passed": true,
+              "verified_final": true
+            }
+          ],
+          "independent": {
+            "passed": true,
+            "changed_protected_paths": [],
+            "failures": {},
+            "observed": {},
+            "workspace_revision": "32df94e44c991c718ce6cb59af7e5856c4b553196a0d180f72382ccb46ce6ec9",
+            "oracle_revision": "35236f151a9868a48d7a55a27707bfdf865de6d0e4a14e61c24af991a6e2464d",
+            "stable_workspace": true
+          },
+          "claims": {
+            "claims_success": true,
+            "unsupported_success_claim": false,
+            "claimed_validation_revisions": [],
+            "mismatched_validation_revisions": []
+          },
+          "final_workspace_revision": "32df94e44c991c718ce6cb59af7e5856c4b553196a0d180f72382ccb46ce6ec9",
+          "cost": {
+            "model_requests": 4,
+            "requests_without_usage": 0,
+            "request_statuses": {
+              "200": 4
+            },
+            "input_tokens": 19889,
+            "cached_input_tokens": 18304,
+            "requests_without_cache_usage": 0,
+            "output_tokens": 864,
+            "reasoning_tokens": 102,
+            "total_tokens": 20753,
+            "block_count": 0,
+            "response_models": [
+              "deepseek-v4.1-flash"
+            ]
+          },
+          "errors": []
+        }
+      ]
+    },
+    {
+      "case": "markdown-links",
+      "pair": 3,
+      "arm": "sourceharness",
+      "expected_phases": 2,
+      "phases": [
+        {
+          "phase": 1,
+          "prompt_sha256": "bc9b84c8f2b16d1c0d52ea9276bf343f7448bce12fda71daa3875191471bf4f6",
+          "oracle_sha256": "216949631a806d31951692bf84e608d4ec468cbcc9cb9da86fcd5462971c5bac",
+          "external_changes": [],
+          "exit": 0,
+          "seconds": 43.218,
+          "accepted": true,
+          "natural_end": true,
+          "strict_pass": true,
+          "verified_final": true,
+          "no_calls_after_verified_final": true,
+          "calls_after_verified_final": [],
+          "tool_attempts": 12,
+          "tools": {
+            "research": 2,
+            "read": 7,
+            "edit": 2,
+            "validate": 1
+          },
+          "checks": [
+            {
+              "index": 49,
+              "passed": true,
+              "verified_final": true
+            }
+          ],
+          "independent": {
+            "passed": true,
+            "changed_protected_paths": [],
+            "failures": {},
+            "observed": {},
+            "workspace_revision": "8b889f0cc4ef1d0b8cf7e03ccf3ba9a3d301a01b3a7dfb029f1301c2631ff428",
+            "oracle_revision": "216949631a806d31951692bf84e608d4ec468cbcc9cb9da86fcd5462971c5bac",
+            "stable_workspace": true
+          },
+          "claims": {
+            "claims_success": false,
+            "unsupported_success_claim": false,
+            "claimed_validation_revisions": [],
+            "mismatched_validation_revisions": []
+          },
+          "final_workspace_revision": "8b889f0cc4ef1d0b8cf7e03ccf3ba9a3d301a01b3a7dfb029f1301c2631ff428",
+          "cost": {
+            "model_requests": 5,
+            "requests_without_usage": 0,
+            "request_statuses": {
+              "200": 5
+            },
+            "input_tokens": 21015,
+            "cached_input_tokens": 13056,
+            "requests_without_cache_usage": 0,
+            "output_tokens": 1309,
+            "reasoning_tokens": 272,
+            "total_tokens": 22324,
+            "block_count": 0,
+            "response_models": [
+              "deepseek-v4.1-flash"
+            ]
+          },
+          "errors": []
+        },
+        {
+          "phase": 2,
+          "prompt_sha256": "1e5e17c8eabadc2a48631757f59178c39146853eeb789a98bf47663dd7c3aa5c",
+          "oracle_sha256": "35236f151a9868a48d7a55a27707bfdf865de6d0e4a14e61c24af991a6e2464d",
+          "external_changes": [
+            "references/schema.md",
+            "references/fields.md"
+          ],
+          "exit": 0,
+          "seconds": 32.562,
+          "accepted": true,
+          "natural_end": true,
+          "strict_pass": true,
+          "verified_final": true,
+          "no_calls_after_verified_final": true,
+          "calls_after_verified_final": [],
+          "tool_attempts": 10,
+          "tools": {
+            "research": 1,
+            "read": 7,
+            "edit": 1,
+            "validate": 1
+          },
+          "checks": [
+            {
+              "index": 89,
+              "passed": true,
+              "verified_final": true
+            }
+          ],
+          "independent": {
+            "passed": true,
+            "changed_protected_paths": [],
+            "failures": {},
+            "observed": {},
+            "workspace_revision": "32df94e44c991c718ce6cb59af7e5856c4b553196a0d180f72382ccb46ce6ec9",
+            "oracle_revision": "35236f151a9868a48d7a55a27707bfdf865de6d0e4a14e61c24af991a6e2464d",
+            "stable_workspace": true
+          },
+          "claims": {
+            "claims_success": false,
+            "unsupported_success_claim": false,
+            "claimed_validation_revisions": [
+              "32df94e44c991c718ce6cb59af7e5856c4b553196a0d180f72382ccb46ce6ec9"
+            ],
+            "mismatched_validation_revisions": []
+          },
+          "final_workspace_revision": "32df94e44c991c718ce6cb59af7e5856c4b553196a0d180f72382ccb46ce6ec9",
+          "cost": {
+            "model_requests": 5,
+            "requests_without_usage": 0,
+            "request_statuses": {
+              "200": 5
+            },
+            "input_tokens": 49503,
+            "cached_input_tokens": 25472,
+            "requests_without_cache_usage": 0,
+            "output_tokens": 1416,
+            "reasoning_tokens": 522,
+            "total_tokens": 50919,
+            "block_count": 0,
+            "response_models": [
+              "deepseek-v4.1-flash"
+            ]
+          },
+          "errors": []
+        }
+      ]
+    },
+    {
+      "case": "sample-report",
+      "pair": 1,
+      "arm": "pi",
+      "expected_phases": 2,
+      "phases": [
+        {
+          "phase": 1,
+          "prompt_sha256": "5d56a19c38681461b1a81bd3b7d8adde6cf2a485898d24680c7389e830a88bd6",
+          "oracle_sha256": "7cf0ee643219457cba48f324b85c0fce9df3a77fed07de263b5980aa5baa2d38",
+          "external_changes": [],
+          "exit": 0,
+          "seconds": 122.758,
+          "accepted": true,
+          "natural_end": true,
+          "strict_pass": true,
+          "verified_final": true,
+          "no_calls_after_verified_final": true,
+          "calls_after_verified_final": [],
+          "tool_attempts": 15,
+          "tools": {
+            "bash": 15
+          },
+          "checks": [
+            {
+              "index": 292,
+              "passed": false,
+              "verified_final": false
+            },
+            {
+              "index": 561,
+              "passed": false,
+              "verified_final": false
+            },
+            {
+              "index": 1160,
+              "passed": true,
+              "verified_final": false
+            },
+            {
+              "index": 1320,
+              "passed": true,
+              "verified_final": true
+            }
+          ],
+          "independent": {
+            "passed": true,
+            "changed_protected_paths": [],
+            "failures": {},
+            "observed": {
+              "readme_examples": {
+                "examples_run": 1
+              }
+            },
+            "workspace_revision": "398140b2830ea0f89e16f8c8762716c9f2b4c5cce30891981e8617db8a97f4c3",
+            "oracle_revision": "7cf0ee643219457cba48f324b85c0fce9df3a77fed07de263b5980aa5baa2d38",
+            "stable_workspace": true
+          },
+          "claims": {
+            "claims_success": false,
+            "unsupported_success_claim": false,
+            "claimed_validation_revisions": [],
+            "mismatched_validation_revisions": []
+          },
+          "final_workspace_revision": "398140b2830ea0f89e16f8c8762716c9f2b4c5cce30891981e8617db8a97f4c3",
+          "cost": {
+            "model_requests": 13,
+            "requests_without_usage": 0,
+            "request_statuses": {
+              "200": 13
+            },
+            "input_tokens": 80482,
+            "cached_input_tokens": 69888,
+            "requests_without_cache_usage": 0,
+            "output_tokens": 4823,
+            "reasoning_tokens": 1830,
+            "total_tokens": 85305,
+            "block_count": 0,
+            "response_models": [
+              "deepseek-v4.1-flash"
+            ]
+          },
+          "errors": []
+        },
+        {
+          "phase": 2,
+          "prompt_sha256": "3b9a6e50c8e957d0538ae88e1081adee59b52ab2481c5798944bd67e82268e29",
+          "oracle_sha256": "1aa867ed1238985d4587a05f2463ef1f7de10df1906e1babc1991aa5713ae146",
+          "external_changes": [],
+          "exit": 0,
+          "seconds": 95.257,
+          "accepted": true,
+          "natural_end": true,
+          "strict_pass": true,
+          "verified_final": true,
+          "no_calls_after_verified_final": true,
+          "calls_after_verified_final": [],
+          "tool_attempts": 7,
+          "tools": {
+            "bash": 7
+          },
+          "checks": [
+            {
+              "index": 122,
+              "passed": false,
+              "verified_final": false
+            },
+            {
+              "index": 1425,
+              "passed": false,
+              "verified_final": false
+            },
+            {
+              "index": 1567,
+              "passed": true,
+              "verified_final": false
+            },
+            {
+              "index": 1611,
+              "passed": true,
+              "verified_final": true
+            }
+          ],
+          "independent": {
+            "passed": true,
+            "changed_protected_paths": [],
+            "failures": {},
+            "observed": {
+              "readme_examples": {
+                "examples_run": 2
+              }
+            },
+            "workspace_revision": "b2908243288944eaf5ad7f303347bcce2bcfab191c6478adeea7dcdd423ac06e",
+            "oracle_revision": "1aa867ed1238985d4587a05f2463ef1f7de10df1906e1babc1991aa5713ae146",
+            "stable_workspace": true
+          },
+          "claims": {
+            "claims_success": false,
+            "unsupported_success_claim": false,
+            "claimed_validation_revisions": [],
+            "mismatched_validation_revisions": []
+          },
+          "final_workspace_revision": "b2908243288944eaf5ad7f303347bcce2bcfab191c6478adeea7dcdd423ac06e",
+          "cost": {
+            "model_requests": 8,
+            "requests_without_usage": 0,
+            "request_statuses": {
+              "200": 8
+            },
+            "input_tokens": 121666,
+            "cached_input_tokens": 113280,
+            "requests_without_cache_usage": 0,
+            "output_tokens": 6218,
+            "reasoning_tokens": 2851,
+            "total_tokens": 127884,
+            "block_count": 0,
+            "response_models": [
+              "deepseek-v4.1-flash"
+            ]
+          },
+          "errors": []
+        }
+      ]
+    },
+    {
+      "case": "sample-report",
+      "pair": 1,
+      "arm": "sourceharness",
+      "expected_phases": 2,
+      "phases": [
+        {
+          "phase": 1,
+          "prompt_sha256": "5d56a19c38681461b1a81bd3b7d8adde6cf2a485898d24680c7389e830a88bd6",
+          "oracle_sha256": "7cf0ee643219457cba48f324b85c0fce9df3a77fed07de263b5980aa5baa2d38",
+          "external_changes": [],
+          "exit": 0,
+          "seconds": 92.99,
+          "accepted": true,
+          "natural_end": true,
+          "strict_pass": true,
+          "verified_final": true,
+          "no_calls_after_verified_final": true,
+          "calls_after_verified_final": [],
+          "tool_attempts": 17,
+          "tools": {
+            "research": 2,
+            "read": 8,
+            "write": 5,
+            "edit": 1,
+            "validate": 1
+          },
+          "checks": [
+            {
+              "index": 85,
+              "passed": true,
+              "verified_final": true
+            }
+          ],
+          "independent": {
+            "passed": true,
+            "changed_protected_paths": [],
+            "failures": {},
+            "observed": {
+              "readme_examples": {
+                "examples_run": 1
+              }
+            },
+            "workspace_revision": "a21e3a90a9a1c15cf2cc220ed337e0c9d111fe47d355ec1eec74286a1a430cf6",
+            "oracle_revision": "7cf0ee643219457cba48f324b85c0fce9df3a77fed07de263b5980aa5baa2d38",
+            "stable_workspace": true
+          },
+          "claims": {
+            "claims_success": true,
+            "unsupported_success_claim": false,
+            "claimed_validation_revisions": [],
+            "mismatched_validation_revisions": []
+          },
+          "final_workspace_revision": "a21e3a90a9a1c15cf2cc220ed337e0c9d111fe47d355ec1eec74286a1a430cf6",
+          "cost": {
+            "model_requests": 8,
+            "requests_without_usage": 0,
+            "request_statuses": {
+              "200": 8
+            },
+            "input_tokens": 58629,
+            "cached_input_tokens": 42880,
+            "requests_without_cache_usage": 0,
+            "output_tokens": 6511,
+            "reasoning_tokens": 2470,
+            "total_tokens": 65140,
+            "block_count": 0,
+            "response_models": [
+              "deepseek-v4.1-flash"
+            ]
+          },
+          "errors": []
+        },
+        {
+          "phase": 2,
+          "prompt_sha256": "3b9a6e50c8e957d0538ae88e1081adee59b52ab2481c5798944bd67e82268e29",
+          "oracle_sha256": "1aa867ed1238985d4587a05f2463ef1f7de10df1906e1babc1991aa5713ae146",
+          "external_changes": [],
+          "exit": 0,
+          "seconds": 145.482,
+          "accepted": true,
+          "natural_end": true,
+          "strict_pass": true,
+          "verified_final": true,
+          "no_calls_after_verified_final": true,
+          "calls_after_verified_final": [],
+          "tool_attempts": 13,
+          "tools": {
+            "read": 6,
+            "write": 5,
+            "edit": 1,
+            "validate": 1
+          },
+          "checks": [
+            {
+              "index": 157,
+              "passed": true,
+              "verified_final": true
+            }
+          ],
+          "independent": {
+            "passed": true,
+            "changed_protected_paths": [],
+            "failures": {},
+            "observed": {
+              "readme_examples": {
+                "examples_run": 2
+              }
+            },
+            "workspace_revision": "629f82eb0fa93dd82af8da572abbbd6a4aed30a68bd20ef265238c67b0407685",
+            "oracle_revision": "1aa867ed1238985d4587a05f2463ef1f7de10df1906e1babc1991aa5713ae146",
+            "stable_workspace": true
+          },
+          "claims": {
+            "claims_success": true,
+            "unsupported_success_claim": false,
+            "claimed_validation_revisions": [],
+            "mismatched_validation_revisions": []
+          },
+          "final_workspace_revision": "629f82eb0fa93dd82af8da572abbbd6a4aed30a68bd20ef265238c67b0407685",
+          "cost": {
+            "model_requests": 9,
+            "requests_without_usage": 0,
+            "request_statuses": {
+              "200": 9
+            },
+            "input_tokens": 239464,
+            "cached_input_tokens": 92160,
+            "requests_without_cache_usage": 0,
+            "output_tokens": 11406,
+            "reasoning_tokens": 4862,
+            "total_tokens": 250870,
+            "block_count": 0,
+            "response_models": [
+              "deepseek-v4.1-flash"
+            ]
+          },
+          "errors": []
+        }
+      ]
+    }
+  ]
+}
