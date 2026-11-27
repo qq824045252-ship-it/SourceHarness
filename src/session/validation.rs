@@ -55,6 +55,15 @@ impl Validation {
 }
 
 impl Commands {
+    pub fn from_compact_file(path: &Path, workspace: &Path) -> Result<Self, String> {
+        let path = path.canonicalize().map_err(|err| err.to_string())?;
+        let workspace = workspace.canonicalize().map_err(|err| err.to_string())?;
+        if path.starts_with(workspace) || super::exec::runtime_contains(&path) {
+            return Err("Place the checks file outside the workspace and exec runtime mounts.".to_owned());
+        }
+        Self::from_file(&path)
+    }
+
     pub fn from_file(path: &Path) -> Result<Self, String> {
         let text = fs::read_to_string(path).map_err(|err| err.to_string())?;
         let commands: Self = serde_json::from_str(&text).map_err(|err| err.to_string())?;
@@ -98,6 +107,28 @@ impl Commands {
             json!({"check":{"type":"string","enum":names}}), &["check"]))
     }
 
+    pub(super) fn check_exec_boundary(&self, workspace: &Path) -> Result<(), String> {
+        if super::exec::runtime_overlaps(workspace) {
+            return Err("A compact workspace must be outside the exec runtime mounts.".to_owned());
+        }
+        for (check, command) in &self.0 {
+            let program = command.program.canonicalize().map_err(|e| e.to_string())?;
+            if program.starts_with(workspace) {
+                return Err(format!("Validation program for {check} must be outside the workspace."));
+            }
+            let absolute_args = command.args.iter()
+                .map(Path::new)
+                .filter(|path| path.is_absolute() && path.is_file());
+            for input in command.inputs.iter().map(PathBuf::as_path).chain(absolute_args) {
+                let path = input.canonicalize().map_err(|e| e.to_string())?;
+                if path.starts_with(workspace) || super::exec::runtime_contains(&path) {
+                    return Err(format!("Validation input for {check} must be outside the workspace and exec runtime mounts."));
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn program_revision(&self, check: &str) -> Option<String> {
         let command = self.0.get(check)?;
         fs::read(&command.program).ok().map(|bytes| revision(&bytes))
@@ -124,24 +155,48 @@ fn manifest(
     ctx: &WorkspaceContext,
     journal: &Journal,
     copy: Option<&Path>,
+    retain: bool,
+    copy_limit: Option<u64>,
 ) -> Result<String, String> {
     let (files, all) = walk(ctx.root(), ctx.config().max_list_entries)?;
     if !all {
         return Err("Workspace exceeds validation manifest file limit".to_owned());
     }
     let mut entries = BTreeMap::new();
+    let mut copied_bytes = 0u64;
     for path in files {
-        let path = path.canonicalize().map_err(|err| err.to_string())?;
-        if !path.starts_with(ctx.root()) {
-            return Err("Validation input resolves outside the workspace".to_owned());
+        if path.canonicalize().map_err(|err| err.to_string())? != path
+            || !super::tools::permitted(path.strip_prefix(ctx.root()).map_err(|err| err.to_string())?)
+        {
+            return Err("Workspace snapshot path changed or is unavailable".to_owned());
         }
-        let bytes = fs::read(&path).map_err(|err| err.to_string())?;
-        let name = ctx.relative_display(&path);
-        let hash = if let Some(copy) = copy {
+        let relative = path.strip_prefix(ctx.root()).map_err(|err| err.to_string())?;
+        let mut file = if copy_limit.is_some() {
+            super::exec::open_snapshot_file(ctx.root(), relative)
+        } else {
+            fs::File::open(&path)
+        }.map_err(|err| err.to_string())?;
+        let metadata = file.metadata().map_err(|err| err.to_string())?;
+        if !metadata.is_file() {
+            return Err("Workspace snapshot requires regular files".to_owned());
+        }
+        let limit = copy_limit.map_or(u64::MAX, |max| max.saturating_sub(copied_bytes));
+        let mut bytes = Vec::new();
+        (&mut file).take(limit.saturating_add(1)).read_to_end(&mut bytes).map_err(|err| err.to_string())?;
+        if bytes.len() as u64 > limit {
+            return Err("Workspace exceeds the exec snapshot byte limit".to_owned());
+        }
+        copied_bytes += bytes.len() as u64;
+        let name = relative.to_str().ok_or("Workspace snapshot requires UTF-8 paths")?
+            .replace(std::path::MAIN_SEPARATOR, "/");
+        if let Some(copy) = copy {
             let dest = copy.join(&name);
             fs::create_dir_all(dest.parent().ok_or("Missing snapshot parent")?)
                 .map_err(|e| e.to_string())?;
-            fs::write(dest, &bytes).map_err(|e| e.to_string())?;
+            fs::write(&dest, &bytes).map_err(|e| e.to_string())?;
+            fs::set_permissions(dest, metadata.permissions()).map_err(|e| e.to_string())?;
+        }
+        let hash = if retain {
             journal.put(&bytes)?
         } else {
             revision(&bytes)
@@ -152,7 +207,17 @@ fn manifest(
 }
 
 pub fn workspace_version(ctx: &WorkspaceContext, journal: &Journal) -> Result<String, String> {
-    manifest(ctx, journal, None)
+    manifest(ctx, journal, None, false, None)
+}
+
+pub(super) fn save_workspace(ctx: &WorkspaceContext, journal: &Journal) -> Result<String, String> {
+    manifest(ctx, journal, None, true, None)
+}
+
+pub(super) fn copy_workspace(
+    ctx: &WorkspaceContext, journal: &Journal, path: &Path, limit: Option<u64>,
+) -> Result<String, String> {
+    manifest(ctx, journal, Some(path), true, limit)
 }
 
 // Compare the exact manifest the checker used to the one captured at run start.
@@ -232,7 +297,7 @@ pub fn run(
         .prefix("check-")
         .tempdir_in(ctx.root().join(".sourceharness"))
         .map_err(|err| err.to_string())?;
-    let before = manifest(ctx, journal, Some(snapshot.path()))?;
+    let before = copy_workspace(ctx, journal, snapshot.path(), None)?;
     let program = fs::read(&config.program).map_err(|err| err.to_string())?;
     let program_revision = revision(&program);
     let input_revisions = match config.input_revisions() {

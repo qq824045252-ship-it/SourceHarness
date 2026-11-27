@@ -27,8 +27,12 @@ fn request(stream: &mut TcpStream) -> Value {
     serde_json::from_slice(&body).unwrap()
 }
 
-fn respond(mut stream: TcpStream, item: Value) {
-    let event = json!({"type":"response.completed","response":{"output":[item],"usage":{"total_tokens":15}}});
+fn respond(stream: TcpStream, item: Value) {
+    respond_many(stream, vec![item]);
+}
+
+fn respond_many(mut stream: TcpStream, items: Vec<Value>) {
+    let event = json!({"type":"response.completed","response":{"output":items,"usage":{"total_tokens":15}}});
     let sse = format!("event: response.completed\ndata: {event}\n\n");
     write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{sse}", sse.len()).unwrap();
 }
@@ -355,6 +359,10 @@ fn streams_a_running_session_and_steers_without_starting_queued_writes() {
 }
 
 fn invoke(root: &Path, gateway: &str, interrupt: bool, args: &[&str]) -> Output {
+    invoke_with_interruption(root, gateway, interrupt.then_some("after_file_replace"), args)
+}
+
+fn invoke_with_interruption(root: &Path, gateway: &str, interrupt: Option<&str>, args: &[&str]) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_source_harness"));
     command
         .args(args)
@@ -362,10 +370,268 @@ fn invoke(root: &Path, gateway: &str, interrupt: bool, args: &[&str]) -> Output 
         .env("OPENAI_BASE_URL", gateway)
         .env("OPENAI_MODEL", "fixture")
         .env_remove("SOURCE_HARNESS_TEST_INTERRUPT");
-    if interrupt {
-        command.env("SOURCE_HARNESS_TEST_INTERRUPT", "after_file_replace");
+    if let Some(point) = interrupt {
+        command.env("SOURCE_HARNESS_TEST_INTERRUPT", point);
     }
     command.output().unwrap()
+}
+
+fn compact_round(listener: &TcpListener, prior: &mut Option<Value>) -> (TcpStream, Value) {
+    let (mut stream, _) = listener.accept().unwrap();
+    let body = request(&mut stream);
+    if let Some(previous) = prior {
+        assert_eq!(body["instructions"], previous["instructions"]);
+        assert_eq!(body["tools"], previous["tools"]);
+        assert!(body["input"].as_array().unwrap().starts_with(previous["input"].as_array().unwrap()));
+    } else {
+        assert!(!body["tools"].to_string().contains("expected_revision"));
+    }
+    *prior = Some(body.clone());
+    (stream, body)
+}
+
+fn last_output(body: &Value) -> &str {
+    body["input"].as_array().unwrap().last().unwrap()["output"].as_str().unwrap()
+}
+
+#[test]
+fn compact_rejects_checks_configuration_in_the_workspace() {
+    let root = tempfile::tempdir().unwrap();
+    let checks = root.path().join("checks.json");
+    fs::write(&checks, "{}").unwrap();
+    let result = invoke(root.path(), "http://127.0.0.1:1/v1", false, &[
+        "agent", "--tool-profile", "compact", "--checks", checks.to_str().unwrap(), "--prompt", "Run the check."
+    ]);
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("Place the checks file outside the workspace"));
+}
+
+#[test]
+fn compact_prefix_and_implicit_revision_hold_across_requests_and_followups() {
+    let root = tempfile::tempdir().unwrap();
+    let file = root.path().join("policy.txt");
+    fs::write(&file, "keep=1\nlimit=30\n").unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let gateway = format!("http://{}/v1", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        let mut prior = None;
+        let write = |id: &str, old: &str| call(id, "edit", json!({
+            "path":"policy.txt","changes":[{"old_text":old,"new_text":"limit=60"}]
+        }));
+        let (stream, _) = compact_round(&listener, &mut prior);
+        respond(stream, write("unobserved", "limit=30"));
+        let (stream, req) = compact_round(&listener, &mut prior);
+        assert!(last_output(&req).starts_with("READ_REQUIRED"));
+        respond_many(stream, vec![call("read", "read", json!({"path":"policy.txt"})), write("same_batch", "limit=30")]);
+        let (stream, req) = compact_round(&listener, &mut prior);
+        let items = req["input"].as_array().unwrap();
+        assert_eq!(items[items.len()-2]["output"], "\"policy.txt\"\n1\tkeep=1\n2\tlimit=30\n");
+        assert!(last_output(&req).starts_with("READ_REQUIRED"));
+        fs::write(&file, "keep=2\nlimit=30\n").unwrap();
+        respond(stream, write("stale", "limit=30"));
+        let (stream, req) = compact_round(&listener, &mut prior);
+        assert!(last_output(&req).starts_with("REVISION_CONFLICT"));
+        assert!(last_output(&req).contains("+keep=2"));
+        assert_eq!(fs::read_to_string(&file).unwrap(), "keep=2\nlimit=30\n");
+        respond(stream, call("fresh", "read", json!({"path":"policy.txt","start_line":2})));
+        let (stream, req) = compact_round(&listener, &mut prior);
+        assert_eq!(last_output(&req), "\"policy.txt\"\n2\tlimit=30\n");
+        respond(stream, call("edited", "edit", json!({"path":"policy.txt","changes":[
+            {"old_text":"limit=30","new_text":"limit=60"},
+            {"old_text":"keep=2","new_text":"keep=3"}
+        ]})));
+        let (stream, req) = compact_round(&listener, &mut prior);
+        assert_eq!(last_output(&req), "Edited policy.txt.");
+        respond(stream, answer("Updated."));
+        let (stream, req) = compact_round(&listener, &mut prior);
+        assert_eq!(user_texts(&req["input"]), ["Update the limit.", "Review the result."]);
+        respond(stream, answer("Reviewed."));
+    });
+
+    let run = |prompt| invoke(root.path(), &gateway, false, &[
+        "agent", "--tool-profile", "compact", "--prompt", prompt
+    ]);
+    let result = run("Update the limit.");
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    let result = run("Review the result.");
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    server.join().unwrap();
+    assert_eq!(fs::read_to_string(root.path().join("policy.txt")).unwrap(), "keep=3\nlimit=60\n");
+    let events = session_events(root.path());
+    let read = events.iter().find(|event| event["data"]["call_id"] == "read" && event["kind"] == "tool_result").unwrap();
+    assert_eq!(read["data"]["revision"].as_str().unwrap().len(), 64);
+    assert!(read["data"]["live_observation"] == true);
+}
+
+#[test]
+fn compact_rollback_recovers_and_preserves_external_changes() {
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture.path().join("workspace");
+    fs::create_dir(&root).unwrap();
+    let policy = root.join("policy.txt");
+    let protected = root.join("protected.txt");
+    fs::write(&policy, "limit=30\n").unwrap();
+    fs::write(&protected, "original\n").unwrap();
+    let checks = fixture.path().join("checks.json");
+    fs::write(&checks, json!({
+        "acceptance":{"program":env!("CARGO_BIN_EXE_source_harness"),"args":["--help"]}
+    }).to_string()).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let gateway = format!("http://{}/v1", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        let mut prior = None;
+        let edit = |id: &str, old: &str, new: &str| call(id, "edit", json!({
+            "path":"policy.txt","changes":[{"old_text":old,"new_text":new}]
+        }));
+        let (stream, _) = compact_round(&listener, &mut prior);
+        respond(stream, call("read", "read", json!({"path":"policy.txt"})));
+        let (stream, _) = compact_round(&listener, &mut prior);
+        respond(stream, edit("good", "limit=30", "limit=60"));
+        let (stream, _) = compact_round(&listener, &mut prior);
+        respond(stream, call("validate", "validate", json!({})));
+        let (stream, req) = compact_round(&listener, &mut prior);
+        assert_eq!(last_output(&req), "PASS acceptance");
+        respond_many(stream, vec![edit("bad", "limit=60", "limit=0"), call("create", "write", json!({
+            "path":"z-added.txt","content":"temporary"
+        }))]);
+        let (stream, _) = compact_round(&listener, &mut prior);
+        respond(stream, call("rollback", "rollback", json!({})));
+        let (stream, req) = compact_round(&listener, &mut prior);
+        assert!(last_output(&req).starts_with("Restored 2 files"));
+        assert_eq!(fs::read_to_string(&policy).unwrap(), "limit=60\n");
+        assert!(!policy.with_file_name("z-added.txt").exists());
+        respond(stream, edit("expired", "limit=60", "limit=20"));
+        let (stream, req) = compact_round(&listener, &mut prior);
+        assert!(last_output(&req).starts_with("READ_REQUIRED"));
+        respond(stream, call("noop", "rollback", json!({})));
+        let (stream, req) = compact_round(&listener, &mut prior);
+        assert!(last_output(&req).starts_with("Restored 0 files"));
+        fs::write(&protected, "outside\n").unwrap();
+        respond(stream, call("blocked", "rollback", json!({})));
+        let (stream, req) = compact_round(&listener, &mut prior);
+        assert!(last_output(&req).starts_with("ROLLBACK_CONFLICT"));
+        assert_eq!(fs::read_to_string(&protected).unwrap(), "outside\n");
+        respond(stream, answer("Restored the last passing version."));
+    });
+    let args = ["agent", "--tool-profile", "compact", "--checks", checks.to_str().unwrap()];
+    let stopped = invoke_with_interruption(&root, &gateway, Some("during_rollback"), &[&args[..], &["--prompt", "Try the change."]].concat());
+    assert_eq!(stopped.status.code(), Some(86), "{}", String::from_utf8_lossy(&stopped.stderr));
+    assert!(root.join("z-added.txt").exists());
+    let resumed = invoke(&root, &gateway, false, &[&args[..], &["--resume"]].concat());
+    assert!(resumed.status.success(), "{}", String::from_utf8_lossy(&resumed.stderr));
+    server.join().unwrap();
+    let events = session_events(&root);
+    let events_of = |kind: &str| events.iter().filter(|event| event["kind"] == kind).count();
+    assert_eq!(events_of("rollback_intent"), 2);
+    assert_eq!(events_of("rollback_receipt"), 2);
+    assert_eq!(events_of("edit_receipt"), 4);
+}
+
+#[test]
+fn compact_guard_pauses_and_chat_accepts_steer() {
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture.path().join("workspace");
+    fs::create_dir(&root).unwrap();
+    let checks = fixture.path().join("checks.json");
+    fs::write(&checks, json!({
+        "acceptance":{"program":env!("CARGO_BIN_EXE_source_harness"),"args":["invalid-check-fixture"]}
+    }).to_string()).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let gateway = format!("http://{}/v1", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        let mut prior = None;
+        let (stream, _) = compact_round(&listener, &mut prior);
+        respond_many(stream, vec![
+            call("first", "validate", json!({})), call("same_round", "validate", json!({}))
+        ]);
+        let (stream, req) = compact_round(&listener, &mut prior);
+        assert!(last_output(&req).starts_with("FAIL acceptance"));
+        assert!(!last_output(&req).contains("VALIDATION_OSCILLATION"));
+        respond(stream, call("second", "validate", json!({})));
+        let (stream, req) = compact_round(&listener, &mut prior);
+        assert!(last_output(&req).contains("VALIDATION_OSCILLATION"));
+        respond_many(stream, vec![
+            call("third", "validate", json!({})),
+            call("skipped", "write", json!({"path":"unexpected.txt","content":"unwanted"})),
+        ]);
+        let (stream, req) = compact_round(&listener, &mut prior);
+        assert_eq!(user_texts(&req["input"]), ["Fix the check.", "Stop retrying and report."]);
+        assert!(req["input"].as_array().unwrap().iter().any(|item| {
+            item["call_id"] == "skipped" && item["output"].as_str().is_some_and(|text| text.starts_with("LOOP_GUARD_PAUSED"))
+        }));
+        respond(stream, answer("The configured check failed."));
+    });
+    let path = checks.to_str().unwrap();
+    let result = invoke(&root, &gateway, false, &["agent","--tool-profile","compact","--checks",path,"--prompt","Fix the check."]);
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("Loop guard paused"));
+    let mut chat = Command::new(env!("CARGO_BIN_EXE_source_harness"))
+        .args(["chat","--root",root.to_str().unwrap(),"--session","acceptance","--tool-profile","compact","--checks",path])
+        .env("OPENAI_BASE_URL", &gateway).env("OPENAI_MODEL","fixture")
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+    writeln!(chat.stdin.take().unwrap(), ":steer Stop retrying and report.").unwrap();
+    let result = chat.wait_with_output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(String::from_utf8_lossy(&result.stdout).trim(), "The configured check failed.");
+    assert!(!root.join("unexpected.txt").exists());
+    server.join().unwrap();
+    let events = session_events(&root);
+    assert!(events.iter().any(|event| event["kind"] == "paused" && event["data"]["reason"] == "LOOP_GUARD_TRIGGERED"));
+    assert!(!events.iter().any(|event| event["kind"] == "tool_attempt" && event["data"]["call_id"] == "skipped"));
+}
+
+#[cfg(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64")))]
+#[test]
+#[ignore = "requires a working Linux Bubblewrap namespace backend"]
+fn compact_exec_isolates_oracle_network_and_writes_and_folds_output() {
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture.path().join("workspace");
+    fs::create_dir(&root).unwrap();
+    fs::write(root.join("policy.txt"), "limit=30\n").unwrap();
+    fs::write(root.join(".env"), "SYNTHETIC_NOT_FOR_EXEC=1").unwrap();
+    let oracle = fixture.path().join("oracle.py");
+    fs::write(&oracle, "from pathlib import Path\nassert Path('policy.txt').read_text() == 'limit=30\\n'\n").unwrap();
+    let checks = fixture.path().join("checks.json");
+    fs::write(&checks, json!({
+        "acceptance":{"program":"/usr/bin/python3","args":[oracle],"inputs":[oracle]}
+    }).to_string()).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let gateway = format!("http://{}/v1", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        let mut prior = None;
+        let (stream, _) = compact_round(&listener, &mut prior);
+        let command = format!(
+            "set -e; test ! -e .sourceharness; test ! -e .env; test ! -e '{}'; test -z \"${{OPENAI_API_KEY:-}}\"; \
+             grep -F limit=30 policy.txt; printf 'local only\\n' >policy.txt; \
+             python -c 'import socket; socket.socket()' >/tmp/attempt 2>&1 && exit 9; \
+             grep -q PermissionError /tmp/attempt; echo SOCKET_BLOCKED; \
+             python3 -c \"print('x' * 2500); print('FOLDED_TAIL')\"",
+            oracle.display()
+        );
+        respond(stream, call("exec", "exec", json!({"command":command})));
+        let (stream, req) = compact_round(&listener, &mut prior);
+        let output = last_output(&req);
+        assert!(output.starts_with("limit=30\nSOCKET_BLOCKED\n"), "{output}");
+        let reference = output.split_once("result_ref=\"").unwrap().1.split('"').next().unwrap();
+        respond(stream, call("folded", "read", json!({"result_ref":reference,"start_line":4,"end_line":4})));
+        let (stream, req) = compact_round(&listener, &mut prior);
+        assert!(last_output(&req).ends_with("4\tFOLDED_TAIL\n"));
+        respond(stream, call("timed", "exec", json!({"command":"sleep 20 & wait","timeout_seconds":1})));
+        let (stream, req) = compact_round(&listener, &mut prior);
+        assert!(last_output(&req).starts_with("EXEC_TIMEOUT"), "{}", last_output(&req));
+        respond(stream, call("check", "validate", json!({})));
+        let (stream, req) = compact_round(&listener, &mut prior);
+        assert_eq!(last_output(&req), "PASS acceptance");
+        respond(stream, answer("Isolated execution finished."));
+    });
+    let result = invoke(&root, &gateway, false, &[
+        "agent","--tool-profile","compact","--checks",checks.to_str().unwrap(),"--prompt","Inspect locally and verify."
+    ]);
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    server.join().unwrap();
+    assert_eq!(fs::read_to_string(root.join("policy.txt")).unwrap(), "limit=30\n");
+    let events = session_events(&root);
+    assert!(events.iter().any(|event| event["kind"] == "exec_receipt" && event["data"]["delivery"] == "folded"));
 }
 
 #[test]

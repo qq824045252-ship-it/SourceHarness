@@ -1,6 +1,6 @@
 use std::fs;
 use std::io::{self, BufRead, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::mpsc;
 
@@ -63,7 +63,8 @@ fn run_cli() -> Result<(), String> {
             let root = parse_flag(&args[1..], "--root")?.unwrap_or_else(|| ".".to_owned());
             let cfg = apply_gateway_flags(GatewayConfig::from_env(), &args[1..])?;
             if let Some(name) = parse_flag(&args[1..], "--session")? {
-                let mut session = Session::open(&PathBuf::from(root), &name, session_options(&args[1..])?)?;
+                let root = PathBuf::from(root);
+                let mut session = Session::open(&root, &name, session_options(&args[1..], &root)?)?;
                 let prompt = parse_flag(&args[1..], "--prompt")?;
                 let resume = args[1..].iter().any(|arg| arg == "--resume");
                 let continuation = args[1..].iter().any(|arg| arg == "--continue");
@@ -84,6 +85,9 @@ fn run_cli() -> Result<(), String> {
             if args[1..].iter().any(|arg| matches!(arg.as_str(), "--resume" | "--continue")) {
                 return Err("--resume and --continue require --session.".to_owned());
             }
+            if parse_flag(&args[1..], "--tool-profile")?.is_some() {
+                return Err("--tool-profile requires --session.".to_owned());
+            }
             let prompt = parse_flag(&args[1..], "--prompt")?
                 .ok_or_else(|| "Missing --prompt <text>".to_owned())?;
             run_agent(PathBuf::from(root), &prompt, cfg)
@@ -92,8 +96,12 @@ fn run_cli() -> Result<(), String> {
             let root = parse_flag(&args[1..], "--root")?.unwrap_or_else(|| ".".to_owned());
             let cfg = apply_gateway_flags(GatewayConfig::from_env(), &args[1..])?;
             if let Some(name) = parse_flag(&args[1..], "--session")? {
-                let session = Session::open(&PathBuf::from(root), &name, session_options(&args[1..])?)?;
+                let root = PathBuf::from(root);
+                let session = Session::open(&root, &name, session_options(&args[1..], &root)?)?;
                 return run_session_chat(session, ResponsesClient::new(cfg));
+            }
+            if parse_flag(&args[1..], "--tool-profile")?.is_some() {
+                return Err("--tool-profile requires --session.".to_owned());
             }
             run_chat(PathBuf::from(root), cfg)
         }
@@ -173,7 +181,12 @@ fn apply_gateway_flags(mut cfg: GatewayConfig, args: &[String]) -> Result<Gatewa
     Ok(cfg)
 }
 
-fn session_options(args: &[String]) -> Result<Options, String> {
+fn session_options(args: &[String], root: &Path) -> Result<Options, String> {
+    let compact = match parse_flag(args, "--tool-profile")?.as_deref() {
+        None | Some("classic") => false,
+        Some("compact") => true,
+        _ => return Err("Expected --tool-profile classic or compact".to_owned()),
+    };
     let edit = match parse_flag(args, "--edit-mode")?.as_deref() {
         None | Some("text") => EditMode::Text,
         Some("range") => EditMode::Range,
@@ -192,8 +205,11 @@ fn session_options(args: &[String]) -> Result<Options, String> {
         None | Some("versioned") => ReceiptMode::Versioned,
         _ => return Err("Expected --receipt-mode summary, diff, or versioned".to_owned()),
     };
-    let commands = parse_flag(args, "--checks")?.map(|path| Commands::from_file(&PathBuf::from(path)))
-        .transpose()?.unwrap_or_default();
+    let commands = match parse_flag(args, "--checks")? {
+        Some(path) if compact => Commands::from_compact_file(Path::new(&path), root)?,
+        Some(path) => Commands::from_file(Path::new(&path))?,
+        None => Commands::default(),
+    };
     let switch = |flag| match parse_flag(args, flag)?.as_deref() {
         None => Ok(None),
         Some("on") => Ok(Some(true)),
@@ -206,6 +222,7 @@ fn session_options(args: &[String]) -> Result<Options, String> {
         .map_err(|_| "Expected --history-budget <bytes>".to_owned())?
         .unwrap_or(DEFAULT_HISTORY_BUDGET);
     Ok(Options {
+        compact,
         edit,
         history,
         commands,
@@ -253,7 +270,7 @@ fn run_session_chat(mut session: Session, client: ResponsesClient) -> Result<(),
         }
     });
     eprintln!("Use :steer <instruction> to redirect an active run, :resume to resume, or :quit to exit.");
-    if session.is_pending()? {
+    if session.is_pending()? && (!session.is_loop_paused()? || session.has_inbox_steering()?) {
         run_chat_turn(&mut session, &client, None);
     }
     loop {
@@ -630,7 +647,7 @@ fn print_usage() {
          source_harness agent --root <dir> --prompt <text> [--model <m>] [--effort <e>]\n  \
          source_harness chat --root <dir> [--model <m>] [--effort <e>]\n  \
          source_harness agent --root <dir> --session <name> [--prompt <text> | --resume | --continue [--prompt <correction>]] [--checks <file>]\n  \
-         Session options: [--edit-mode text|range|patch] [--history-mode conversation|events|facts]\n  \
+         Session options: [--tool-profile classic|compact] [--edit-mode text|range|patch] [--history-mode conversation|events|facts]\n  \
                           [--receipt-mode summary|diff|versioned]\n  \
                           [--freshness-instructions on|off] [--stale-projection on|off]\n  \
                           [--workspace-change-notices on|off] [--history-budget <bytes>]\n  \

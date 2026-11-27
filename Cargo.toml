@@ -14,3 +14,6 @@ serde_json = "1"
 sha2 = "0.10"
 tempfile = "3"
 ureq = { version = "2", default-features = false, features = ["native-tls"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"

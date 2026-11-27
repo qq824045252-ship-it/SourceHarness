@@ -142,13 +142,13 @@ struct Intent {
     after: String,
 }
 
-type Reply = Result<Value, String>;
+pub(super) type Reply = Result<Value, String>;
 
-fn rejected(code: &str, message: &str) -> Value {
+pub(super) fn rejected(code: &str, message: &str) -> Value {
     json!({"status":"error","code":code,"reason":message})
 }
 
-fn parse<T: DeserializeOwned>(args: &Value) -> Result<T, Value> {
+pub(super) fn parse<T: DeserializeOwned>(args: &Value) -> Result<T, Value> {
     serde_json::from_value(args.clone())
         .map_err(|err| rejected("INVALID_ARGUMENT", &err.to_string()))
 }
@@ -173,13 +173,13 @@ pub(crate) fn permitted(path: &Path) -> bool {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum ResolvePath {
+pub(super) enum ResolvePath {
     Existing,
     MissingFile,
     MissingParents,
 }
 
-fn workspace_path(
+pub(super) fn workspace_path(
     ctx: &WorkspaceContext,
     path: &str,
     mode: ResolvePath,
@@ -309,7 +309,7 @@ pub(crate) fn walk(root: &Path, limit: usize) -> Result<(Vec<PathBuf>, bool), St
     Ok((files, true))
 }
 
-fn file_bytes(path: &Path, limit: usize) -> Result<Option<Vec<u8>>, Value> {
+pub(super) fn file_bytes(path: &Path, limit: usize) -> Result<Option<Vec<u8>>, Value> {
     let meta = match fs::metadata(path) {
         Ok(meta) => meta,
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -1249,6 +1249,26 @@ fn conflict(
     Ok(error)
 }
 
+pub(super) fn add_conflict_diff(journal: &mut Journal, run: usize, result: &mut Value) -> Result<(), String> {
+    let (Some(before), Some(after)) = (
+        result["expected_revision"].as_str(), result["current_revision"].as_str()
+    ) else {
+        return Ok(());
+    };
+    let previous = journal.get(before)?;
+    let current = journal.get(after)?;
+    let previous = std::str::from_utf8(&previous).map_err(|err| err.to_string())?;
+    let current = std::str::from_utf8(&current).map_err(|err| err.to_string())?;
+    let diff = diffy::create_patch(previous, current).to_string();
+    let (preview, clipped) = truncate_utf8_bytes(&diff, 1024);
+    let artifact = journal.artifact(run, json!({"kind":"diff","path":result["path"],"before":before,"after":after}), diff.as_bytes())?;
+    result["diff"] = json!(preview);
+    if clipped {
+        result["diff_ref"] = json!(artifact.result_ref);
+    }
+    Ok(())
+}
+
 fn transform(old: &str, mut changes: Vec<(usize, usize, String)>) -> Result<String, Value> {
     if changes.is_empty() {
         return Err(rejected("EMPTY_EDIT", "Supply at least one local edit."));
@@ -1567,6 +1587,52 @@ enum Edit {
     Text(Vec<TextChange>),
     Range(Vec<RangeChange>),
     Patch(String),
+}
+
+pub(super) fn restore_file(
+    ctx: &WorkspaceContext,
+    journal: &mut Journal,
+    run: usize,
+    operation: &str,
+    path: &str,
+    before: &str,
+    after: Option<&str>,
+) -> Reply {
+    if let Some(after) = after {
+        if journal.events.iter().any(|e| e.kind == "edit_receipt" && e.data["operation"] == operation) {
+            return Ok(if workspace_revision(ctx, path).as_ref().and_then(Value::as_str) == Some(after) {
+                json!({"status":"ok"})
+            } else {
+                rejected("REVISION_CONFLICT", "A restored file changed before rollback completed.")
+            });
+        }
+        return commit(ctx, journal, run, &Intent {
+            operation: operation.to_owned(),
+            path: path.to_owned(),
+            before: Some(before.to_owned()),
+            after: after.to_owned(),
+        }, true);
+    }
+    let (target, name) = match workspace_path(ctx, path, ResolvePath::MissingParents) {
+        Ok(value) => value,
+        Err(err) => return Ok(err),
+    };
+    if name != path {
+        return Ok(rejected("PATH_CHANGED", "The rollback path resolves to another file."));
+    }
+    let bytes = match file_bytes(&target, ctx.config().max_file_bytes) {
+        Ok(Some(bytes)) => bytes,
+        Ok(None) => return Ok(json!({"status":"ok"})),
+        Err(err) => return Ok(err),
+    };
+    if revision(&bytes) != before {
+        return Ok(rejected("REVISION_CONFLICT", "The created file has changed."));
+    }
+    if let Err(err) = verify_parent(target.parent().ok_or("Missing rollback parent")?) {
+        return Ok(err);
+    }
+    fs::remove_file(target).map_err(|err| err.to_string())?;
+    Ok(json!({"status":"ok"}))
 }
 
 fn commit(

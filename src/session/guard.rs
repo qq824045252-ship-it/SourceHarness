@@ -1,8 +1,65 @@
-use super::journal::Journal;
+use super::journal::{revision, Journal};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 const WARN_THRESHOLD: usize = 2;
+const PAUSE_THRESHOLD: usize = 3;
+
+pub(super) fn compact_signal(
+    journal: &Journal, run: usize, round: usize, tool: &str, args: &Value,
+    result: &Value, workspace: &str,
+) -> Value {
+    let validation = tool == "validate" && result["passed"] == false;
+    let conditions = json!({"check":result["check"],"program":result["program_revision"],"inputs":result["input_revisions"]});
+    let failed_revision = validation.then(|| revision(format!("{workspace}/{conditions}").as_bytes()));
+    let detail = if validation {
+        json!({"conditions":conditions,"exit":result["exit_code"],"timed_out":result["timed_out"],"streams":result["streams"]})
+    } else {
+        json!({"tool":tool,"args":args,"code":result["code"],"exit":result["exit_code"],"streams":result["streams"]})
+    };
+    let diagnostic = revision(detail.to_string().as_bytes());
+    let fingerprint = revision(format!("{workspace}/{diagnostic}").as_bytes());
+    let mut exact = HashSet::from([round as u64]);
+    let mut repeated_revision = exact.clone();
+    let mut consecutive_validation = exact.clone();
+    let mut same_diagnostic = validation;
+    for event in journal.events.iter().rev().take_while(|event| event.run == run) {
+        if matches!(event.kind.as_str(), "steer" | "rollback_receipt" | "paused")
+            || (validation && event.kind == "validation_receipt" && event.data["passed"] == true
+                && event.data["check"] == result["check"])
+        {
+            break;
+        }
+        if event.kind != "tool_result" {
+            continue;
+        }
+        let Some(prior_round) = event.data["round"].as_u64() else { continue };
+        let previous = &event.data["guard"];
+        if previous["fingerprint"] == fingerprint {
+            exact.insert(prior_round);
+        }
+        if failed_revision.as_deref().is_some_and(|hash| previous["failed_revision"] == hash) {
+            repeated_revision.insert(prior_round);
+        }
+        if same_diagnostic && event.data["name"] == "validate" {
+            same_diagnostic = previous["diagnostic"] == diagnostic;
+            if same_diagnostic {
+                consecutive_validation.insert(prior_round);
+            }
+        }
+    }
+    let count = exact.len().max(consecutive_validation.len()).max(repeated_revision.len());
+    let state = match count {
+        PAUSE_THRESHOLD.. => "pause",
+        WARN_THRESHOLD.. => "warn",
+        _ => "observe",
+    };
+    json!({
+        "kind":if validation { "VALIDATION_OSCILLATION" } else { "REPEATED_FAILURE" },
+        "state":state,"count":count,"workspace_revision":workspace,
+        "diagnostic":diagnostic,"fingerprint":fingerprint,"failed_revision":failed_revision
+    })
+}
 
 pub struct PendingOutcome<'a> {
     pub operation: &'a str,
@@ -189,6 +246,31 @@ fn error_key(name: &str, data: &Value) -> (String, String, String) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn compact_detects_failed_workspace_oscillation_across_different_diagnostics() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut journal = Journal::open(dir.path()).unwrap();
+        for (round, workspace, expected) in [
+            (1, "a", "observe"),
+            (2, "b", "observe"),
+            (3, "a", "warn"),
+            (4, "b", "warn"),
+            (5, "a", "pause"),
+        ] {
+            let result = json!({"check":"test","program_revision":"runner","passed":false,
+                "exit_code":1,"streams":{"stderr":format!("diagnostic {round}")}});
+            let signal = compact_signal(&journal, 1, round, "validate", &json!({}), &result, workspace);
+            assert_eq!(signal["state"], expected);
+            journal.append(1, "tool_result", json!({
+                "name":"validate", "round":round, "guard":signal
+            })).unwrap();
+        }
+        journal.append(1, "steer", json!({"text":"Try a different approach."})).unwrap();
+        let result = json!({"check":"test","program_revision":"runner","passed":false,"exit_code":1});
+        let after_steer = compact_signal(&journal, 1, 6, "validate", &json!({}), &result, "a");
+        assert_eq!(after_steer["state"], "observe");
+    }
 
     #[test]
     fn exact_repeat_warns_and_resets_after_edit() {

@@ -87,6 +87,24 @@ Use the optional `inputs` array to declare absolute paths to external dependenci
 
 Reports distinguish a completed write receipt from a matching target observed during recovery. File revisions guard edits against observed conflicts. External editors share the filesystem, so programs that bypass the workspace lock can still race the file replacement. Session data contains workspace content and provider responses for recovery. Keep it local or review it before sharing.
 
+### Compact session tools
+
+Select the experimental profile when starting a session. Use the same flag when reopening it.
+
+~~~bash
+source_harness agent --root ./workspace --session compact-task --tool-profile compact \
+  --checks ./checks.json --prompt "Apply the requested changes and verify the result."
+source_harness chat --root ./workspace --session compact-task --tool-profile compact --checks ./checks.json
+~~~
+
+The compact profile sends a fixed instruction and tool prefix and appends to the conversation. Automatic history projection and notices are disabled. `read` delivers numbered text. `edit` applies a batch of exact, disjoint replacements to a single file. `write` creates a new file or replaces an observed one. An edit or replacement uses the revision last presented by a live `read` or a successful `edit` or `write` in an earlier model round of the same run. Conflicts return a diff when both file versions exist. The session journal retains revisions, raw responses and receipts.
+
+`exec` runs shell commands on a bounded, disposable workspace copy. This profile uses Bubblewrap on x86-64 or AArch64 Linux with user namespaces and `openat2`. The command sees system binaries and libraries, a clean environment and temporary storage. Network sockets are disabled. Commands default to 15 seconds and can request up to 60. Outputs over 2 KiB are folded into a reference that `read` can open, with up to 512 KiB saved for each stream. Changes on the copy expire after each call.
+
+Keep the checks file, acceptance scripts and declared oracle inputs outside the workspace and the system runtime mounts. `validate` runs the configured checker on a separate captured snapshot. `rollback` restores file bytes to the latest passing snapshot in the current run, or the run's starting snapshot if no check passed. It verifies that the tracked files match the checkpoint plus recorded edits before restoring. An interrupted rollback can resume from its recorded intent.
+
+The compact loop guard warns after two rounds of repeated failure and pauses after three. It closes pending tool calls from that response and records the pause and fingerprints. Give a correction with `:steer` in chat or use `agent --continue --prompt <correction>`. Use the session's `--resume` command to continue under the same configuration.
+
 Run the real-model comparison with the release executable and a fresh output directory.
 
 ```powershell

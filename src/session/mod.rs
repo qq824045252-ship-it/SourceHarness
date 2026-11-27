@@ -1,8 +1,11 @@
+mod compact;
+mod exec;
 mod guard;
 mod history;
 mod inbox;
 mod journal;
 mod receipt;
+mod rollback;
 #[cfg(test)]
 mod tests;
 mod tools;
@@ -50,6 +53,7 @@ impl HistoryMode {
 
 #[derive(Clone, Debug)]
 pub struct Options {
+    pub compact: bool,
     pub edit: EditMode,
     pub history: HistoryMode,
     pub commands: Commands,
@@ -63,6 +67,7 @@ pub struct Options {
 impl Default for Options {
     fn default() -> Self {
         Self {
+            compact: false,
             edit: EditMode::default(),
             history: HistoryMode::default(),
             commands: Commands::default(),
@@ -104,6 +109,7 @@ struct Checkpoint {
     queued_steering: Vec<(usize, Value)>,
     attached_steering: Vec<(usize, usize)>,
     claimed_inputs: HashSet<usize>,
+    guard_pause: Option<Value>,
 }
 
 impl Checkpoint {
@@ -164,6 +170,12 @@ impl Session {
             return Err(format!("History budget must be {MIN_HISTORY_BUDGET}..={MAX_HISTORY_BUDGET} bytes."));
         }
         let ctx = WorkspaceContext::new(WorkspaceConfig::with_root(root))?;
+        if options.compact {
+            if !matches!(options.edit, EditMode::Text) {
+                return Err("The compact tool profile uses exact text edits.".to_owned());
+            }
+            options.commands.check_exec_boundary(ctx.root())?;
+        }
         let dir = session_path(ctx.root(), name)?;
         for path in [
             ctx.root().join(".sourceharness"),
@@ -216,6 +228,10 @@ impl Session {
     pub fn is_pending(&self) -> Result<bool, String> {
         let state = self.checkpoint()?;
         Ok(state.run > 0 && state.final_text.is_none())
+    }
+
+    pub fn is_loop_paused(&self) -> Result<bool, String> {
+        Ok(self.checkpoint()?.guard_pause.is_some())
     }
 
     pub fn run(
@@ -282,19 +298,28 @@ impl Session {
         observer: &mut dyn RunObserver,
         poll_steering: &mut dyn FnMut() -> Option<SteeringInput>,
     ) -> Result<String, String> {
-        let mut definitions = tools::definitions(self.options.edit);
-        definitions.extend(self.options.commands.definition());
-        let history_enabled = !matches!(self.options.history, HistoryMode::Conversation);
-        let freshness = self.options.freshness_instructions.unwrap_or(history_enabled);
-        let projection = self.options.stale_projection.unwrap_or(history_enabled);
-        let notices = self.options.workspace_change_notices.unwrap_or(projection);
+        let compact = self.options.compact;
+        let definitions = if compact {
+            compact::definitions()
+        } else {
+            let mut definitions = tools::definitions(self.options.edit);
+            definitions.extend(self.options.commands.definition());
+            definitions
+        };
+        let history_enabled = !compact && !matches!(self.options.history, HistoryMode::Conversation);
+        let freshness = !compact && self.options.freshness_instructions.unwrap_or(history_enabled);
+        let projection = !compact && self.options.stale_projection.unwrap_or(history_enabled);
+        let notices = !compact && self.options.workspace_change_notices.unwrap_or(projection);
+        let history = if compact { HistoryMode::Conversation } else { self.options.history };
         let mut profile = json!({"model":client.config().model,"effort":client.config().reasoning_effort,
             "gateway":client.config().base_url,"tools_revision":revision(&serde_json::to_vec(&definitions).map_err(|e|e.to_string())?),
-            "binary_revision":self.binary_revision,"history_mode":format!("{:?}",self.options.history),
+            "binary_revision":self.binary_revision,"history_mode":format!("{history:?}"),
             "freshness_instructions":freshness,"stale_projection":projection,"history_budget_bytes":self.options.history_budget,
             "validation":self.options.commands,"validation_programs":self.options.commands.program_revisions(),
             "workspace":self.ctx.root()});
-        if self.options.receipt_mode != ReceiptMode::Versioned {
+        if compact {
+            profile["tool_profile"] = json!("compact");
+        } else if self.options.receipt_mode != ReceiptMode::Versioned {
             profile["receipt_mode"] = json!(self.options.receipt_mode.label());
         }
         if notices != projection {
@@ -305,6 +330,9 @@ impl Session {
             profile["validation_inputs"] = json!(validation_inputs);
         }
         let mut checkpoint = self.checkpoint()?;
+        if checkpoint.profile["tool_profile"] == "compact" && !compact {
+            return Err("Use --tool-profile compact to reopen this session.".to_owned());
+        }
         let continuation = match start {
             Start::Continue(correction) => Some(self.continuation(&checkpoint, &profile, correction)?),
             _ => None,
@@ -345,7 +373,10 @@ impl Session {
             }
         };
         if let Some(mut data) = entry {
-            if !self.options.commands.0.is_empty() {
+            if compact {
+                data["workspace_revision_at_start"] =
+                    json!(validation::save_workspace(&self.ctx, &self.journal)?);
+            } else if !self.options.commands.0.is_empty() {
                 if let Ok(revision) = validation::workspace_version(&self.ctx, &self.journal) {
                     data["workspace_revision_at_start"] = json!(revision);
                 }
@@ -359,12 +390,16 @@ impl Session {
         drop(gate);
         let mut turn = None::<(TurnMetrics, Instant)>;
         for step in 0..=client.config().max_turns {
+            let mut new_pause = None;
             while let Some(call) = checkpoint.pending.pop_front() {
                 self.collect_steering(&mut checkpoint, poll_steering)?;
-                let output = if checkpoint.queued_steering.is_empty() {
-                    self.execute(run, checkpoint.round, &call, observer)?
+                let guarded = checkpoint.guard_pause.is_some() || new_pause.is_some();
+                let output = if checkpoint.queued_steering.is_empty() && !guarded {
+                    let (output, pause) = self.execute(run, checkpoint.round, &call, observer)?;
+                    new_pause = pause;
+                    output
                 } else {
-                    self.close_steered_call(run, checkpoint.round, &call, observer)?
+                    self.close_pending_call(run, checkpoint.round, &call, observer, guarded)?
                 };
                 checkpoint.input.push(output);
             }
@@ -373,6 +408,12 @@ impl Session {
                 observer.on_turn_complete(&metrics);
             }
             self.collect_steering(&mut checkpoint, poll_steering)?;
+            if let Some(details) = new_pause.filter(|_| checkpoint.queued_steering.is_empty()) {
+                self.journal.append(run, "paused", json!({
+                    "reason":"LOOP_GUARD_TRIGGERED","round":checkpoint.round,"guard":details
+                }))?;
+                return Err("Loop guard paused this run. Use :steer with guidance in chat or --continue --prompt with a correction.".to_owned());
+            }
             if step == client.config().max_turns {
                 break;
             }
@@ -392,15 +433,20 @@ impl Session {
             } else {
                 Vec::new()
             };
-            let auxiliary = history::prepare(
-                self.options.history,
+            let mut auxiliary = history::prepare(
+                history,
                 freshness,
                 projection,
                 self.options.history_budget,
                 changes,
                 records,
             );
-            body["instructions"] = json!(format!("{INSTRUCTIONS}{}", auxiliary.static_suffix));
+            body["instructions"] = if compact {
+                auxiliary.audit["delivery"] = json!("none");
+                json!(compact::INSTRUCTIONS)
+            } else {
+                json!(format!("{INSTRUCTIONS}{}", auxiliary.static_suffix))
+            };
             // Each Responses request carries its own history. Keep one current
             // notice in the wire input and leave the user transcript intact.
             if !auxiliary.dynamic_context.is_empty() {
@@ -414,6 +460,7 @@ impl Session {
                 self.collect_steering(&mut checkpoint, poll_steering)?;
             }
             let (request, response, elapsed_ms) = exchange?;
+            checkpoint.guard_pause = None;
             observer.on_model_response_usage(response.usage_reported.then_some(&response.usage));
             let output = self.journal.store_json(&json!(response.output_items))?;
             let raw_response = self.journal.store_json(&response.response)?;
@@ -555,6 +602,7 @@ impl Session {
                     checkpoint.queued_steering.push((event.seq, event.data["text"].clone()));
                 }
                 "model_request" => {
+                    checkpoint.guard_pause = None;
                     checkpoint.attach_steering();
                     if !checkpoint.attached_steering.is_empty()
                         && event.data["steer_events"] != json!(checkpoint.steer_events())
@@ -592,6 +640,9 @@ impl Session {
                     let hash = event.data.get("model_output").unwrap_or(&event.data["output"]);
                     let value = self.journal.load_json(hash)?;
                     checkpoint.input.push(function_output(&call, &value));
+                    if event.data["guard"]["state"] == "pause" {
+                        checkpoint.guard_pause = Some(event.data["guard"].clone());
+                    }
                 }
                 _ => {}
             }
@@ -623,6 +674,7 @@ impl Session {
         checkpoint.round = 0;
         checkpoint.profile = data["profile"].clone();
         checkpoint.final_text = None;
+        checkpoint.guard_pause = None;
         checkpoint.pending.clear();
         checkpoint.prior_len = checkpoint.input.len();
         checkpoint.input.push(json!({"role":"user","content":data["text"]}));
@@ -634,7 +686,13 @@ impl Session {
             return Err("No unfinished run to continue.".to_owned());
         }
         let outputs: Vec<Value> = checkpoint.pending.iter().map(|call| {
-            function_output(call, &self.observe_pending(call))
+            let result = self.observe_pending(call);
+            let result = if self.options.compact {
+                compact::present(&call.name, &result, None)
+            } else {
+                result
+            };
+            function_output(call, &result)
         }).collect();
         let outputs = self.journal.store_json(&json!(outputs))?;
         let mut text = format!(
@@ -654,7 +712,7 @@ impl Session {
         let records = self.journal.events.iter().rev().filter(|e| e.data["operation"] == call.operation);
         for event in records {
             match event.kind.as_str() {
-                "edit_receipt" | "validation_receipt" => return event.data.clone(),
+                "edit_receipt" | "validation_receipt" | "exec_receipt" | "rollback_receipt" => return event.data.clone(),
                 "edit_intent" => {
                     let path = event.data["path"].as_str().unwrap_or("");
                     let current = tools::workspace_revision(&self.ctx, path);
@@ -672,6 +730,9 @@ impl Session {
                 "validation_intent" => return json!({"status":"error","code":"VALIDATION_INTERRUPTED",
                     "intent_event":event.seq,"operation":call.operation,
                     "reason":"The original check has no completed receipt."}),
+                "rollback_intent" => return json!({"status":"error","code":"ROLLBACK_INTERRUPTED",
+                    "intent_event":event.seq,"operation":call.operation,
+                    "reason":"Rollback has no completed receipt. Inspect the live files."}),
                 _ => {}
             }
         }
@@ -679,12 +740,13 @@ impl Session {
             "reason":"The pending call was superseded at the start of the linked continuation."})
     }
 
-    fn close_steered_call(
+    fn close_pending_call(
         &mut self,
         run: usize,
         round: usize,
         call: &Call,
         observer: &mut dyn RunObserver,
+        guarded: bool,
     ) -> Result<Value, String> {
         let attempt = self.journal.events.iter().rev()
             .find(|e| e.kind == "tool_attempt" && e.data["operation"] == call.operation)
@@ -696,6 +758,11 @@ impl Session {
                 value["reason"] = json!("The user redirected the run. This earlier attempt has no recorded outcome.");
             }
             ("tool_reconciled", value)
+        } else if guarded {
+            ("tool_skipped", json!({
+                "status":"skipped", "code":"LOOP_GUARD_PAUSED",
+                "reason":"The loop guard stopped this call before it started."
+            }))
         } else {
             ("tool_skipped", json!({
                 "status":"skipped", "code":"SUPERSEDED_BY_STEER",
@@ -704,16 +771,26 @@ impl Session {
         };
         let args = self.journal.put(call.raw_args.as_bytes())?;
         let output = self.journal.store_json(&result)?;
-        self.journal.append(run, kind, json!({
+        let mut data = json!({
             "operation":call.operation,"attempt":attempt,"round":round,"call_id":call.call_id,
             "name":call.name,"arguments":args,"output":output,"status":result["status"],"code":result["code"]
-        }))?;
+        });
+        let presented = if self.options.compact {
+            let text = compact::present(&call.name, &result, None);
+            data["model_output"] = json!(self.journal.store_json(&text)?);
+            text
+        } else {
+            result.clone()
+        };
+        self.journal.append(run, kind, data)?;
         observer.on_tool_call(&tool_trace(call, round, &result, 0));
-        Ok(function_output(call, &result))
+        Ok(function_output(call, &presented))
     }
 
-    fn execute(&mut self, run: usize, round: usize, call: &Call, observer: &mut dyn RunObserver) -> Result<Value, String> {
+    fn execute(&mut self, run: usize, round: usize, call: &Call, observer: &mut dyn RunObserver) -> Result<(Value, Option<Value>), String> {
         let args: Result<Value, _> = serde_json::from_str(&call.raw_args);
+        let compact = self.options.compact;
+        let action_args = args.as_ref().ok();
         let input = self.journal.put(call.raw_args.as_bytes())?;
         let attempt = self.journal.append(
             run,
@@ -722,13 +799,18 @@ impl Session {
             "call_id":call.call_id,"name":call.name,"arguments":input}),
         )?;
         let started = Instant::now();
-        let result = match (call.name.as_str(), args) {
+        let result = match (call.name.as_str(), args.as_ref()) {
             (_, Err(err)) => {
                 json!({"status":"error","code":"INVALID_ARGUMENT","reason":err.to_string()})
             }
-            ("read", Ok(args)) => tools::read(&self.ctx, &mut self.journal, run, &args)?,
-            ("research", Ok(args)) => tools::research(&self.ctx, &mut self.journal, run, Some(attempt), &args)?,
-            ("search_result", Ok(args)) => tools::search_result(&self.journal, &args)?,
+            ("read", Ok(args)) => tools::read(&self.ctx, &mut self.journal, run, args)?,
+            ("exec", Ok(args)) if compact => exec::run(&self.ctx, &mut self.journal, run, &call.operation, args)?,
+            ("rollback", Ok(args)) if compact => rollback::run(&self.ctx, &mut self.journal, run, &call.operation, args)?,
+            ("research", Ok(args)) if !compact => tools::research(&self.ctx, &mut self.journal, run, Some(attempt), args)?,
+            ("search_result", Ok(args)) if !compact => tools::search_result(&self.journal, args)?,
+            ("edit" | "write", Ok(args)) if compact => compact::modify(
+                &self.ctx, &mut self.journal, run, round, &call.operation, &call.name, args,
+            )?,
             ("edit" | "write", Ok(args)) => tools::modify(
                 &self.ctx,
                 &mut self.journal,
@@ -736,7 +818,10 @@ impl Session {
                 &call.operation,
                 &call.name,
                 self.options.edit,
-                &args,
+                args,
+            )?,
+            ("validate", Ok(args)) if compact => compact::validate(
+                &self.ctx, &mut self.journal, run, &call.operation, &self.options.commands, args,
             )?,
             ("validate", Ok(args)) => validation::run(
                 &self.ctx,
@@ -744,12 +829,58 @@ impl Session {
                 run,
                 &call.operation,
                 &self.options.commands,
-                &args,
+                args,
             )?,
             _ => json!({"status":"error","code":"UNKNOWN_TOOL","reason":"Use an available tool."}),
         };
-        let mut model_output = receipt::project(self.options.receipt_mode, &call.name, &result);
-        let presented = model_output.as_ref().unwrap_or(&result);
+        let signal = if compact && (result["status"] == "error" || result["passed"] == false) {
+            result["workspace_revision"].as_str().map(str::to_owned)
+                .or_else(|| validation::workspace_version(&self.ctx, &self.journal).ok())
+                .map(|workspace| guard::compact_signal(
+                    &self.journal, run, round, &call.name, action_args.unwrap_or(&Value::Null),
+                    &result, &workspace,
+                ))
+        } else {
+            None
+        };
+        let model_output = if compact {
+            let warning = signal.as_ref().filter(|signal| signal["state"] != "observe");
+            Some(compact::present(&call.name, &result, warning))
+        } else {
+            self.classic_output(run, call, attempt, &result)?
+        };
+        let output = self.journal.store_json(&result)?;
+        let elapsed = started.elapsed().as_millis();
+        let mut data = json!({"operation":call.operation,"attempt":attempt,"round":round,
+            "call_id":call.call_id,"name":call.name,"output":output,"status":result["status"],"code":result["code"],
+            "source":result["source"],"revision":result["revision"],"result_ref":result["result_ref"],
+            "elapsed_ms":elapsed});
+        if let Some(output) = &model_output {
+            data["model_output"] = json!(self.journal.store_json(output)?);
+        }
+        if compact {
+            let observed = result["status"] == "ok" && result["source"]["kind"] == "workspace"
+                && match call.name.as_str() {
+                    "read" => action_args.is_some_and(|args| args["result_ref"].is_null()),
+                    "edit" | "write" => true,
+                    _ => false,
+                };
+            data["live_observation"] = json!(observed);
+            data["guard"] = json!(signal);
+        }
+        self.journal.append(run, "tool_result", data)?;
+        let delivered = model_output.as_ref().unwrap_or(&result);
+        let mut trace = tool_trace(call, round, if compact { &result } else { delivered }, elapsed);
+        if let Some(text) = delivered.as_str() {
+            trace.response_bytes = text.len();
+        }
+        observer.on_tool_call(&trace);
+        Ok((function_output(call, delivered), signal.filter(|signal| signal["state"] == "pause")))
+    }
+
+    fn classic_output(&mut self, run: usize, call: &Call, attempt: usize, result: &Value) -> Result<Option<Value>, String> {
+        let mut model_output = receipt::project(self.options.receipt_mode, &call.name, result);
+        let presented = model_output.as_ref().unwrap_or(result);
         if json_byte_len(presented) > MAX_RESPONSE_BYTES {
             let status = presented["status"].clone();
             let code = presented.get("code").cloned();
@@ -772,7 +903,7 @@ impl Session {
                 operation: &call.operation,
                 attempt,
                 name: &call.name,
-                result: &result,
+                result,
             },
         ) {
             let mut candidate = model_output.clone().unwrap_or_else(|| result.clone());
@@ -783,19 +914,7 @@ impl Session {
                 }
             }
         }
-        let output = self.journal.store_json(&result)?;
-        let elapsed = started.elapsed().as_millis();
-        let mut data = json!({"operation":call.operation,"attempt":attempt,"round":round,
-            "call_id":call.call_id,"name":call.name,"output":output,"status":result["status"],"code":result["code"],
-            "source":result["source"],"revision":result["revision"],"result_ref":result["result_ref"],
-            "elapsed_ms":elapsed});
-        if let Some(output) = &model_output {
-            data["model_output"] = json!(self.journal.store_json(output)?);
-        }
-        self.journal.append(run, "tool_result", data)?;
-        let delivered = model_output.as_ref().unwrap_or(&result);
-        observer.on_tool_call(&tool_trace(call, round, delivered, elapsed));
-        Ok(function_output(call, delivered))
+        Ok(model_output)
     }
 
     fn project_workspace_evidence(
@@ -930,7 +1049,8 @@ fn calls_from(items: &[Value], run: usize, round: usize) -> Result<VecDeque<Call
 }
 
 fn function_output(call: &Call, value: &Value) -> Value {
-    json!({"type":"function_call_output","call_id":call.call_id,"output":value.to_string()})
+    let text = value.as_str().map(str::to_owned).unwrap_or_else(|| value.to_string());
+    json!({"type":"function_call_output","call_id":call.call_id,"output":text})
 }
 
 fn tool_trace(call: &Call, turn: usize, result: &Value, duration_ms: u128) -> ToolCallTrace {
@@ -1034,10 +1154,12 @@ pub fn fork_snapshot(
     let dir = session_path(root, name)?;
     let (events, _) = read_events(&dir)?;
     if !events.iter().any(|event| {
-        event.kind == "validation_intent" && event.data["workspace_revision"] == manifest
+        (event.kind == "validation_intent" && event.data["workspace_revision"] == manifest)
+            || (event.kind == "user" && event.data["profile"]["tool_profile"] == "compact"
+                && event.data["workspace_revision_at_start"] == manifest)
     }) {
         return Err(
-            "The supplied version was not a recorded validation snapshot in this session."
+            "The supplied version was not a recorded validation or run-start snapshot in this session."
                 .to_owned(),
         );
     }
