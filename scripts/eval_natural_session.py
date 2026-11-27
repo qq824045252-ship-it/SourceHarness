@@ -6,6 +6,8 @@ import getpass
 import json
 import os
 from pathlib import Path
+from urllib.parse import urlsplit
+from unittest.mock import patch
 import re
 import signal
 import sys
@@ -187,43 +189,74 @@ def history_audit(root, case, all_events, phase_events):
     }
 
 
-def run_scenario(args, case, index, start_phase=None):
+def resumable_transport_failure(result):
+    return (result["exit"] is None
+            or ("The run can be resumed" in result["error"] and any(
+                error in result["error"] for error in ("HTTP 502:", "HTTP 503:", "HTTP 504:", "Network Error:"))))
+
+
+def run_scenario(args, case, index, start_phase=None, previous=None):
     directory = args.out / f"session-{index:02d}"
-    directory.mkdir()
     root = directory / "workspace"
-    seed(case, root)
+    if previous is None:
+        directory.mkdir()
+        seed(case, root)
+        phases = []
+    else:
+        phases = previous["phases"][:-1]
     checks, oracle, sources = checks_for(directory)
     compact = args.tool_profile == "compact"
     switches = "off" if compact else "on"
     trial = Trial(case.name, None, edit="text", history="conversation" if compact else "events",
                   freshness=switches, projection=switches, notices=switches,
                   receipt="versioned", tool_profile=args.tool_profile)
-    phases = []
     for phase, prompt in enumerate(case.prompts, 1):
+        if phase <= len(phases):
+            continue
         if start_phase is not None:
             start_phase(phase)
             prompt += "\nRun the configured acceptance check against the final workspace and report its result."
-        checkpoint = len(read_events(root))
-        before = workspace_files(root)
-        external = apply_external_changes(case, root, phase)
-        start = workspace_files(root)
-        config = {"case": case.name, "phase": phase, "protected": {
-            name: sha(start[name]) for name in protected_paths(case, phase, start)}}
         label = f"phase-{phase:02d}"
-        save(directory / f"{label}-check.json", config)
-        save(oracle, config)
-        oracle_revision = sha(oracle.read_bytes())
         inject = args.interrupt_phase == phase
         interruption_mode = "kill_after_file_replace" if args.sigkill else True
         expected_exit = -signal.SIGKILL if args.sigkill else 86
-        runs = [execute(args, checks, root, trial, prompt, interrupt=inject and interruption_mode, label=label,
-                        timeout=args.phase_timeout)]
+        recover = previous is not None and previous["phases"][-1]["phase"] == phase
         interrupted = {"requested": inject, "triggered": False}
-        if inject and runs[-1]["exit"] == expected_exit:
+        if recover:
+            recorded = previous["phases"][-1]
+            checkpoint = recorded["events"][0] - 1
+            config = json.loads((directory / f"{label}-check.json").read_bytes())
+            oracle_revision = sha(oracle.read_bytes())
+            if oracle_revision != recorded["checker_fixture_revision"] or len(read_events(root)) != recorded["events"][1]:
+                raise ValueError("The workspace journal or checker changed after the recorded interruption")
+            external_log = recorded["external_changes"]
+            interrupted = recorded["interruption"].copy()
+            runs = recorded["executions"][:]
+            runs.append(execute(args, checks, root, trial, None,
+                                interrupt=inject and not interrupted["triggered"] and interruption_mode,
+                                label=f"{label}-resume-evaluation", timeout=args.phase_timeout))
+        else:
+            checkpoint = len(read_events(root))
+            before = workspace_files(root)
+            external = apply_external_changes(case, root, phase)
+            start = workspace_files(root)
+            external_log = [{"path": name, "before": sha(before[name]) if name in before else None,
+                             "after": sha(start[name]) if name in start else None} for name in external]
+            config = {"case": case.name, "phase": phase, "protected": {
+                name: sha(start[name]) for name in protected_paths(case, phase, start)}}
+            save(directory / f"{label}-check.json", config)
+            save(oracle, config)
+            oracle_revision = sha(oracle.read_bytes())
+            runs = [execute(args, checks, root, trial, prompt, interrupt=inject and interruption_mode,
+                            label=label, timeout=args.phase_timeout)]
+        if compact and resumable_transport_failure(runs[-1]):
+            runs.append(execute(args, checks, root, trial, None,
+                                interrupt=inject and not interrupted["triggered"] and interruption_mode,
+                                label=f"{label}-resume-transport", timeout=args.phase_timeout))
+        if inject and not interrupted["triggered"] and runs[-1]["exit"] == expected_exit:
             interrupted.update(interrupt_evidence(root, read_events(root)[checkpoint:]))
             runs.append(execute(args, checks, root, trial, None, label=f"{label}-resume-01", timeout=args.phase_timeout))
-        if (not compact and runs[-1]["exit"] != 0
-                and "The run can be resumed" in runs[-1]["error"]):
+        if (not compact and runs[-1]["exit"] != 0 and "The run can be resumed" in runs[-1]["error"]):
             runs.append(execute(args, checks, root, trial, None, label=f"{label}-resume-limit", timeout=args.phase_timeout))
         all_events = read_events(root)
         events = all_events[checkpoint:]
@@ -250,8 +283,7 @@ def run_scenario(args, case, index, start_phase=None):
         row = {
             "phase": phase, "run_ids": sorted({event["run"] for event in events if event["kind"] == "user"}),
             "prompt_sha256": sha(prompt.encode()), "events": [checkpoint + 1, len(all_events)],
-            "external_changes": [{"path": name, "before": sha(before[name]) if name in before else None,
-                                  "after": sha(start[name]) if name in start else None} for name in external],
+            "external_changes": external_log,
             "final_workspace_revision": workspace_revision, "independent": independent,
             "final_revision_validated": validated, "validation": validation, "checker_fixture_revision": oracle_revision,
             "claims": claims,
@@ -306,6 +338,8 @@ def main():
     parser.add_argument("--sigkill", action="store_true", help="Use SIGKILL for the injected interruption on Linux")
     parser.add_argument("--tool-profile", choices=("classic", "compact"), default="classic")
     parser.add_argument("--live-runner", type=Path, help="Published Pi comparison runner directory for OpenCode Go")
+    parser.add_argument("--resume-output", action="store_true",
+                        help="Resume the last interrupted phase from an existing compact result directory")
     parser.add_argument("--phase-timeout", type=int, help="CLI wall-clock timeout per execution in seconds")
     args = parser.parse_args()
     if args.phase_timeout is not None and args.phase_timeout < 1:
@@ -327,18 +361,40 @@ def main():
         if not token.startswith("oc_sk_"):
             parser.error("Expected an OpenCode Go test credential")
     args.exe, args.out = args.exe.resolve(), args.out.resolve()
-    args.out.mkdir(parents=True)
+    previous = None
+    if args.resume_output:
+        if args.tool_profile != "compact" or args.repeats != 1:
+            parser.error("--resume-output requires a single compact session")
+        previous, = json.loads((args.out / "summary.json").read_bytes())["runs"]
+        if (previous["case"] != case.name or previous["model"] != args.model
+                or previous["exe_sha256"] != sha(args.exe.read_bytes())
+                or not resumable_transport_failure(previous["phases"][-1]["executions"][-1])):
+            parser.error("Use the original case, model and binary with a resumable evaluation result")
+    else:
+        args.out.mkdir(parents=True)
     runs = []
     for index in range(1, args.repeats + 1):
         if paired:
             models = paired.Models()
-            with paired.bridge(token, "sourceharness", case.name, models, None) as url:
-                os.environ.update(OPENAI_BASE_URL=url, OPENAI_API_KEY="local-test-bridge")
-                run = run_scenario(args, case, index, models.start)
+            server = paired.http.server.ThreadingHTTPServer
+            if previous:
+                models.rows.extend(previous["provider_requests"])
+                gateway = urlsplit(previous["profile"]["gateway"])
+                if gateway.hostname != "127.0.0.1" or gateway.port is None:
+                    parser.error("The recorded bridge must use a loopback address and port")
+                original_server = server
+
+                def server(address, handler):
+                    return original_server((address[0], gateway.port), handler)
+
+            with patch.object(paired.http.server, "ThreadingHTTPServer", server):
+                with paired.bridge(token, "sourceharness", case.name, models, None) as url:
+                    os.environ.update(OPENAI_BASE_URL=url, OPENAI_API_KEY="local-test-bridge")
+                    run = run_scenario(args, case, index, models.start, previous)
             run["provider_requests"] = models.rows
             save(args.out / f"session-{index:02d}" / "summary.json", run)
         else:
-            run = run_scenario(args, case, index)
+            run = run_scenario(args, case, index, previous=previous)
         runs.append(run)
         save(args.out / "summary.json", {"case": case.name, "runs": runs, "passed": all(run["passed"] for run in runs)})
     return int(not all(run["passed"] for run in runs))

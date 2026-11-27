@@ -3,6 +3,7 @@ import unittest
 import json
 from pathlib import Path
 
+from eval_natural_session import resumable_transport_failure
 from eval_session import feedback_audit, request_cache, request_cost
 from session_eval_cases import BASE_B, build_case, grade, policy_case
 
@@ -32,6 +33,13 @@ class SessionGradingTests(unittest.TestCase):
             (root / "fixture-original.txt").write_bytes(altered)
             self.assertFalse(grade(root, case)["passed"])
             self.assertIn("service.cfg", grade(root, case)["mismatched_paths"])
+
+    def test_natural_session_retries_transport_and_preserves_guard_stops(self):
+        self.assertTrue(resumable_transport_failure({"exit": None, "error": "Evaluation process exceeded 240 seconds"}))
+        self.assertTrue(resumable_transport_failure({"exit": 1, "error": "HTTP 502: Bad Gateway. The run can be resumed."}))
+        self.assertFalse(resumable_transport_failure({"exit": -9, "error": ""}))
+        self.assertFalse(resumable_transport_failure({"exit": 1, "error": "Loop guard paused the run."}))
+        self.assertFalse(resumable_transport_failure({"exit": 1, "error": "Turn limit. The run can be resumed."}))
 
     def test_unknown_failed_attempt_includes_known_retry_cost(self):
         events = [

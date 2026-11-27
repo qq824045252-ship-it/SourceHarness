@@ -39,6 +39,8 @@ A scripted four-phase session observed a file in phase 1. Phases 2, 3 and 4 each
 
 The first live four-phase attempt passed phase 1 and reached the evaluation runner's 240-second process timeout in phase 2. Phase 2 still had an invalid README command and lacked final-revision validation. The timeout occurs outside SourceHarness. The compact evaluation runner now defaults to 600 seconds per CLI execution, with the CLI and bridge limits still at 50 model turns. [Timed-out attempt](sampling-initial-timeout.json)
 
+The real Markdown session passed both phases, including independent acceptance and final-revision validation. Phase 2 externally renamed the schema reference and injected SIGKILL after the first model file replacement. Resume recorded a single recovered receipt and completed normally. The session used 17 requests and 67,712 total tokens. All 16 adjacent pairs kept the exact instructions, tools and input prefix. [Real Markdown continuity](markdown-natural-sigkill.json)
+
 ## Reproduction
 
 Build the CLI with Cargo using the lockfile and use fresh output directories. The live test uses the comparison runner in [reproduce.zip](../pi-comparison-2026-11-27/reproduce.zip) and reads a test credential without echoing it.
@@ -51,6 +53,12 @@ python3 -B scripts/eval_compact_adversarial.py \
 python3 -B scripts/eval_compact_adversarial.py \
   --exe target/debug/source_harness --out "$bench/compact-live" \
   --live-runner "$bench/pi-comparison"
+python3 -B scripts/eval_natural_session.py \
+  --exe target/debug/source_harness --out "$bench/compact-natural" \
+  --tool-profile compact --interrupt-phase 3 --sigkill \
+  --live-runner "$bench/pi-comparison"
 ~~~
 
-Validation also included 66 Rust tests, 13 Python tests and Clippy with warnings denied. The Rust invocation skipped the subprocess-only checker entry point and included ignored suites.
+An evaluation interrupted by a network error or wall-clock timeout can resume with the same output directory and the resume-output flag. The runner preserves the original gateway address and verifier inputs, records the failed execution, and keeps the CLI's turn limit and guard pauses visible.
+
+Validation also included 66 Rust tests, 14 Python tests and Clippy with warnings denied. The Rust invocation skipped the subprocess-only checker entry point and included ignored suites.
