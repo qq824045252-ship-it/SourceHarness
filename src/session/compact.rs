@@ -6,7 +6,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::fmt::Write;
 
-pub(super) const INSTRUCTIONS: &str = "Use workspace-relative paths. Read the unobserved live files you plan to change together with read(paths). Live reads and successful edits or writes count across tasks in this session. Reread on conflict. Group independent changes and preserve unrelated text. Use exec from the workspace root for discovery or combined local tests on a fresh copy. When verification is requested, use validate on the final files and report the result. Configured acceptance checks run outside exec. Use rollback to recover from unsuccessful edits.";
+pub(super) const INSTRUCTIONS: &str = "Use workspace-relative paths. Read unobserved files together with read(paths), reuse earlier live observations, and reread on conflict. Group independent changes, use edit for targeted replacements, and keep code and docs focused on the request. Once the requested changes are in place, run the configured validate as the first check. On success, report the verified result and finish if the task is complete. Use exec for discovery, diagnosing a specific failure, or focused tests when no check is configured. Each exec starts at the root of a fresh disposable copy. Use rollback to recover from unsuccessful edits.";
 
 const MAX_READ_PATHS: usize = 8;
 
@@ -25,7 +25,7 @@ pub(super) fn definitions() -> Vec<Value> {
                 "old_text":text,"new_text":text},"required":["old_text","new_text"],"additionalProperties":false}}}), &["path","changes"]),
         definition("write", "Write a complete UTF-8 file. Replacing an existing file requires an earlier live read, edit or write in this session.",
             json!({"path":text,"content":text}), &["path","content"]),
-        definition("validate", "Run a configured acceptance check on the current workspace. Omit check when only one is configured.",
+        definition("validate", "Run the configured acceptance check directly on the current workspace. Use this to verify the finished changes. Omit check when only one is configured.",
             json!({"check":text}), &[]),
         definition("rollback", "Undo this run's edits since its latest passing validation or start. Stops if workspace files changed outside those edits.",
             json!({}), &[]),

@@ -1,0 +1,1224 @@
+{
+  "model": "deepseek-v4.1-flash",
+  "effort": "low",
+  "endpoint": "https://opencode.ai/inference/go/openai/v1/responses",
+  "limits": {
+    "requests_per_phase": 16,
+    "phase_seconds": 600
+  },
+  "source_base": "8bbd34ece98f7173094ab204d30b28dd3fcf5bae",
+  "executable_sha256": "7a5c1751cc97696f284dff3f3a3e2ae794e6133438c77bd1d4ea2d15f8a7b2e1",
+  "baseline": "pi-comparison-2026-11-27, pair 1 of each fixture",
+  "trials": [
+    {
+      "case": "sample-report",
+      "pair": 1,
+      "arm": "compact",
+      "expected_phases": 2,
+      "phases": [
+        {
+          "phase": 1,
+          "prompt_sha256": "5d56a19c38681461b1a81bd3b7d8adde6cf2a485898d24680c7389e830a88bd6",
+          "oracle_sha256": "7cf0ee643219457cba48f324b85c0fce9df3a77fed07de263b5980aa5baa2d38",
+          "external_changes": [],
+          "exit": 0,
+          "seconds": 107.47,
+          "accepted": true,
+          "natural_end": true,
+          "strict_pass": true,
+          "verified_final": true,
+          "no_calls_after_verified_final": true,
+          "calls_after_verified_final": [],
+          "tool_attempts": 17,
+          "tools": {
+            "exec": 6,
+            "write": 8,
+            "read": 2,
+            "validate": 1
+          },
+          "checks": [
+            {
+              "index": 103,
+              "passed": true,
+              "verified_final": true
+            }
+          ],
+          "independent": {
+            "passed": true,
+            "changed_protected_paths": [],
+            "failures": {},
+            "observed": {
+              "readme_examples": {
+                "examples_run": 2
+              }
+            },
+            "workspace_revision": "7a31880ccff9441f661fab11b72bb243c7512a1a4297590c648e886087f7eff5",
+            "oracle_revision": "7cf0ee643219457cba48f324b85c0fce9df3a77fed07de263b5980aa5baa2d38",
+            "stable_workspace": true
+          },
+          "claims": {
+            "claims_success": true,
+            "unsupported_success_claim": false,
+            "claimed_validation_revisions": [],
+            "mismatched_validation_revisions": []
+          },
+          "final_workspace_revision": "7a31880ccff9441f661fab11b72bb243c7512a1a4297590c648e886087f7eff5",
+          "cost": {
+            "model_requests": 13,
+            "requests_without_usage": 0,
+            "request_statuses": {
+              "200": 13
+            },
+            "input_tokens": 61851,
+            "cached_input_tokens": 52864,
+            "requests_without_cache_usage": 0,
+            "output_tokens": 5664,
+            "reasoning_tokens": 920,
+            "total_tokens": 67515,
+            "block_count": 0,
+            "response_models": [
+              "deepseek-v4.1-flash"
+            ]
+          },
+          "errors": [],
+          "tool_errors": {
+            "EXEC_FAILED": 1,
+            "READ_REQUIRED": 3
+          },
+          "tool_rounds": [
+            {
+              "round": 1,
+              "calls": [
+                {
+                  "name": "exec",
+                  "argument_bytes": 105,
+                  "code": null
+                }
+              ]
+            },
+            {
+              "round": 2,
+              "calls": [
+                {
+                  "name": "exec",
+                  "argument_bytes": 260,
+                  "code": null
+                }
+              ]
+            },
+            {
+              "round": 3,
+              "calls": [
+                {
+                  "name": "exec",
+                  "argument_bytes": 288,
+                  "code": "EXEC_FAILED"
+                }
+              ]
+            },
+            {
+              "round": 4,
+              "calls": [
+                {
+                  "name": "write",
+                  "argument_bytes": 2463,
+                  "code": "READ_REQUIRED"
+                },
+                {
+                  "name": "write",
+                  "argument_bytes": 746,
+                  "code": "READ_REQUIRED"
+                },
+                {
+                  "name": "write",
+                  "argument_bytes": 664,
+                  "code": "READ_REQUIRED"
+                }
+              ]
+            },
+            {
+              "round": 5,
+              "calls": [
+                {
+                  "name": "read",
+                  "argument_bytes": 75,
+                  "code": null,
+                  "batch_paths": 3
+                }
+              ]
+            },
+            {
+              "round": 6,
+              "calls": [
+                {
+                  "name": "write",
+                  "argument_bytes": 2670,
+                  "code": null
+                },
+                {
+                  "name": "write",
+                  "argument_bytes": 746,
+                  "code": null
+                },
+                {
+                  "name": "write",
+                  "argument_bytes": 664,
+                  "code": null
+                }
+              ]
+            },
+            {
+              "round": 7,
+              "calls": [
+                {
+                  "name": "exec",
+                  "argument_bytes": 81,
+                  "code": null
+                }
+              ]
+            },
+            {
+              "round": 8,
+              "calls": [
+                {
+                  "name": "exec",
+                  "argument_bytes": 25,
+                  "code": null
+                }
+              ]
+            },
+            {
+              "round": 9,
+              "calls": [
+                {
+                  "name": "exec",
+                  "argument_bytes": 741,
+                  "code": null
+                }
+              ]
+            },
+            {
+              "round": 10,
+              "calls": [
+                {
+                  "name": "read",
+                  "argument_bytes": 20,
+                  "code": null
+                }
+              ]
+            },
+            {
+              "round": 11,
+              "calls": [
+                {
+                  "name": "write",
+                  "argument_bytes": 838,
+                  "code": null
+                },
+                {
+                  "name": "write",
+                  "argument_bytes": 3546,
+                  "code": null
+                }
+              ]
+            },
+            {
+              "round": 12,
+              "calls": [
+                {
+                  "name": "validate",
+                  "argument_bytes": 22,
+                  "code": null
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "phase": 2,
+          "prompt_sha256": "3b9a6e50c8e957d0538ae88e1081adee59b52ab2481c5798944bd67e82268e29",
+          "oracle_sha256": "1aa867ed1238985d4587a05f2463ef1f7de10df1906e1babc1991aa5713ae146",
+          "external_changes": [],
+          "exit": 1,
+          "seconds": 145.006,
+          "accepted": true,
+          "natural_end": false,
+          "strict_pass": false,
+          "verified_final": true,
+          "no_calls_after_verified_final": false,
+          "calls_after_verified_final": [],
+          "tool_attempts": 19,
+          "tools": {
+            "read": 4,
+            "edit": 6,
+            "write": 3,
+            "exec": 4,
+            "validate": 2
+          },
+          "checks": [
+            {
+              "index": 205,
+              "passed": false,
+              "verified_final": false
+            },
+            {
+              "index": 230,
+              "passed": true,
+              "verified_final": true
+            }
+          ],
+          "independent": {
+            "passed": true,
+            "changed_protected_paths": [],
+            "failures": {},
+            "observed": {
+              "readme_examples": {
+                "examples_run": 2
+              }
+            },
+            "workspace_revision": "2ae05997b95862417ddea716c356a34dac7e73720bdffcaf28bdc4fee6f632dd",
+            "oracle_revision": "1aa867ed1238985d4587a05f2463ef1f7de10df1906e1babc1991aa5713ae146",
+            "stable_workspace": true
+          },
+          "claims": {
+            "claims_success": false,
+            "unsupported_success_claim": false,
+            "claimed_validation_revisions": [],
+            "mismatched_validation_revisions": []
+          },
+          "final_workspace_revision": "2ae05997b95862417ddea716c356a34dac7e73720bdffcaf28bdc4fee6f632dd",
+          "cost": {
+            "model_requests": 16,
+            "requests_without_usage": 0,
+            "request_statuses": {
+              "200": 16
+            },
+            "input_tokens": 277048,
+            "cached_input_tokens": 261376,
+            "requests_without_cache_usage": 0,
+            "output_tokens": 9320,
+            "reasoning_tokens": 2475,
+            "total_tokens": 286368,
+            "block_count": 0,
+            "response_models": [
+              "deepseek-v4.1-flash"
+            ]
+          },
+          "errors": [],
+          "tool_errors": {},
+          "tool_rounds": [
+            {
+              "round": 1,
+              "calls": [
+                {
+                  "name": "read",
+                  "argument_bytes": 87,
+                  "code": null,
+                  "batch_paths": 4
+                }
+              ]
+            },
+            {
+              "round": 2,
+              "calls": [
+                {
+                  "name": "edit",
+                  "argument_bytes": 1276,
+                  "code": null
+                },
+                {
+                  "name": "write",
+                  "argument_bytes": 2701,
+                  "code": null
+                },
+                {
+                  "name": "write",
+                  "argument_bytes": 1134,
+                  "code": null
+                }
+              ]
+            },
+            {
+              "round": 3,
+              "calls": [
+                {
+                  "name": "write",
+                  "argument_bytes": 1887,
+                  "code": null
+                }
+              ]
+            },
+            {
+              "round": 4,
+              "calls": [
+                {
+                  "name": "exec",
+                  "argument_bytes": 574,
+                  "code": null
+                }
+              ]
+            },
+            {
+              "round": 5,
+              "calls": [
+                {
+                  "name": "exec",
+                  "argument_bytes": 1502,
+                  "code": null
+                }
+              ]
+            },
+            {
+              "round": 6,
+              "calls": [
+                {
+                  "name": "read",
+                  "argument_bytes": 60,
+                  "code": null
+                }
+              ]
+            },
+            {
+              "round": 7,
+              "calls": [
+                {
+                  "name": "edit",
+                  "argument_bytes": 1826,
+                  "code": null
+                }
+              ]
+            },
+            {
+              "round": 8,
+              "calls": [
+                {
+                  "name": "read",
+                  "argument_bytes": 24,
+                  "code": null
+                }
+              ]
+            },
+            {
+              "round": 9,
+              "calls": [
+                {
+                  "name": "edit",
+                  "argument_bytes": 6336,
+                  "code": null
+                }
+              ]
+            },
+            {
+              "round": 10,
+              "calls": [
+                {
+                  "name": "edit",
+                  "argument_bytes": 2079,
+                  "code": null
+                }
+              ]
+            },
+            {
+              "round": 11,
+              "calls": [
+                {
+                  "name": "exec",
+                  "argument_bytes": 1054,
+                  "code": null
+                }
+              ]
+            },
+            {
+              "round": 12,
+              "calls": [
+                {
+                  "name": "exec",
+                  "argument_bytes": 593,
+                  "code": null
+                }
+              ]
+            },
+            {
+              "round": 13,
+              "calls": [
+                {
+                  "name": "validate",
+                  "argument_bytes": 22,
+                  "code": null
+                }
+              ]
+            },
+            {
+              "round": 14,
+              "calls": [
+                {
+                  "name": "read",
+                  "argument_bytes": 21,
+                  "code": null
+                }
+              ]
+            },
+            {
+              "round": 15,
+              "calls": [
+                {
+                  "name": "edit",
+                  "argument_bytes": 298,
+                  "code": null
+                },
+                {
+                  "name": "edit",
+                  "argument_bytes": 344,
+                  "code": null
+                }
+              ]
+            },
+            {
+              "round": 16,
+              "calls": [
+                {
+                  "name": "validate",
+                  "argument_bytes": 22,
+                  "code": null
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "case": "sample-report",
+      "pair": 2,
+      "arm": "compact",
+      "expected_phases": 2,
+      "phases": [
+        {
+          "phase": 1,
+          "prompt_sha256": "5d56a19c38681461b1a81bd3b7d8adde6cf2a485898d24680c7389e830a88bd6",
+          "oracle_sha256": "7cf0ee643219457cba48f324b85c0fce9df3a77fed07de263b5980aa5baa2d38",
+          "external_changes": [],
+          "exit": 0,
+          "seconds": 100.75,
+          "accepted": true,
+          "natural_end": true,
+          "strict_pass": true,
+          "verified_final": true,
+          "no_calls_after_verified_final": false,
+          "calls_after_verified_final": [
+            "exec"
+          ],
+          "tool_attempts": 13,
+          "tools": {
+            "exec": 4,
+            "read": 1,
+            "write": 5,
+            "edit": 2,
+            "validate": 1
+          },
+          "checks": [
+            {
+              "index": 89,
+              "passed": true,
+              "verified_final": true
+            }
+          ],
+          "independent": {
+            "passed": true,
+            "changed_protected_paths": [],
+            "failures": {},
+            "observed": {
+              "readme_examples": {
+                "examples_run": 1
+              }
+            },
+            "workspace_revision": "55499b330cf1c2c171f3c7f037954664e151e999046bf8e65e2ebcc224d798d9",
+            "oracle_revision": "7cf0ee643219457cba48f324b85c0fce9df3a77fed07de263b5980aa5baa2d38",
+            "stable_workspace": true
+          },
+          "claims": {
+            "claims_success": true,
+            "unsupported_success_claim": false,
+            "claimed_validation_revisions": [],
+            "mismatched_validation_revisions": []
+          },
+          "final_workspace_revision": "55499b330cf1c2c171f3c7f037954664e151e999046bf8e65e2ebcc224d798d9",
+          "cost": {
+            "model_requests": 11,
+            "requests_without_usage": 0,
+            "request_statuses": {
+              "200": 11
+            },
+            "input_tokens": 50599,
+            "cached_input_tokens": 42496,
+            "requests_without_cache_usage": 0,
+            "output_tokens": 5693,
+            "reasoning_tokens": 1499,
+            "total_tokens": 56292,
+            "block_count": 0,
+            "response_models": [
+              "deepseek-v4.1-flash"
+            ]
+          },
+          "errors": [],
+          "tool_errors": {},
+          "tool_rounds": [
+            {
+              "round": 1,
+              "calls": [
+                {
+                  "name": "exec",
+                  "argument_bytes": 106,
+                  "code": null
+                }
+              ]
+            },
+            {
+              "round": 2,
+              "calls": [
+                {
+                  "name": "read",
+                  "argument_bytes": 143,
+                  "code": null,
+                  "batch_paths": 7
+                }
+              ]
+            },
+            {
+              "round": 3,
+              "calls": [
+                {
+                  "name": "write",
+                  "argument_bytes": 2260,
+                  "code": null
+                },
+                {
+                  "name": "write",
+                  "argument_bytes": 1028,
+                  "code": null
+                }
+              ]
+            },
+            {
+              "round": 4,
+              "calls": [
+                {
+                  "name": "write",
+                  "argument_bytes": 1285,
+                  "code": null
+                }
+              ]
+            },
+            {
+              "round": 5,
+              "calls": [
+                {
+                  "name": "exec",
+                  "argument_bytes": 339,
+                  "code": null
+                }
+              ]
+            },
+            {
+              "round": 6,
+              "calls": [
+                {
+                  "name": "exec",
+                  "argument_bytes": 460,
+                  "code": null
+                }
+              ]
+            },
+            {
+              "round": 7,
+              "calls": [
+                {
+                  "name": "write",
+                  "argument_bytes": 876,
+                  "code": null
+                },
+                {
+                  "name": "write",
+                  "argument_bytes": 4615,
+                  "code": null
+                }
+              ]
+            },
+            {
+              "round": 8,
+              "calls": [
+                {
+                  "name": "edit",
+                  "argument_bytes": 479,
+                  "code": null
+                },
+                {
+                  "name": "edit",
+                  "argument_bytes": 210,
+                  "code": null
+                }
+              ]
+            },
+            {
+              "round": 9,
+              "calls": [
+                {
+                  "name": "validate",
+                  "argument_bytes": 22,
+                  "code": null
+                }
+              ]
+            },
+            {
+              "round": 10,
+              "calls": [
+                {
+                  "name": "exec",
+                  "argument_bytes": 198,
+                  "code": null
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "phase": 2,
+          "prompt_sha256": "3b9a6e50c8e957d0538ae88e1081adee59b52ab2481c5798944bd67e82268e29",
+          "oracle_sha256": "1aa867ed1238985d4587a05f2463ef1f7de10df1906e1babc1991aa5713ae146",
+          "external_changes": [],
+          "exit": 0,
+          "seconds": 141.589,
+          "accepted": true,
+          "natural_end": true,
+          "strict_pass": true,
+          "verified_final": true,
+          "no_calls_after_verified_final": false,
+          "calls_after_verified_final": [
+            "exec"
+          ],
+          "tool_attempts": 11,
+          "tools": {
+            "write": 5,
+            "exec": 3,
+            "validate": 2,
+            "edit": 1
+          },
+          "checks": [
+            {
+              "index": 160,
+              "passed": false,
+              "verified_final": false
+            },
+            {
+              "index": 175,
+              "passed": true,
+              "verified_final": true
+            }
+          ],
+          "independent": {
+            "passed": true,
+            "changed_protected_paths": [],
+            "failures": {},
+            "observed": {
+              "readme_examples": {
+                "examples_run": 2
+              }
+            },
+            "workspace_revision": "d4f9c368cc15fa5c79d863fffd9e185251123cfbd7af88a3f67fcb0d791acac2",
+            "oracle_revision": "1aa867ed1238985d4587a05f2463ef1f7de10df1906e1babc1991aa5713ae146",
+            "stable_workspace": true
+          },
+          "claims": {
+            "claims_success": false,
+            "unsupported_success_claim": false,
+            "claimed_validation_revisions": [],
+            "mismatched_validation_revisions": []
+          },
+          "final_workspace_revision": "d4f9c368cc15fa5c79d863fffd9e185251123cfbd7af88a3f67fcb0d791acac2",
+          "cost": {
+            "model_requests": 12,
+            "requests_without_usage": 0,
+            "request_statuses": {
+              "200": 12
+            },
+            "input_tokens": 190681,
+            "cached_input_tokens": 177792,
+            "requests_without_cache_usage": 0,
+            "output_tokens": 11254,
+            "reasoning_tokens": 4420,
+            "total_tokens": 201935,
+            "block_count": 0,
+            "response_models": [
+              "deepseek-v4.1-flash"
+            ]
+          },
+          "errors": [],
+          "tool_errors": {
+            "EXEC_FAILED": 1
+          },
+          "tool_rounds": [
+            {
+              "round": 1,
+              "calls": [
+                {
+                  "name": "write",
+                  "argument_bytes": 1908,
+                  "code": null
+                }
+              ]
+            },
+            {
+              "round": 2,
+              "calls": [
+                {
+                  "name": "write",
+                  "argument_bytes": 6712,
+                  "code": null
+                }
+              ]
+            },
+            {
+              "round": 3,
+              "calls": [
+                {
+                  "name": "write",
+                  "argument_bytes": 2297,
+                  "code": null
+                }
+              ]
+            },
+            {
+              "round": 4,
+              "calls": [
+                {
+                  "name": "exec",
+                  "argument_bytes": 509,
+                  "code": "EXEC_FAILED"
+                }
+              ]
+            },
+            {
+              "round": 5,
+              "calls": [
+                {
+                  "name": "exec",
+                  "argument_bytes": 705,
+                  "code": null
+                }
+              ]
+            },
+            {
+              "round": 6,
+              "calls": [
+                {
+                  "name": "write",
+                  "argument_bytes": 1550,
+                  "code": null
+                }
+              ]
+            },
+            {
+              "round": 7,
+              "calls": [
+                {
+                  "name": "write",
+                  "argument_bytes": 8072,
+                  "code": null
+                }
+              ]
+            },
+            {
+              "round": 8,
+              "calls": [
+                {
+                  "name": "validate",
+                  "argument_bytes": 22,
+                  "code": null
+                }
+              ]
+            },
+            {
+              "round": 9,
+              "calls": [
+                {
+                  "name": "edit",
+                  "argument_bytes": 298,
+                  "code": null
+                }
+              ]
+            },
+            {
+              "round": 10,
+              "calls": [
+                {
+                  "name": "validate",
+                  "argument_bytes": 22,
+                  "code": null
+                }
+              ]
+            },
+            {
+              "round": 11,
+              "calls": [
+                {
+                  "name": "exec",
+                  "argument_bytes": 379,
+                  "code": null
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "case": "sample-report",
+      "pair": 3,
+      "arm": "compact",
+      "expected_phases": 2,
+      "phases": [
+        {
+          "phase": 1,
+          "prompt_sha256": "5d56a19c38681461b1a81bd3b7d8adde6cf2a485898d24680c7389e830a88bd6",
+          "oracle_sha256": "7cf0ee643219457cba48f324b85c0fce9df3a77fed07de263b5980aa5baa2d38",
+          "external_changes": [],
+          "exit": 0,
+          "seconds": 76.671,
+          "accepted": true,
+          "natural_end": true,
+          "strict_pass": true,
+          "verified_final": true,
+          "no_calls_after_verified_final": true,
+          "calls_after_verified_final": [],
+          "tool_attempts": 11,
+          "tools": {
+            "exec": 4,
+            "read": 1,
+            "write": 5,
+            "validate": 1
+          },
+          "checks": [
+            {
+              "index": 81,
+              "passed": true,
+              "verified_final": true
+            }
+          ],
+          "independent": {
+            "passed": true,
+            "changed_protected_paths": [],
+            "failures": {},
+            "observed": {
+              "readme_examples": {
+                "examples_run": 1
+              }
+            },
+            "workspace_revision": "17ac95c759c4e8024ff543da060ce5c79d914e1d84fdb0dfb60d9eb3fb1d2ee3",
+            "oracle_revision": "7cf0ee643219457cba48f324b85c0fce9df3a77fed07de263b5980aa5baa2d38",
+            "stable_workspace": true
+          },
+          "claims": {
+            "claims_success": false,
+            "unsupported_success_claim": false,
+            "claimed_validation_revisions": [],
+            "mismatched_validation_revisions": []
+          },
+          "final_workspace_revision": "17ac95c759c4e8024ff543da060ce5c79d914e1d84fdb0dfb60d9eb3fb1d2ee3",
+          "cost": {
+            "model_requests": 9,
+            "requests_without_usage": 0,
+            "request_statuses": {
+              "200": 9
+            },
+            "input_tokens": 32932,
+            "cached_input_tokens": 26496,
+            "requests_without_cache_usage": 0,
+            "output_tokens": 3630,
+            "reasoning_tokens": 1043,
+            "total_tokens": 36562,
+            "block_count": 0,
+            "response_models": [
+              "deepseek-v4.1-flash"
+            ]
+          },
+          "errors": [],
+          "tool_errors": {},
+          "tool_rounds": [
+            {
+              "round": 1,
+              "calls": [
+                {
+                  "name": "exec",
+                  "argument_bytes": 83,
+                  "code": null
+                }
+              ]
+            },
+            {
+              "round": 2,
+              "calls": [
+                {
+                  "name": "read",
+                  "argument_bytes": 167,
+                  "code": null,
+                  "batch_paths": 8
+                }
+              ]
+            },
+            {
+              "round": 3,
+              "calls": [
+                {
+                  "name": "exec",
+                  "argument_bytes": 151,
+                  "code": null
+                }
+              ]
+            },
+            {
+              "round": 4,
+              "calls": [
+                {
+                  "name": "write",
+                  "argument_bytes": 597,
+                  "code": null
+                },
+                {
+                  "name": "write",
+                  "argument_bytes": 1873,
+                  "code": null
+                },
+                {
+                  "name": "write",
+                  "argument_bytes": 664,
+                  "code": null
+                }
+              ]
+            },
+            {
+              "round": 5,
+              "calls": [
+                {
+                  "name": "write",
+                  "argument_bytes": 391,
+                  "code": null
+                },
+                {
+                  "name": "write",
+                  "argument_bytes": 2262,
+                  "code": null
+                }
+              ]
+            },
+            {
+              "round": 6,
+              "calls": [
+                {
+                  "name": "exec",
+                  "argument_bytes": 107,
+                  "code": null
+                }
+              ]
+            },
+            {
+              "round": 7,
+              "calls": [
+                {
+                  "name": "exec",
+                  "argument_bytes": 554,
+                  "code": null
+                }
+              ]
+            },
+            {
+              "round": 8,
+              "calls": [
+                {
+                  "name": "validate",
+                  "argument_bytes": 22,
+                  "code": null
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "phase": 2,
+          "prompt_sha256": "3b9a6e50c8e957d0538ae88e1081adee59b52ab2481c5798944bd67e82268e29",
+          "oracle_sha256": "1aa867ed1238985d4587a05f2463ef1f7de10df1906e1babc1991aa5713ae146",
+          "external_changes": [],
+          "exit": 0,
+          "seconds": 107.239,
+          "accepted": true,
+          "natural_end": true,
+          "strict_pass": true,
+          "verified_final": true,
+          "no_calls_after_verified_final": true,
+          "calls_after_verified_final": [],
+          "tool_attempts": 12,
+          "tools": {
+            "write": 7,
+            "edit": 1,
+            "exec": 2,
+            "validate": 2
+          },
+          "checks": [
+            {
+              "index": 153,
+              "passed": false,
+              "verified_final": false
+            },
+            {
+              "index": 168,
+              "passed": true,
+              "verified_final": true
+            }
+          ],
+          "independent": {
+            "passed": true,
+            "changed_protected_paths": [],
+            "failures": {},
+            "observed": {
+              "readme_examples": {
+                "examples_run": 2
+              }
+            },
+            "workspace_revision": "ec0b61f34692c63fededdf7f6ff80fc136d7ea2dc873ba066382a9f7f1e6abc9",
+            "oracle_revision": "1aa867ed1238985d4587a05f2463ef1f7de10df1906e1babc1991aa5713ae146",
+            "stable_workspace": true
+          },
+          "claims": {
+            "claims_success": false,
+            "unsupported_success_claim": false,
+            "claimed_validation_revisions": [],
+            "mismatched_validation_revisions": []
+          },
+          "final_workspace_revision": "ec0b61f34692c63fededdf7f6ff80fc136d7ea2dc873ba066382a9f7f1e6abc9",
+          "cost": {
+            "model_requests": 9,
+            "requests_without_usage": 0,
+            "request_statuses": {
+              "200": 9
+            },
+            "input_tokens": 111800,
+            "cached_input_tokens": 102016,
+            "requests_without_cache_usage": 0,
+            "output_tokens": 8079,
+            "reasoning_tokens": 3575,
+            "total_tokens": 119879,
+            "block_count": 0,
+            "response_models": [
+              "deepseek-v4.1-flash"
+            ]
+          },
+          "errors": [],
+          "tool_errors": {
+            "EXEC_FAILED": 1
+          },
+          "tool_rounds": [
+            {
+              "round": 1,
+              "calls": [
+                {
+                  "name": "write",
+                  "argument_bytes": 1476,
+                  "code": null
+                },
+                {
+                  "name": "write",
+                  "argument_bytes": 967,
+                  "code": null
+                },
+                {
+                  "name": "write",
+                  "argument_bytes": 2489,
+                  "code": null
+                },
+                {
+                  "name": "write",
+                  "argument_bytes": 1446,
+                  "code": null
+                }
+              ]
+            },
+            {
+              "round": 2,
+              "calls": [
+                {
+                  "name": "write",
+                  "argument_bytes": 610,
+                  "code": null
+                },
+                {
+                  "name": "write",
+                  "argument_bytes": 3771,
+                  "code": null
+                }
+              ]
+            },
+            {
+              "round": 3,
+              "calls": [
+                {
+                  "name": "edit",
+                  "argument_bytes": 333,
+                  "code": null
+                }
+              ]
+            },
+            {
+              "round": 4,
+              "calls": [
+                {
+                  "name": "exec",
+                  "argument_bytes": 787,
+                  "code": "EXEC_FAILED"
+                }
+              ]
+            },
+            {
+              "round": 5,
+              "calls": [
+                {
+                  "name": "exec",
+                  "argument_bytes": 1332,
+                  "code": null
+                }
+              ]
+            },
+            {
+              "round": 6,
+              "calls": [
+                {
+                  "name": "validate",
+                  "argument_bytes": 22,
+                  "code": null
+                }
+              ]
+            },
+            {
+              "round": 7,
+              "calls": [
+                {
+                  "name": "write",
+                  "argument_bytes": 622,
+                  "code": null
+                }
+              ]
+            },
+            {
+              "round": 8,
+              "calls": [
+                {
+                  "name": "validate",
+                  "argument_bytes": 22,
+                  "code": null
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
