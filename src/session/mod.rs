@@ -390,13 +390,25 @@ impl Session {
         drop(gate);
         let mut turn = None::<(TurnMetrics, Instant)>;
         let max_turns = client.config().max_turns;
-        for step in 0..=max_turns {
+        // An explicit resume after a recorded turn-limit pause opens a new window.
+        // An interruption preserves the current window and its remaining rounds.
+        let turn_limit = if compact {
+            let last_pause = self.journal.events.iter().rev().take_while(|event| event.run == run)
+                .find(|event| event.kind == "paused" && event.data["reason"] == "MODEL_TURN_LIMIT")
+                .and_then(|event| event.data["round"].as_u64())
+                .unwrap_or(0) as usize;
+            last_pause.saturating_add(max_turns)
+        } else {
+            max_turns
+        };
+        let turn_budget = if compact { turn_limit.saturating_sub(checkpoint.round) } else { max_turns };
+        for step in 0..=turn_budget {
             let mut new_pause = None;
             while let Some(call) = checkpoint.pending.pop_front() {
                 self.collect_steering(&mut checkpoint, poll_steering)?;
                 let guarded = checkpoint.guard_pause.is_some() || new_pause.is_some();
                 let budget_hint = if compact && checkpoint.pending.is_empty() {
-                    compact::budget_hint(max_turns - step)
+                    compact::budget_hint(turn_limit.saturating_sub(checkpoint.round))
                 } else {
                     None
                 };
@@ -420,7 +432,7 @@ impl Session {
                 }))?;
                 return Err("Loop guard paused this run. Use :steer with guidance in chat or --continue --prompt with a correction.".to_owned());
             }
-            if step == max_turns {
+            if step == turn_budget {
                 break;
             }
 
@@ -817,6 +829,7 @@ impl Session {
             (_, Err(err)) => {
                 json!({"status":"error","code":"INVALID_ARGUMENT","reason":err.to_string()})
             }
+            ("read", Ok(args)) if compact => compact::read(&self.ctx, &mut self.journal, run, args)?,
             ("read", Ok(args)) => tools::read(&self.ctx, &mut self.journal, run, args)?,
             ("exec", Ok(args)) if compact => exec::run(&self.ctx, &mut self.journal, run, &call.operation, args)?,
             ("rollback", Ok(args)) if compact => rollback::run(&self.ctx, &mut self.journal, run, &call.operation, args)?,
@@ -883,12 +896,11 @@ impl Session {
                     _ => false,
                 };
             data["live_observation"] = json!(observed);
-            if result["code"] == "FILE_NOT_FOUND" {
-                if let Some((_, path)) = live_read.and_then(|path| {
-                    tools::workspace_path(&self.ctx, path, tools::ResolvePath::MissingParents).ok()
-                }) {
-                    data["observed_absent"] = json!(path);
-                }
+            if let Some(files) = result["files"].as_array() {
+                data["live_observations"] = json!(compact::batch_observations(files));
+            }
+            if let Some(path) = result["observed_absent"].as_str() {
+                data["observed_absent"] = json!(path);
             }
             data["guard"] = json!(signal);
         }

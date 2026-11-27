@@ -493,7 +493,66 @@ fn compact_prefix_and_implicit_revision_hold_across_requests_and_followups() {
 }
 
 #[test]
-fn compact_budget_hints_follow_only_the_latest_result_and_preserve_the_prefix() {
+fn compact_batch_read_keeps_each_result_and_live_revision() {
+    let root = tempfile::tempdir().unwrap();
+    let a = root.path().join("a.txt");
+    let b = root.path().join("b.txt");
+    fs::write(&a, "alpha=1\n").unwrap();
+    fs::write(&b, "beta=1\n").unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let gateway = format!("http://{}/v1", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        let mut prior = None;
+        let edit = |id, path, old, new| call(id, "edit", json!({
+            "path":path, "changes":[{"old_text":old,"new_text":new}],
+        }));
+        let (stream, _) = compact_round(&listener, &mut prior);
+        respond_many(stream, vec![
+            call("batch", "read", json!({"paths":["a.txt","missing.txt","../outside.txt","./b.txt"]})),
+            edit("early", "a.txt", "alpha=1", "alpha=2"),
+        ]);
+        let (stream, req) = compact_round(&listener, &mut prior);
+        let items = req["input"].as_array().unwrap();
+        let text = items[items.len() - 2]["output"].as_str().unwrap();
+        assert!(text.contains("\"a.txt\"\n1\talpha=1\n"));
+        assert!(text.contains("FILE_NOT_FOUND") && text.contains("missing.txt"));
+        assert!(text.contains("INVALID_PATH") && text.contains("../outside.txt"));
+        assert!(text.contains("\"b.txt\"\n1\tbeta=1\n"));
+        assert!(last_output(&req).starts_with("READ_REQUIRED"));
+        assert_eq!(fs::read_to_string(&a).unwrap(), "alpha=1\n");
+        fs::write(&b, "beta=1\nexternal=true\n").unwrap();
+        respond_many(stream, vec![
+            edit("a", "a.txt", "alpha=1", "alpha=2"),
+            edit("stale_b", "b.txt", "beta=1", "beta=2"),
+        ]);
+        let (stream, req) = compact_round(&listener, &mut prior);
+        let items = req["input"].as_array().unwrap();
+        assert_eq!(items[items.len() - 2]["output"], "Edited a.txt.");
+        assert!(last_output(&req).starts_with("REVISION_CONFLICT"));
+        assert!(last_output(&req).contains("+external=true"));
+        respond(stream, call("mixed", "read", json!({"paths":["a.txt"],"path":"b.txt"})));
+        let (stream, req) = compact_round(&listener, &mut prior);
+        assert!(last_output(&req).starts_with("INVALID_ARGUMENT"));
+        respond(stream, answer("Applied one edit."));
+    });
+    let result = invoke(root.path(), &gateway, false, &[
+        "agent", "--tool-profile", "compact", "--prompt", "Read the sources and update them.",
+    ]);
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    server.join().unwrap();
+    assert_eq!(fs::read_to_string(root.path().join("a.txt")).unwrap(), "alpha=2\n");
+    assert_eq!(fs::read_to_string(root.path().join("b.txt")).unwrap(), "beta=1\nexternal=true\n");
+    let events = session_events(root.path());
+    let batch = events.iter().find(|event| {
+        event["kind"] == "tool_result" && event["data"]["call_id"] == "batch"
+    }).unwrap();
+    let observed = batch["data"]["live_observations"].as_array().unwrap();
+    assert_eq!(observed.len(), 3);
+    assert_eq!(observed[1], json!({"path":"missing.txt","revision":null}));
+}
+
+#[test]
+fn compact_budget_hints_follow_the_saved_round_after_resume() {
     let fixture = tempfile::tempdir().unwrap();
     let root = fixture.path().join("workspace");
     fs::create_dir(&root).unwrap();
@@ -515,7 +574,7 @@ fn compact_budget_hints_follow_only_the_latest_result_and_preserve_the_prefix() 
                     assert!(last_output(&req).starts_with("PASS acceptance. This revision is verified."));
                     assert!(last_output(&req).contains("Re-run validate after any edit."));
                     assert!(last_output(&req).contains("1 turn left. Finish in the next response"));
-                    respond(stream, answer("Validated and finished."));
+                    respond(stream, call("last_read", "read", json!({"path":"short.txt"})));
                 }
                 1 => {
                     let items = req["input"].as_array().unwrap();
@@ -526,19 +585,32 @@ fn compact_budget_hints_follow_only_the_latest_result_and_preserve_the_prefix() 
                     respond(stream, call("validate_budget", "validate", json!({})));
                 }
                 2 => {
-                    assert!(!req["input"].to_string().contains("[Budget"));
+                    assert!(last_output(&req).contains("3 turns left. Complete the needed edits"));
                     respond_many(stream, vec![
                         call("small_batch", "read", json!({"path":"short.txt"})),
-                        call("last_batch", "read", json!({"path":"long.txt"})),
+                        call("last_batch", "read", json!({"paths":["short.txt","long.txt"]})),
                     ]);
+                }
+                3 => {
+                    assert!(!req["input"].to_string().contains("[Budget"));
+                    respond(stream, call("interrupted_write", "write", json!({"path":"log.txt","content":"saved"})));
                 }
                 _ => respond(stream, call(&format!("read_{round}"), "read", json!({"path":"short.txt"}))),
             }
         }
+        let (stream, req) = compact_round(&listener, &mut prior);
+        assert!(!last_output(&req).contains("[Budget"));
+        respond(stream, answer("Validated and finished."));
     });
-    let result = invoke(&root, &gateway, false, &[
+    let stopped = invoke(&root, &gateway, true, &[
         "agent", "--tool-profile", "compact", "--checks", checks.to_str().unwrap(), "--prompt", "Inspect and verify."
     ]);
+    assert_eq!(stopped.status.code(), Some(86), "{}", String::from_utf8_lossy(&stopped.stderr));
+    let args = ["agent", "--tool-profile", "compact", "--checks", checks.to_str().unwrap(), "--resume"];
+    let paused = invoke(&root, &gateway, false, &args);
+    assert!(!paused.status.success());
+    assert!(String::from_utf8_lossy(&paused.stderr).contains("Model turn limit reached"));
+    let result = invoke(&root, &gateway, false, &args);
     assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
     assert_eq!(String::from_utf8_lossy(&result.stdout).trim(), "Validated and finished.");
     server.join().unwrap();

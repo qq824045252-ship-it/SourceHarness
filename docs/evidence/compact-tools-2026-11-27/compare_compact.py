@@ -1,6 +1,6 @@
 """Re-run the two published fixtures with the compact session profile."""
 import argparse
-from collections import Counter
+from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 import getpass
 import hashlib
@@ -74,13 +74,38 @@ def main():
     def run_trial(job):
         case, repeat, directory = job
         rows = paired.run_arm(token, "sourceharness", case, repeat, 2, directory)
-        events = paired.session_events(directory / "sourceharness" / "workspace")
+        workspace = directory / "sourceharness" / "workspace"
+        events = paired.session_events(workspace)
+        blobs = workspace / ".sourceharness/sessions/work/blobs"
         runs = [event["run"] for event in events if event["kind"] == "user"]
+        outcomes = {
+            event["data"]["operation"]: event["data"].get("code")
+            for event in events if event["kind"] == "tool_result"
+        }
         for row, run in zip(rows, runs):
             row["tool_errors"] = dict(Counter(
                 event["data"]["code"] for event in events if event["run"] == run
                 and event["kind"] == "tool_result" and event["data"].get("code")
             ))
+            rounds = defaultdict(list)
+            for event in events:
+                if event["run"] != run or event["kind"] != "tool_attempt":
+                    continue
+                data = event["data"]
+                raw = (blobs / data["arguments"]).read_bytes()
+                call = {
+                    "name": data["name"], "argument_bytes": len(raw),
+                    "code": outcomes.get(data["operation"]),
+                }
+                if data["name"] == "read":
+                    try:
+                        arguments = json.loads(raw)
+                    except (ValueError, UnicodeError):
+                        arguments = None
+                    if isinstance(arguments, dict) and isinstance(arguments.get("paths"), list):
+                        call["batch_paths"] = len(arguments["paths"])
+                rounds[data["round"]].append(call)
+            row["tool_rounds"] = [{"round": number, "calls": calls} for number, calls in rounds.items()]
         return {"case": case, "pair": repeat, "arm": "compact", "expected_phases": 2, "phases": rows}
 
     with ThreadPoolExecutor(max_workers=min(3, len(jobs))) as workers:

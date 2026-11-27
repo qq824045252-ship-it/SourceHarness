@@ -6,7 +6,9 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::fmt::Write;
 
-pub(super) const INSTRUCTIONS: &str = "Work in the workspace. Use exec for combined inspection and local tests on a fresh copy. Apply lasting changes with edit or write. Live reads and successful edits or writes still count across tasks in this session. Read existing files you have not observed, and reread on conflict. Group independent reads in one turn and substitutions for one file in one edit. Preserve unrelated text. When asked to verify, run validate on the finished files and report the result. Use rollback to recover from unsuccessful edits.";
+pub(super) const INSTRUCTIONS: &str = "Use workspace-relative paths. Read the unobserved live files you plan to change together with read(paths). Live reads and successful edits or writes count across tasks in this session. Reread on conflict. Group independent changes and preserve unrelated text. Use exec from the workspace root for discovery or combined local tests on a fresh copy. When verification is requested, use validate on the final files and report the result. Configured acceptance checks run outside exec. Use rollback to recover from unsuccessful edits.";
+
+const MAX_READ_PATHS: usize = 8;
 
 pub(super) fn definitions() -> Vec<Value> {
     let text = json!({"type":"string"});
@@ -15,8 +17,9 @@ pub(super) fn definitions() -> Vec<Value> {
     vec![
         definition("exec", "Run a shell command for inspection or local tests in a disposable workspace copy, without network access. Changes are discarded.",
             json!({"command":text,"timeout_seconds":{"type":"integer","minimum":1,"maximum":60}}), &["command"]),
-        definition("read", "Read numbered lines from a file or an output reference. Exactly one of path or result_ref. Use inclusive line bounds or follow byte bounds in the result.",
-            json!({"path":text,"result_ref":text,"start_line":line,"end_line":line,"start_byte":byte,"end_byte":byte}), &[]),
+        definition("read", "Read numbered live text from path or paths. Use paths to observe several files together before editing. Use result_ref for saved output. Supply exactly one source. Line and byte bounds apply to a single source.",
+            json!({"path":text,"paths":{"type":"array","items":text,"minItems":1,"maxItems":MAX_READ_PATHS},
+                "result_ref":text,"start_line":line,"end_line":line,"start_byte":byte,"end_byte":byte}), &[]),
         definition("edit", "Apply exact, non-overlapping replacements to a file observed by read, edit or write in an earlier model turn of this session. Each old_text must appear once.",
             json!({"path":text,"changes":{"type":"array","items":{"type":"object","properties":{
                 "old_text":text,"new_text":text},"required":["old_text","new_text"],"additionalProperties":false}}}), &["path","changes"]),
@@ -27,6 +30,61 @@ pub(super) fn definitions() -> Vec<Value> {
         definition("rollback", "Undo this run's edits since its latest passing validation or start. Stops if workspace files changed outside those edits.",
             json!({}), &[]),
     ]
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReadPaths {
+    paths: Vec<String>,
+}
+
+pub(super) fn read(ctx: &WorkspaceContext, journal: &mut Journal, run: usize, args: &Value) -> Reply {
+    if args.get("paths").is_none() {
+        return read_one(ctx, journal, run, args);
+    }
+    let batch: ReadPaths = match parse(args) {
+        Ok(batch) => batch,
+        Err(error) => return Ok(error),
+    };
+    if !(1..=MAX_READ_PATHS).contains(&batch.paths.len()) {
+        return Ok(rejected("INVALID_ARGUMENT", "Use paths with 1 to 8 workspace-relative paths."));
+    }
+    let mut files = Vec::with_capacity(batch.paths.len());
+    for path in batch.paths {
+        files.push(read_one(ctx, journal, run, &json!({"path":path}))?);
+    }
+    let mut result = if files.iter().any(|file| file["status"] == "ok") {
+        json!({"status":"ok"})
+    } else {
+        rejected("READ_BATCH_FAILED", "Could not read any of the requested files.")
+    };
+    result["files"] = json!(files);
+    Ok(result)
+}
+
+fn read_one(ctx: &WorkspaceContext, journal: &mut Journal, run: usize, args: &Value) -> Reply {
+    let mut result = tools::read(ctx, journal, run, args)?;
+    if result["status"] == "error" && args["result_ref"].is_null() {
+        if let Some(path) = args["path"].as_str() {
+            result["path"] = json!(path);
+            if result["code"] == "FILE_NOT_FOUND" {
+                if let Ok((_, path)) = tools::workspace_path(ctx, path, ResolvePath::MissingParents) {
+                    result["observed_absent"] = json!(path);
+                }
+            }
+        }
+    }
+    Ok(result)
+}
+
+pub(super) fn batch_observations(files: &[Value]) -> Vec<Value> {
+    files.iter().filter_map(|file| {
+        if file["status"] == "ok" && file["source"]["kind"] == "workspace" {
+            Some(json!({"path":file["source"]["path"],"revision":file["revision"]}))
+        } else {
+            file["observed_absent"].as_str().map(|path| json!({"path":path,"revision":null}))
+        }
+    }).collect()
 }
 
 pub(super) fn validate(
@@ -137,6 +195,11 @@ fn observed_revision<'a>(
         if event.kind != "tool_result" || !earlier {
             continue;
         }
+        if let Some(observation) = event.data["live_observations"].as_array()
+            .and_then(|files| files.iter().rev().find(|file| file["path"] == path))
+        {
+            return observation["revision"].as_str();
+        }
         if event.data["observed_absent"] == path {
             break;
         }
@@ -149,6 +212,7 @@ fn observed_revision<'a>(
 
 pub(super) fn budget_hint(remaining: usize) -> Option<&'static str> {
     match remaining {
+        3 => Some("[Budget for this task: 3 turns left. Complete the needed edits, validate, then finish.]"),
         2 => Some("[Budget for this task: 2 turns left. Validate if needed, then finish.]"),
         1 => Some("[Budget for this task: 1 turn left. Finish in the next response and report validation status.]"),
         _ => None,
@@ -171,6 +235,24 @@ pub(super) fn present(
         footer.push_str(hint);
     }
     let budget = MAX_RESPONSE_BYTES.saturating_sub(footer.len());
+    let text = if let Some(files) = result["files"].as_array().filter(|_| tool == "read") {
+        let mut text = String::new();
+        for (index, file) in files.iter().enumerate() {
+            if index > 0 {
+                text.push_str("\n\n");
+            }
+            let bytes = budget.saturating_sub(text.len() + 2 * (files.len() - 1 - index))
+                / (files.len() - index);
+            text.push_str(&result_text(tool, file, bytes));
+        }
+        text
+    } else {
+        result_text(tool, result, budget)
+    };
+    json!(format!("{text}{footer}"))
+}
+
+fn result_text(tool: &str, result: &Value, budget: usize) -> String {
     let status = result["status"].as_str().unwrap_or("error");
     let path = result["source"]["path"].as_str().or_else(|| result["path"].as_str());
     let preview = result["preview"].as_str().unwrap_or("");
@@ -246,8 +328,7 @@ pub(super) fn present(
             text
         }
     };
-    let (text, _) = truncate_utf8_bytes(&text, budget);
-    json!(format!("{text}{footer}"))
+    truncate_utf8_bytes(&text, budget).0.to_owned()
 }
 
 fn numbered_text(result: &Value, budget: usize) -> String {
@@ -256,6 +337,9 @@ fn numbered_text(result: &Value, budget: usize) -> String {
     let bytes = result["range"]["byte_start"].as_u64().unwrap_or(0);
     let content = result["content"].as_str().unwrap_or("");
     let mut text = format!("{label:?}\n");
+    if text.len() + 256 >= budget {
+        text = format!("{}\n", result["result_ref"].as_str().unwrap_or("Output"));
+    }
     let mut consumed = 0;
     for (offset, line) in content.split_inclusive('\n').enumerate() {
         let prefix = format!("{}\t", start + offset as u64);
