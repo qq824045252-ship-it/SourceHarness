@@ -1,0 +1,1044 @@
+{
+  "provider": "scripted-responses",
+  "binary_sha256": "50efab470dc3e3f84d7d9f305fc3117b1e5ae82750ccadc66adc9c6eb986fbd7",
+  "trials": [
+    {
+      "case": "noisy-validation",
+      "requests": 3,
+      "exit": 1,
+      "natural_end": false,
+      "pauses": [
+        {
+          "guard": {
+            "check": "acceptance",
+            "count": 3,
+            "diagnostic": "78a8b0a692d122da43f3cf0acac33cd919141e047a412ccc3d43f9fc73fdf68f",
+            "failed_revision": "4205d0d03eee915f0472bf21c8e18991166b44726bd27a7160dd2c1b84977498",
+            "kind": "VALIDATION_OSCILLATION",
+            "state": "pause",
+            "workspace_revision": "3ed6d8ab5ab0949a25e362d7647d7e4710382d4e63398549853d010a05b8835d"
+          },
+          "reason": "LOOP_GUARD_TRIGGERED",
+          "round": 3
+        }
+      ],
+      "validation_results": [
+        false,
+        false,
+        false
+      ],
+      "validation_outputs": 3,
+      "tool_counts": {
+        "write": 3,
+        "validate": 3
+      },
+      "errors": {},
+      "prefix_pairs": 2,
+      "prefix_preserved": true,
+      "cost": null,
+      "trace": [
+        {
+          "round": 1,
+          "tool": "write",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 1,
+          "tool": "validate",
+          "status": "ok",
+          "code": null,
+          "guard": "VALIDATION_OSCILLATION",
+          "state": "observe"
+        },
+        {
+          "round": 2,
+          "tool": "write",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 2,
+          "tool": "validate",
+          "status": "ok",
+          "code": null,
+          "guard": "VALIDATION_OSCILLATION",
+          "state": "warn"
+        },
+        {
+          "round": 3,
+          "tool": "write",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 3,
+          "tool": "validate",
+          "status": "ok",
+          "code": null,
+          "guard": "VALIDATION_OSCILLATION",
+          "state": "pause"
+        }
+      ],
+      "passed": true
+    },
+    {
+      "case": "static-noise",
+      "requests": 3,
+      "exit": 1,
+      "natural_end": false,
+      "pauses": [
+        {
+          "guard": {
+            "check": "acceptance",
+            "count": 3,
+            "diagnostic": "60eb8b9adc8570f07667e45e1d16a6beed9cbcbfcf58aaf7f76caba27257761e",
+            "failed_revision": "d7b334deed62adc67e87a5a0baa4a326c9b23ea04f94fda00c6ee6492a8c5bb1",
+            "kind": "VALIDATION_OSCILLATION",
+            "state": "pause",
+            "workspace_revision": "0992def90a07402d8e0e8987a4ce0c40461c4cb1bba4c6d3923dc0a77db5dd58"
+          },
+          "reason": "LOOP_GUARD_TRIGGERED",
+          "round": 3
+        }
+      ],
+      "validation_results": [
+        false,
+        false,
+        false
+      ],
+      "validation_outputs": 3,
+      "tool_counts": {
+        "validate": 3
+      },
+      "errors": {},
+      "prefix_pairs": 2,
+      "prefix_preserved": true,
+      "cost": null,
+      "trace": [
+        {
+          "round": 1,
+          "tool": "validate",
+          "status": "ok",
+          "code": null,
+          "guard": "VALIDATION_OSCILLATION",
+          "state": "observe"
+        },
+        {
+          "round": 2,
+          "tool": "validate",
+          "status": "ok",
+          "code": null,
+          "guard": "VALIDATION_OSCILLATION",
+          "state": "warn"
+        },
+        {
+          "round": 3,
+          "tool": "validate",
+          "status": "ok",
+          "code": null,
+          "guard": "VALIDATION_OSCILLATION",
+          "state": "pause"
+        }
+      ],
+      "passed": true
+    },
+    {
+      "case": "alternating-checks",
+      "requests": 5,
+      "exit": 1,
+      "natural_end": false,
+      "pauses": [
+        {
+          "guard": {
+            "check": "mode-b",
+            "count": 3,
+            "diagnostic": "1c2c26523437623043a0d463d16b8c5eb4d0bcdda8bbb98337e0f7006c8b1e03",
+            "failed_revision": "461095c54c50747f30cf077598393ee468265cca863f8827ae5d5cab5ce2260c",
+            "kind": "VALIDATION_OSCILLATION",
+            "state": "pause",
+            "workspace_revision": "0cb43dd4bea68249923e19baafc90f600beb904bafc0d0497acad698a9168cca"
+          },
+          "reason": "LOOP_GUARD_TRIGGERED",
+          "round": 5
+        }
+      ],
+      "validation_results": [
+        true,
+        false,
+        false,
+        true,
+        true,
+        false,
+        false,
+        true,
+        true,
+        false
+      ],
+      "validation_outputs": 6,
+      "tool_counts": {
+        "write": 5,
+        "validate": 10
+      },
+      "errors": {},
+      "prefix_pairs": 4,
+      "prefix_preserved": true,
+      "cost": null,
+      "trace": [
+        {
+          "round": 1,
+          "tool": "write",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 1,
+          "tool": "validate",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 1,
+          "tool": "validate",
+          "status": "ok",
+          "code": null,
+          "guard": "VALIDATION_OSCILLATION",
+          "state": "observe"
+        },
+        {
+          "round": 2,
+          "tool": "write",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 2,
+          "tool": "validate",
+          "status": "ok",
+          "code": null,
+          "guard": "VALIDATION_OSCILLATION",
+          "state": "observe"
+        },
+        {
+          "round": 2,
+          "tool": "validate",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 3,
+          "tool": "write",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 3,
+          "tool": "validate",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 3,
+          "tool": "validate",
+          "status": "ok",
+          "code": null,
+          "guard": "VALIDATION_OSCILLATION",
+          "state": "warn"
+        },
+        {
+          "round": 4,
+          "tool": "write",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 4,
+          "tool": "validate",
+          "status": "ok",
+          "code": null,
+          "guard": "VALIDATION_OSCILLATION",
+          "state": "warn"
+        },
+        {
+          "round": 4,
+          "tool": "validate",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 5,
+          "tool": "write",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 5,
+          "tool": "validate",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 5,
+          "tool": "validate",
+          "status": "ok",
+          "code": null,
+          "guard": "VALIDATION_OSCILLATION",
+          "state": "pause"
+        }
+      ],
+      "passed": true
+    },
+    {
+      "case": "empty-search",
+      "requests": 4,
+      "exit": 1,
+      "natural_end": false,
+      "pauses": [
+        {
+          "guard": {
+            "count": 4,
+            "diagnostic": "59115649fd34544eff1aa46bb764991120ddd56ba928b2423fe66139b366dbdd",
+            "fingerprint": "08c4d501e4acfa51b1357849f41ef131b39679e4f22cda3c9cbb1fab158952ba",
+            "kind": "EXEC_WITHOUT_PROGRESS",
+            "stall": "EXEC_WITHOUT_PROGRESS",
+            "state": "pause",
+            "workspace_revision": "0992def90a07402d8e0e8987a4ce0c40461c4cb1bba4c6d3923dc0a77db5dd58"
+          },
+          "reason": "LOOP_GUARD_TRIGGERED",
+          "round": 4
+        }
+      ],
+      "validation_results": [],
+      "validation_outputs": 0,
+      "tool_counts": {
+        "exec": 4
+      },
+      "errors": {},
+      "prefix_pairs": 3,
+      "prefix_preserved": true,
+      "cost": null,
+      "trace": [
+        {
+          "round": 1,
+          "tool": "exec",
+          "status": "ok",
+          "code": null,
+          "guard": "REPEATED_FAILURE",
+          "state": "observe"
+        },
+        {
+          "round": 2,
+          "tool": "exec",
+          "status": "ok",
+          "code": null,
+          "guard": "REPEATED_FAILURE",
+          "state": "observe"
+        },
+        {
+          "round": 3,
+          "tool": "exec",
+          "status": "ok",
+          "code": null,
+          "guard": "EXEC_WITHOUT_PROGRESS",
+          "state": "warn"
+        },
+        {
+          "round": 4,
+          "tool": "exec",
+          "status": "ok",
+          "code": null,
+          "guard": "EXEC_WITHOUT_PROGRESS",
+          "state": "pause"
+        }
+      ],
+      "passed": true
+    },
+    {
+      "case": "failed-probes",
+      "requests": 4,
+      "exit": 1,
+      "natural_end": false,
+      "pauses": [
+        {
+          "guard": {
+            "count": 4,
+            "diagnostic": "fc1661f424ce294b8319cd0d7dd10b56a6e8abc135285ed0b8f5cecea664af99",
+            "fingerprint": "3fae280f21086fec46a4e0a15e349f0656960669a6ce9a1a942f4f51c709b51d",
+            "kind": "EXEC_WITHOUT_PROGRESS",
+            "stall": "EXEC_WITHOUT_PROGRESS",
+            "state": "pause",
+            "workspace_revision": "0992def90a07402d8e0e8987a4ce0c40461c4cb1bba4c6d3923dc0a77db5dd58"
+          },
+          "reason": "LOOP_GUARD_TRIGGERED",
+          "round": 4
+        }
+      ],
+      "validation_results": [],
+      "validation_outputs": 0,
+      "tool_counts": {
+        "exec": 4
+      },
+      "errors": {
+        "EXEC_FAILED": 4
+      },
+      "prefix_pairs": 3,
+      "prefix_preserved": true,
+      "cost": null,
+      "trace": [
+        {
+          "round": 1,
+          "tool": "exec",
+          "status": "error",
+          "code": "EXEC_FAILED",
+          "guard": "REPEATED_FAILURE",
+          "state": "observe"
+        },
+        {
+          "round": 2,
+          "tool": "exec",
+          "status": "error",
+          "code": "EXEC_FAILED",
+          "guard": "REPEATED_FAILURE",
+          "state": "observe"
+        },
+        {
+          "round": 3,
+          "tool": "exec",
+          "status": "error",
+          "code": "EXEC_FAILED",
+          "guard": "EXEC_WITHOUT_PROGRESS",
+          "state": "warn"
+        },
+        {
+          "round": 4,
+          "tool": "exec",
+          "status": "error",
+          "code": "EXEC_FAILED",
+          "guard": "EXEC_WITHOUT_PROGRESS",
+          "state": "pause"
+        }
+      ],
+      "passed": true
+    },
+    {
+      "case": "bad-edits",
+      "requests": 3,
+      "exit": 1,
+      "natural_end": false,
+      "pauses": [
+        {
+          "guard": {
+            "count": 3,
+            "diagnostic": "cb32000d379e7672e01494732471b61a795e59f522f5b23127818b827d235f45",
+            "fingerprint": "709cb11e1af5af2f7616e40470fe9424aa12ccdddbfb8e03b19433d0a58fe40f",
+            "kind": "EDIT_ERROR_STREAK",
+            "stall": "EDIT_ERROR_STREAK",
+            "state": "pause",
+            "workspace_revision": "0992def90a07402d8e0e8987a4ce0c40461c4cb1bba4c6d3923dc0a77db5dd58"
+          },
+          "reason": "LOOP_GUARD_TRIGGERED",
+          "round": 3
+        }
+      ],
+      "validation_results": [],
+      "validation_outputs": 0,
+      "tool_counts": {
+        "edit": 3
+      },
+      "errors": {
+        "TEXT_NOT_FOUND": 1,
+        "INVALID_ARGUMENT": 1,
+        "FILE_NOT_FOUND": 1
+      },
+      "prefix_pairs": 2,
+      "prefix_preserved": true,
+      "cost": null,
+      "trace": [
+        {
+          "round": 1,
+          "tool": "edit",
+          "status": "error",
+          "code": "TEXT_NOT_FOUND",
+          "guard": "REPEATED_FAILURE",
+          "state": "observe"
+        },
+        {
+          "round": 2,
+          "tool": "edit",
+          "status": "error",
+          "code": "INVALID_ARGUMENT",
+          "guard": "EDIT_ERROR_STREAK",
+          "state": "warn"
+        },
+        {
+          "round": 3,
+          "tool": "edit",
+          "status": "error",
+          "code": "FILE_NOT_FOUND",
+          "guard": "EDIT_ERROR_STREAK",
+          "state": "pause"
+        }
+      ],
+      "passed": true
+    },
+    {
+      "case": "validation-progress",
+      "requests": 5,
+      "exit": 0,
+      "natural_end": true,
+      "pauses": [],
+      "validation_results": [
+        false,
+        false,
+        false,
+        true
+      ],
+      "validation_outputs": 4,
+      "tool_counts": {
+        "validate": 4,
+        "write": 3
+      },
+      "errors": {},
+      "prefix_pairs": 4,
+      "prefix_preserved": true,
+      "cost": null,
+      "trace": [
+        {
+          "round": 1,
+          "tool": "validate",
+          "status": "ok",
+          "code": null,
+          "guard": "VALIDATION_OSCILLATION",
+          "state": "observe"
+        },
+        {
+          "round": 2,
+          "tool": "write",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 2,
+          "tool": "validate",
+          "status": "ok",
+          "code": null,
+          "guard": "VALIDATION_OSCILLATION",
+          "state": "observe"
+        },
+        {
+          "round": 3,
+          "tool": "write",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 3,
+          "tool": "validate",
+          "status": "ok",
+          "code": null,
+          "guard": "VALIDATION_OSCILLATION",
+          "state": "observe"
+        },
+        {
+          "round": 4,
+          "tool": "write",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 4,
+          "tool": "validate",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        }
+      ],
+      "independent_passed": true,
+      "passed": true
+    },
+    {
+      "case": "successful-probes",
+      "requests": 13,
+      "exit": 0,
+      "natural_end": true,
+      "pauses": [],
+      "validation_results": [],
+      "validation_outputs": 0,
+      "tool_counts": {
+        "exec": 12
+      },
+      "errors": {},
+      "prefix_pairs": 12,
+      "prefix_preserved": true,
+      "cost": null,
+      "trace": [
+        {
+          "round": 1,
+          "tool": "exec",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 2,
+          "tool": "exec",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 3,
+          "tool": "exec",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 4,
+          "tool": "exec",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 5,
+          "tool": "exec",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 6,
+          "tool": "exec",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 7,
+          "tool": "exec",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 8,
+          "tool": "exec",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 9,
+          "tool": "exec",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 10,
+          "tool": "exec",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 11,
+          "tool": "exec",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 12,
+          "tool": "exec",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        }
+      ],
+      "passed": true
+    },
+    {
+      "case": "edit-recovery",
+      "requests": 3,
+      "exit": 0,
+      "natural_end": true,
+      "pauses": [],
+      "validation_results": [],
+      "validation_outputs": 0,
+      "tool_counts": {
+        "edit": 3
+      },
+      "errors": {
+        "TEXT_NOT_FOUND": 1,
+        "INVALID_ARGUMENT": 1
+      },
+      "prefix_pairs": 2,
+      "prefix_preserved": true,
+      "cost": null,
+      "trace": [
+        {
+          "round": 1,
+          "tool": "edit",
+          "status": "error",
+          "code": "TEXT_NOT_FOUND",
+          "guard": "REPEATED_FAILURE",
+          "state": "observe"
+        },
+        {
+          "round": 1,
+          "tool": "edit",
+          "status": "error",
+          "code": "INVALID_ARGUMENT",
+          "guard": "REPEATED_FAILURE",
+          "state": "observe"
+        },
+        {
+          "round": 2,
+          "tool": "edit",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        }
+      ],
+      "independent_passed": true,
+      "passed": true
+    },
+    {
+      "case": "quiet-match",
+      "requests": 7,
+      "exit": 0,
+      "natural_end": true,
+      "pauses": [],
+      "validation_results": [],
+      "validation_outputs": 0,
+      "tool_counts": {
+        "exec": 6
+      },
+      "errors": {},
+      "prefix_pairs": 6,
+      "prefix_preserved": true,
+      "cost": null,
+      "trace": [
+        {
+          "round": 1,
+          "tool": "exec",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 2,
+          "tool": "exec",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 3,
+          "tool": "exec",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 4,
+          "tool": "exec",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 5,
+          "tool": "exec",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 6,
+          "tool": "exec",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        }
+      ],
+      "passed": true
+    },
+    {
+      "case": "named-conflict",
+      "requests": 5,
+      "exit": 1,
+      "natural_end": false,
+      "pauses": [
+        {
+          "guard": {
+            "check": "mode-b",
+            "count": 3,
+            "diagnostic": "9d02baefd71c87b0473b505ae7a09c075cc828eb8de164518fb92e5ade63401f",
+            "failed_revision": "e6bf187d12e51bebd793b65e30866440bfc3fedf42fafaff2f993541d3443a67",
+            "kind": "VALIDATION_OSCILLATION",
+            "state": "pause",
+            "workspace_revision": "0cb43dd4bea68249923e19baafc90f600beb904bafc0d0497acad698a9168cca"
+          },
+          "reason": "LOOP_GUARD_TRIGGERED",
+          "round": 5
+        }
+      ],
+      "validation_results": [
+        true,
+        false,
+        false,
+        true,
+        true,
+        false,
+        false,
+        true,
+        true,
+        false
+      ],
+      "validation_outputs": 6,
+      "tool_counts": {
+        "write": 5,
+        "validate": 10
+      },
+      "errors": {},
+      "prefix_pairs": 4,
+      "prefix_preserved": true,
+      "cost": null,
+      "trace": [
+        {
+          "round": 1,
+          "tool": "write",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 1,
+          "tool": "validate",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 1,
+          "tool": "validate",
+          "status": "ok",
+          "code": null,
+          "guard": "VALIDATION_OSCILLATION",
+          "state": "observe"
+        },
+        {
+          "round": 2,
+          "tool": "write",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 2,
+          "tool": "validate",
+          "status": "ok",
+          "code": null,
+          "guard": "VALIDATION_OSCILLATION",
+          "state": "observe"
+        },
+        {
+          "round": 2,
+          "tool": "validate",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 3,
+          "tool": "write",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 3,
+          "tool": "validate",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 3,
+          "tool": "validate",
+          "status": "ok",
+          "code": null,
+          "guard": "VALIDATION_OSCILLATION",
+          "state": "warn"
+        },
+        {
+          "round": 4,
+          "tool": "write",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 4,
+          "tool": "validate",
+          "status": "ok",
+          "code": null,
+          "guard": "VALIDATION_OSCILLATION",
+          "state": "warn"
+        },
+        {
+          "round": 4,
+          "tool": "validate",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 5,
+          "tool": "write",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 5,
+          "tool": "validate",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 5,
+          "tool": "validate",
+          "status": "ok",
+          "code": null,
+          "guard": "VALIDATION_OSCILLATION",
+          "state": "pause"
+        }
+      ],
+      "passed": true
+    },
+    {
+      "case": "sandbox-write",
+      "requests": 4,
+      "exit": 0,
+      "natural_end": true,
+      "pauses": [],
+      "validation_results": [
+        false,
+        true
+      ],
+      "validation_outputs": 1,
+      "tool_counts": {
+        "exec": 1,
+        "validate": 2,
+        "edit": 1
+      },
+      "errors": {},
+      "prefix_pairs": 3,
+      "prefix_preserved": true,
+      "cost": null,
+      "trace": [
+        {
+          "round": 1,
+          "tool": "exec",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 2,
+          "tool": "validate",
+          "status": "ok",
+          "code": null,
+          "guard": "VALIDATION_OSCILLATION",
+          "state": "observe"
+        },
+        {
+          "round": 3,
+          "tool": "edit",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 3,
+          "tool": "validate",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        }
+      ],
+      "independent_passed": true,
+      "passed": true
+    }
+  ]
+}

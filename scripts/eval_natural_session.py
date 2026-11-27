@@ -2,9 +2,12 @@
 
 import argparse
 from collections import Counter
+import getpass
 import json
+import os
 from pathlib import Path
 import re
+import signal
 import sys
 
 from check_natural_session import grade_workspace
@@ -184,16 +187,22 @@ def history_audit(root, case, all_events, phase_events):
     }
 
 
-def run_scenario(args, case, index):
+def run_scenario(args, case, index, start_phase=None):
     directory = args.out / f"session-{index:02d}"
     directory.mkdir()
     root = directory / "workspace"
     seed(case, root)
     checks, oracle, sources = checks_for(directory)
-    trial = Trial(case.name, None, edit="text", history="events", freshness="on",
-                  projection="on", notices="on", receipt="versioned")
+    compact = args.tool_profile == "compact"
+    switches = "off" if compact else "on"
+    trial = Trial(case.name, None, edit="text", history="conversation" if compact else "events",
+                  freshness=switches, projection=switches, notices=switches,
+                  receipt="versioned", tool_profile=args.tool_profile)
     phases = []
     for phase, prompt in enumerate(case.prompts, 1):
+        if start_phase is not None:
+            start_phase(phase)
+            prompt += "\nRun the configured acceptance check against the final workspace and report its result."
         checkpoint = len(read_events(root))
         before = workspace_files(root)
         external = apply_external_changes(case, root, phase)
@@ -205,12 +214,14 @@ def run_scenario(args, case, index):
         save(oracle, config)
         oracle_revision = sha(oracle.read_bytes())
         inject = args.interrupt_phase == phase
-        runs = [execute(args, checks, root, trial, prompt, interrupt=inject, label=label)]
+        interruption_mode = "kill_after_file_replace" if args.sigkill else True
+        expected_exit = -signal.SIGKILL if args.sigkill else 86
+        runs = [execute(args, checks, root, trial, prompt, interrupt=inject and interruption_mode, label=label)]
         interrupted = {"requested": inject, "triggered": False}
-        if inject and runs[-1]["exit"] == 86:
+        if inject and runs[-1]["exit"] == expected_exit:
             interrupted.update(interrupt_evidence(root, read_events(root)[checkpoint:]))
             runs.append(execute(args, checks, root, trial, None, label=f"{label}-resume-01"))
-        if (runs[-1]["exit"] != 0
+        if (not compact and runs[-1]["exit"] != 0
                 and "The run can be resumed" in runs[-1]["error"]):
             runs.append(execute(args, checks, root, trial, None, label=f"{label}-resume-limit"))
         all_events = read_events(root)
@@ -265,7 +276,8 @@ def run_scenario(args, case, index):
     summary = {
         "session": "work", "case": case.name, "model": args.model, "effort": args.effort,
         "exe_sha256": sha(args.exe.read_bytes()),
-        "settings": {"edit": trial.edit, "history": trial.history, "receipt": trial.receipt,
+        "settings": {"tool_profile": trial.tool_profile, "edit": trial.edit, "history": trial.history,
+                     "receipt": trial.receipt,
                      "freshness": trial.freshness, "projection": trial.projection, "notices": trial.notices,
                      "history_budget_bytes": 8192},
         "checker_inputs": {path.name: sha(path.read_bytes()) for path in sources},
@@ -290,15 +302,38 @@ def main():
     parser.add_argument("--effort", default="low")
     parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--interrupt-phase", type=int)
+    parser.add_argument("--sigkill", action="store_true", help="Use SIGKILL for the injected interruption on Linux")
+    parser.add_argument("--tool-profile", choices=("classic", "compact"), default="classic")
+    parser.add_argument("--live-runner", type=Path, help="Published Pi comparison runner directory for OpenCode Go")
     args = parser.parse_args()
     case = CASES[args.case]
     if args.repeats < 1 or (args.interrupt_phase is not None and not 1 <= args.interrupt_phase <= len(case.prompts)):
         parser.error("repeats must be positive and the interrupt phase must exist in the selected case")
+    if args.sigkill and (args.interrupt_phase is None or sys.platform != "linux"):
+        parser.error("--sigkill requires --interrupt-phase and Linux")
+    paired = token = None
+    if args.live_runner:
+        sys.path.insert(0, str(args.live_runner.resolve()))
+        import compare_pi_public as paired
+        paired.MAX_ATTEMPTS = 50
+        args.model, args.effort = paired.MODEL, paired.EFFORT
+        token = getpass.getpass("OpenCode Go test credential (hidden): ")
+        if not token.startswith("oc_sk_"):
+            parser.error("Expected an OpenCode Go test credential")
     args.exe, args.out = args.exe.resolve(), args.out.resolve()
     args.out.mkdir(parents=True)
     runs = []
     for index in range(1, args.repeats + 1):
-        runs.append(run_scenario(args, case, index))
+        if paired:
+            models = paired.Models()
+            with paired.bridge(token, "sourceharness", case.name, models, None) as url:
+                os.environ.update(OPENAI_BASE_URL=url, OPENAI_API_KEY="local-test-bridge")
+                run = run_scenario(args, case, index, models.start)
+            run["provider_requests"] = models.rows
+            save(args.out / f"session-{index:02d}" / "summary.json", run)
+        else:
+            run = run_scenario(args, case, index)
+        runs.append(run)
         save(args.out / "summary.json", {"case": case.name, "runs": runs, "passed": all(run["passed"] for run in runs)})
     return int(not all(run["passed"] for run in runs))
 

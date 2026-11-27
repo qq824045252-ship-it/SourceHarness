@@ -105,7 +105,7 @@ Keep the checks file, acceptance scripts and declared oracle inputs outside the 
 
 The default limit is 50 model turns. An interrupted compact run resumes with the recorded round and the remaining budget. Resuming after a recorded turn-limit pause opens another budget window.
 
-The compact loop guard warns after two rounds of repeated failure and pauses after three. It closes pending tool calls from that response and records the pause and fingerprints. Give a correction with `:steer` in chat or use `agent --continue --prompt <correction>`. Use the session's `--resume` command to continue under the same configuration.
+The compact loop guard tracks failures by model round. It pauses after three rounds of repeated validation or edit failures, and after four rounds of unsuccessful shell probes on an unchanged workspace. It warns one round before the pause, closes pending tool calls from that response, and records the pause and fingerprints. Give a correction with `:steer` in chat or use `agent --continue --prompt <correction>`. Use the session's `--resume` command to continue under the same configuration.
 
 Evaluate compact by independent acceptance, validation of the final revision and natural completion. Requests, token use and cache share describe the cost of each outcome.
 

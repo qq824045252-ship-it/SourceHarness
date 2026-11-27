@@ -853,11 +853,12 @@ impl Session {
             )?,
             _ => json!({"status":"error","code":"UNKNOWN_TOOL","reason":"Use an available tool."}),
         };
-        let signal = if compact && (result["status"] == "error" || result["passed"] == false) {
+        let raw_arguments = action_args.unwrap_or(&Value::Null);
+        let signal = if compact && guard::compact_candidate(&call.name, raw_arguments, &result) {
             result["workspace_revision"].as_str().map(str::to_owned)
                 .or_else(|| validation::workspace_version(&self.ctx, &self.journal).ok())
                 .map(|workspace| guard::compact_signal(
-                    &self.journal, run, round, &call.name, action_args.unwrap_or(&Value::Null),
+                    &self.journal, run, round, &call.name, raw_arguments,
                     &result, &workspace,
                 ))
         } else {

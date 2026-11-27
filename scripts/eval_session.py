@@ -47,6 +47,7 @@ class Trial:
     validation_drift: bool = False
     receipt: str = "versioned"
     repeat: int = 1
+    tool_profile: str = "classic"
 
     def flags(self):
         flags = [
@@ -54,6 +55,8 @@ class Trial:
             "--freshness-instructions", self.freshness, "--stale-projection", self.projection,
             "--history-budget", "8192",
         ]
+        if self.tool_profile != "classic":
+            flags.extend(["--tool-profile", self.tool_profile])
         if self.receipt != "versioned":
             flags.extend(["--receipt-mode", self.receipt])
         if self.notices is not None:
@@ -130,7 +133,7 @@ def execute(args, checks, root, trial, prompt, interrupt=False, continuation=Fal
     env = os.environ.copy()
     env.pop("SOURCE_HARNESS_TEST_INTERRUPT", None)
     if interrupt:
-        env["SOURCE_HARNESS_TEST_INTERRUPT"] = "after_file_replace"
+        env["SOURCE_HARNESS_TEST_INTERRUPT"] = "after_file_replace" if interrupt is True else interrupt
     command = [
         str(executable or args.exe), "agent", "--root", str(root), "--session", "work", "--checks", str(checks),
         "--model", args.model, "--effort", args.effort, *trial.flags(),

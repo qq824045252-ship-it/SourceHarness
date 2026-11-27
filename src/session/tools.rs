@@ -1768,8 +1768,14 @@ fn commit(
             }
             return Ok(rejected("WRITE_ERROR", &err.error.to_string()));
         }
-        if std::env::var("SOURCE_HARNESS_TEST_INTERRUPT").as_deref() == Ok("after_file_replace") {
-            std::process::exit(86);
+        match std::env::var("SOURCE_HARNESS_TEST_INTERRUPT").as_deref() {
+            Ok("after_file_replace") => std::process::exit(86),
+            #[cfg(target_os = "linux")]
+            Ok("kill_after_file_replace") => {
+                // Exercise recovery without letting the process unwind or finish the receipt.
+                unsafe { libc::raise(libc::SIGKILL) };
+            }
+            _ => {}
         }
         let observed = match file_bytes(&target, ctx.config().max_file_bytes) {
             Ok(v) => v,

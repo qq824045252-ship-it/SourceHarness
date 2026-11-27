@@ -203,8 +203,9 @@ fn observed_revision<'a>(journal: &'a Journal, path: &str) -> Option<Option<&'a 
 pub(super) fn present(tool: &str, result: &Value, warning: Option<&Value>) -> Value {
     let mut footer = String::new();
     if let Some(warning) = warning {
-        let _ = write!(footer, "\n{}: Repeated failure ({} rounds). Inspect fresh evidence or use rollback.",
-            warning["kind"].as_str().unwrap_or("LOOP_WARNING"), warning["count"]);
+        let kind = warning["kind"].as_str().unwrap_or("LOOP_WARNING");
+        let detail = if kind == "EXEC_WITHOUT_PROGRESS" { "Shell probes made no progress" } else { "Repeated failure" };
+        let _ = write!(footer, "\n{kind}: {detail} ({} rounds). Inspect fresh evidence or use rollback.", warning["count"]);
     }
     let budget = MAX_RESPONSE_BYTES.saturating_sub(footer.len());
     let text = if let Some(files) = result["files"].as_array().filter(|_| tool == "read") {
@@ -267,6 +268,9 @@ fn result_text(tool: &str, result: &Value, budget: usize) -> String {
                 if result["output_complete"] == false {
                     text.push_str("\nCapture limit reached.");
                 }
+            }
+            if result["status"] == "ok" || result["code"] == "EXEC_FAILED" || result["code"] == "EXEC_TIMEOUT" {
+                text.push_str("\nSandbox changes discarded.");
             }
             text
         }

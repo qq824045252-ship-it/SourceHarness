@@ -1,0 +1,57 @@
+{
+  "binary_sha256": "50efab470dc3e3f84d7d9f305fc3117b1e5ae82750ccadc66adc9c6eb986fbd7",
+  "phases": [
+    {
+      "phase": 1,
+      "exit": 0,
+      "historical_reference": "r5",
+      "passed": true
+    },
+    {
+      "phase": 2,
+      "exit": 0,
+      "revision_conflict": true,
+      "diff": "--- original\n+++ modified\n@@ -1 +1 @@\n-draft\n+external-2\n",
+      "protected_bytes": true,
+      "passed": true
+    },
+    {
+      "phase": 3,
+      "exit": -9,
+      "resume_exit": 0,
+      "interruption": {
+        "triggered": true,
+        "intent_event": 30,
+        "operation": "22.1.2",
+        "path": "legacy.txt",
+        "before": "a9e6f9c31094f815a21833de95a1baf4d1cfe967999b697fe70ad1597741d62a",
+        "after": "9210f9bdd954bbc1230169a429d814f58a5ee9bcb90325a68e30b0d853624ca4",
+        "candidate_present_before_resume": true,
+        "receipt_recorded_before_resume": false,
+        "outcomes": [
+          "observed_target_on_recovery"
+        ],
+        "passed": true
+      },
+      "revision_conflict": true,
+      "diff": "--- original\n+++ modified\n@@ -1 +1 @@\n-external-2\n+external-3\n",
+      "protected_bytes": true,
+      "passed": true
+    },
+    {
+      "phase": 4,
+      "exit": 0,
+      "revision_conflict": true,
+      "diff": "--- original\n+++ modified\n@@ -1 +1 @@\n-external-3\n+external-4\n",
+      "protected_bytes": true,
+      "passed": true,
+      "live_and_saved_contents": [
+        "external-4\n",
+        "draft\n"
+      ]
+    }
+  ],
+  "requests": 11,
+  "prefix_preserved": true,
+  "passed": true
+}

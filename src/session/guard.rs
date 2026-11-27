@@ -1,64 +1,191 @@
 use super::journal::{revision, Journal};
+use regex::Regex;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
+use std::sync::OnceLock;
 
 const WARN_THRESHOLD: usize = 2;
 const PAUSE_THRESHOLD: usize = 3;
+
+pub(super) fn compact_candidate(tool: &str, args: &Value, result: &Value) -> bool {
+    if tool == "validate" && result["passed"] == false {
+        return result["workspace_changed_during_check"] != true
+            && result["input_revisions_stable"] != false;
+    }
+    result["status"] == "error" || (tool == "exec" && empty_lookup(args, result))
+}
+
+fn empty_lookup(args: &Value, result: &Value) -> bool {
+    if result["status"] != "ok" || result["preview"] != "" || result["output_complete"] != true {
+        return false;
+    }
+    let Some(command) = args["command"].as_str() else { return false };
+    let mut words = command.split_ascii_whitespace();
+    let program = words.next().and_then(|name| name.rsplit('/').next());
+    // A quiet grep can find a match and exit successfully. Simple find lookups
+    // can return an empty result with exit zero.
+    program == Some("find")
+        && !command.contains([';', '|', '&', '<', '>', '$', '\x60', '\n'])
+        && !words.any(|word| matches!(word, "-delete" | "-exec" | "-execdir" | "-ok" | "-okdir" | "-quit"))
+}
 
 pub(super) fn compact_signal(
     journal: &Journal, run: usize, round: usize, tool: &str, args: &Value,
     result: &Value, workspace: &str,
 ) -> Value {
-    let validation = tool == "validate" && result["passed"] == false;
-    let conditions = json!({"check":result["check"],"program":result["program_revision"],"inputs":result["input_revisions"]});
-    let failed_revision = validation.then(|| revision(format!("{workspace}/{conditions}").as_bytes()));
-    let detail = if validation {
-        json!({"conditions":conditions,"exit":result["exit_code"],"timed_out":result["timed_out"],"streams":result["streams"]})
-    } else {
-        json!({"tool":tool,"args":args,"code":result["code"],"exit":result["exit_code"],"streams":result["streams"]})
+    if tool == "validate" && result["passed"] == false {
+        return validation_signal(journal, run, round, result, workspace);
+    }
+    let stall = match tool {
+        "exec" if matches!(result["code"].as_str(), Some("EXEC_FAILED" | "EXEC_TIMEOUT"))
+            || empty_lookup(args, result) => Some("EXEC_WITHOUT_PROGRESS"),
+        "edit" => Some("EDIT_ERROR_STREAK"),
+        _ => None,
     };
+    let detail = json!({"tool":tool,"args":args,"code":result["code"],"exit":result["exit_code"],"streams":result["streams"]});
     let diagnostic = revision(detail.to_string().as_bytes());
     let fingerprint = revision(format!("{workspace}/{diagnostic}").as_bytes());
     let mut exact = HashSet::from([round as u64]);
-    let mut repeated_revision = exact.clone();
-    let mut consecutive_validation = exact.clone();
-    let mut same_diagnostic = validation;
+    let mut stalled = exact.clone();
+    let mut same_exact = true;
+    let mut same_stall = stall.is_some();
     for event in journal.events.iter().rev().take_while(|event| event.run == run) {
-        if matches!(event.kind.as_str(), "steer" | "rollback_receipt" | "paused")
-            || (validation && event.kind == "validation_receipt" && event.data["passed"] == true
-                && event.data["check"] == result["check"])
+        if matches!(event.kind.as_str(), "steer" | "rollback_receipt" | "paused" | "edit_receipt")
+            || (event.kind == "validation_receipt" && event.data["passed"] == true)
         {
             break;
         }
-        if event.kind != "tool_result" {
+        if event.kind != "tool_result" || event.data["name"] != tool {
             continue;
         }
         let Some(prior_round) = event.data["round"].as_u64() else { continue };
+        if prior_round == round as u64 {
+            continue;
+        }
         let previous = &event.data["guard"];
-        if previous["fingerprint"] == fingerprint {
+        same_exact &= previous["fingerprint"] == fingerprint;
+        same_stall &= previous["stall"].as_str() == stall && previous["workspace_revision"] == workspace;
+        if same_exact {
             exact.insert(prior_round);
         }
-        if failed_revision.as_deref().is_some_and(|hash| previous["failed_revision"] == hash) {
-            repeated_revision.insert(prior_round);
+        if same_stall {
+            stalled.insert(prior_round);
         }
-        if same_diagnostic && event.data["name"] == "validate" {
-            same_diagnostic = previous["diagnostic"] == diagnostic;
-            if same_diagnostic {
-                consecutive_validation.insert(prior_round);
-            }
+        if !same_exact && !same_stall {
+            break;
         }
     }
-    let count = exact.len().max(consecutive_validation.len()).max(repeated_revision.len());
-    let state = match count {
-        PAUSE_THRESHOLD.. => "pause",
-        WARN_THRESHOLD.. => "warn",
-        _ => "observe",
+    let mut kind = "REPEATED_FAILURE";
+    let mut count = exact.len();
+    let mut state = guard_state(count, PAUSE_THRESHOLD);
+    if let Some(stall) = stall {
+        let threshold = if tool == "exec" { 4 } else { PAUSE_THRESHOLD };
+        let stalled_state = guard_state(stalled.len(), threshold);
+        if stalled_state > state {
+            kind = stall;
+            count = stalled.len();
+            state = stalled_state;
+        }
+    }
+    json!({"kind":kind,"state":state.label(),"count":count,"workspace_revision":workspace,
+        "diagnostic":diagnostic,"fingerprint":fingerprint,"stall":stall})
+}
+
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+enum GuardState {
+    Observe,
+    Warn,
+    Pause,
+}
+
+impl GuardState {
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Observe => "observe",
+            Self::Warn => "warn",
+            Self::Pause => "pause",
+        }
+    }
+}
+
+fn guard_state(count: usize, pause: usize) -> GuardState {
+    if count >= pause {
+        GuardState::Pause
+    } else if count >= pause - 1 {
+        GuardState::Warn
+    } else {
+        GuardState::Observe
+    }
+}
+
+fn validation_conditions(result: &Value) -> Value {
+    json!({"check":result["check"],"program":result["program_revision"],"inputs":result["input_revisions"]})
+}
+
+fn normalized_stream(journal: &Journal, hash: &Value) -> Value {
+    static VOLATILE: OnceLock<Regex> = OnceLock::new();
+    let Some(bytes) = hash.as_str().and_then(|hash| journal.get(hash).ok()) else {
+        return hash.clone();
     };
-    json!({
-        "kind":if validation { "VALIDATION_OSCILLATION" } else { "REPEATED_FAILURE" },
-        "state":state,"count":count,"workspace_revision":workspace,
-        "diagnostic":diagnostic,"fingerprint":fingerprint,"failed_revision":failed_revision
-    })
+    let Ok(text) = std::str::from_utf8(&bytes) else { return hash.clone() };
+    if text.len() > 8192 {
+        return hash.clone();
+    }
+    let volatile = VOLATILE.get_or_init(|| Regex::new(concat!(
+        r"(?i)\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?",
+        r"|(?P<label>\b(?:timestamp|line|column|pid)[ \t:=#]+)\d+\b",
+    )).expect("valid diagnostic pattern"));
+    let normalized = volatile.replace_all(text, "$label<volatile>");
+    json!(revision(normalized.as_bytes()))
+}
+
+fn validation_signal(journal: &Journal, run: usize, round: usize, result: &Value, workspace: &str) -> Value {
+    let conditions = validation_conditions(result);
+    let failed_revision = revision(format!("{workspace}/{conditions}").as_bytes());
+    let detail = json!({"conditions":conditions,"exit":result["exit_code"],"timed_out":result["timed_out"],
+        "streams":[normalized_stream(journal, &result["streams"]["stdout"]),
+                   normalized_stream(journal, &result["streams"]["stderr"])]});
+    let diagnostic = revision(detail.to_string().as_bytes());
+    let mut repeated_revision = HashSet::from([round as u64]);
+    let mut consecutive_validation = repeated_revision.clone();
+    let mut same_diagnostic = true;
+    for event in journal.events.iter().rev().take_while(|event| event.run == run) {
+        match event.kind.as_str() {
+            "steer" | "paused" => break,
+            "rollback_receipt" => same_diagnostic = false,
+            "validation_receipt" if event.data["passed"] == true
+                && event.data["workspace_changed_during_check"] != true
+                && validation_conditions(&event.data) == conditions =>
+            {
+                // A pass on B does not erase a known failure on A.
+                if event.data["workspace_revision"] == workspace {
+                    break;
+                }
+                same_diagnostic = false;
+            }
+            "tool_result" if event.data["name"] == "validate" => {
+                let Some(prior_round) = event.data["round"].as_u64() else { continue };
+                if prior_round == round as u64 {
+                    continue;
+                }
+                let previous = &event.data["guard"];
+                if previous["failed_revision"] == failed_revision {
+                    repeated_revision.insert(prior_round);
+                }
+                if previous["check"] == result["check"] {
+                    same_diagnostic &= previous["diagnostic"] == diagnostic;
+                    if same_diagnostic {
+                        consecutive_validation.insert(prior_round);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let count = repeated_revision.len().max(consecutive_validation.len());
+    json!({"kind":"VALIDATION_OSCILLATION","state":guard_state(count, PAUSE_THRESHOLD).label(),
+        "count":count,"workspace_revision":workspace,"check":result["check"],
+        "diagnostic":diagnostic,"failed_revision":failed_revision})
 }
 
 pub struct PendingOutcome<'a> {

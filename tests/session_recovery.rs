@@ -804,7 +804,7 @@ fn compact_exec_isolates_oracle_network_and_writes_and_folds_output() {
         let items = req["input"].as_array().unwrap();
         assert!(items[items.len()-3]["output"].as_str().unwrap().starts_with("INVALID_ARGUMENT"));
         assert!(items[items.len()-2]["output"].as_str().unwrap().starts_with("INVALID_ARGUMENT"));
-        assert_eq!(last_output(&req), "done");
+        assert_eq!(last_output(&req), "done\nSandbox changes discarded.");
         respond(stream, call("check", "validate", json!({"trace":null})));
         let (stream, req) = compact_round(&listener, &mut prior);
         assert!(last_output(&req).starts_with("PASS acceptance. This revision is verified."));
