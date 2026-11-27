@@ -6,7 +6,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::fmt::Write;
 
-pub(super) const INSTRUCTIONS: &str = "Work in the workspace. Use exec for combined inspection and local tests. Each exec starts from a fresh copy, so keep dependent commands together. Apply lasting changes with edit or write after calling read on existing files. Group substitutions for a file into one edit. Read again on conflict. Preserve unrelated text. When asked to verify, run validate on the finished files and report the results. Use rollback to recover from unsuccessful edits.";
+pub(super) const INSTRUCTIONS: &str = "Work in the workspace. Use exec for combined inspection and local tests on a fresh copy. Apply lasting changes with edit or write. Live reads and successful edits or writes still count across tasks in this session. Read existing files you have not observed, and reread on conflict. Group independent reads in one turn and substitutions for one file in one edit. Preserve unrelated text. When asked to verify, run validate on the finished files and report the result. Use rollback to recover from unsuccessful edits.";
 
 pub(super) fn definitions() -> Vec<Value> {
     let text = json!({"type":"string"});
@@ -17,10 +17,10 @@ pub(super) fn definitions() -> Vec<Value> {
             json!({"command":text,"timeout_seconds":{"type":"integer","minimum":1,"maximum":60}}), &["command"]),
         definition("read", "Read numbered lines from a file or an output reference. Exactly one of path or result_ref. Use inclusive line bounds or follow byte bounds in the result.",
             json!({"path":text,"result_ref":text,"start_line":line,"end_line":line,"start_byte":byte,"end_byte":byte}), &[]),
-        definition("edit", "Apply exact, non-overlapping replacements together against one file. First call read with the live path in an earlier model turn. Each old_text must appear once.",
+        definition("edit", "Apply exact, non-overlapping replacements to a file observed by read, edit or write in an earlier model turn of this session. Each old_text must appear once.",
             json!({"path":text,"changes":{"type":"array","items":{"type":"object","properties":{
                 "old_text":text,"new_text":text},"required":["old_text","new_text"],"additionalProperties":false}}}), &["path","changes"]),
-        definition("write", "Write a complete UTF-8 file. To replace an existing file, first use the read tool with the live file path in an earlier model turn.",
+        definition("write", "Write a complete UTF-8 file. Replacing an existing file requires an earlier live read, edit or write in this session.",
             json!({"path":text,"content":text}), &["path","content"]),
         definition("validate", "Run a configured acceptance check on the current workspace. Omit check when only one is configured.",
             json!({"check":text}), &[]),
@@ -126,28 +126,56 @@ fn observed_revision<'a>(
     round: usize,
     path: &str,
 ) -> Option<&'a str> {
-    for event in journal.events.iter().rev().take_while(|event| event.run == run) {
+    for event in journal.events.iter().rev() {
         if event.kind == "rollback_receipt" && event.data["paths"].as_array()
             .is_some_and(|paths| paths.iter().any(|saved| saved == path))
         {
             break;
         }
-        if event.kind == "tool_result" && event.data["live_observation"] == true
-            && event.data["round"].as_u64().is_some_and(|observed| observed < round as u64)
-            && event.data["source"]["path"] == path
-        {
+        let earlier = event.run < run || (event.run == run
+            && event.data["round"].as_u64().is_some_and(|observed| observed < round as u64));
+        if event.kind != "tool_result" || !earlier {
+            continue;
+        }
+        if event.data["observed_absent"] == path {
+            break;
+        }
+        if event.data["live_observation"] == true && event.data["source"]["path"] == path {
             return event.data["revision"].as_str();
         }
     }
     None
 }
 
-pub(super) fn present(tool: &str, result: &Value, warning: Option<&Value>) -> Value {
+pub(super) fn budget_hint(remaining: usize) -> Option<&'static str> {
+    match remaining {
+        2 => Some("[Budget for this task: 2 turns left. Validate if needed, then finish.]"),
+        1 => Some("[Budget for this task: 1 turn left. Finish in the next response and report validation status.]"),
+        _ => None,
+    }
+}
+
+pub(super) fn present(
+    tool: &str,
+    result: &Value,
+    warning: Option<&Value>,
+    budget_hint: Option<&str>,
+) -> Value {
+    let mut footer = String::new();
+    if let Some(warning) = warning {
+        let _ = write!(footer, "\n{}: Repeated failure ({} rounds). Inspect fresh evidence or use rollback.",
+            warning["kind"].as_str().unwrap_or("LOOP_WARNING"), warning["count"]);
+    }
+    if let Some(hint) = budget_hint {
+        footer.push('\n');
+        footer.push_str(hint);
+    }
+    let budget = MAX_RESPONSE_BYTES.saturating_sub(footer.len());
     let status = result["status"].as_str().unwrap_or("error");
     let path = result["source"]["path"].as_str().or_else(|| result["path"].as_str());
     let preview = result["preview"].as_str().unwrap_or("");
-    let mut text = match (tool, status) {
-        ("read", "ok") if result["content"].is_string() => numbered_text(result),
+    let text = match (tool, status) {
+        ("read", "ok") if result["content"].is_string() => numbered_text(result, budget),
         ("edit", "ok") => format!("Edited {}.", path.unwrap_or("file")),
         ("write", "ok") => format!("Wrote {}.", path.unwrap_or("file")),
         ("rollback", "ok") => format!(
@@ -157,7 +185,7 @@ pub(super) fn present(tool: &str, result: &Value, warning: Option<&Value>) -> Va
         ("validate", "ok") => {
             let check = result["check"].as_str().unwrap_or("check");
             if result["passed"] == true && result["workspace_changed_during_check"] == false {
-                format!("PASS {check}")
+                format!("PASS {check}. This revision is verified. Finish if done. Re-run validate after any edit.")
             } else if result["passed"] == true {
                 format!("PASS {check} on the tested snapshot. Workspace changed during validation. Run the check again.")
             } else {
@@ -197,6 +225,8 @@ pub(super) fn present(tool: &str, result: &Value, warning: Option<&Value>) -> Va
                 } else {
                     "The live file differs from the observed version. Read it before writing."
                 };
+            } else if code == "FILE_NOT_FOUND" && tool == "read" {
+                reason = "The live file is absent. Use write if the task calls for creating it.";
             }
             let mut text = format!("{code}: {reason}");
             if let Some(path) = path {
@@ -216,14 +246,11 @@ pub(super) fn present(tool: &str, result: &Value, warning: Option<&Value>) -> Va
             text
         }
     };
-    if let Some(warning) = warning {
-        let _ = write!(text, "\n{}: Repeated failure ({} rounds). Inspect fresh evidence or use rollback.",
-            warning["kind"].as_str().unwrap_or("LOOP_WARNING"), warning["count"]);
-    }
-    json!(truncate_utf8_bytes(&text, MAX_RESPONSE_BYTES).0)
+    let (text, _) = truncate_utf8_bytes(&text, budget);
+    json!(format!("{text}{footer}"))
 }
 
-fn numbered_text(result: &Value) -> String {
+fn numbered_text(result: &Value, budget: usize) -> String {
     let label = result["source"]["path"].as_str().or_else(|| result["result_ref"].as_str()).unwrap_or("Output");
     let start = result["range"]["start_line"].as_u64().unwrap_or(1);
     let bytes = result["range"]["byte_start"].as_u64().unwrap_or(0);
@@ -232,7 +259,7 @@ fn numbered_text(result: &Value) -> String {
     let mut consumed = 0;
     for (offset, line) in content.split_inclusive('\n').enumerate() {
         let prefix = format!("{}\t", start + offset as u64);
-        let available = (MAX_RESPONSE_BYTES - 256).saturating_sub(text.len() + prefix.len());
+        let available = budget.saturating_sub(256 + text.len() + prefix.len());
         if available == 0 {
             break;
         }

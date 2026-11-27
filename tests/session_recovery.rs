@@ -415,20 +415,23 @@ fn compact_prefix_and_implicit_revision_hold_across_requests_and_followups() {
     let gateway = format!("http://{}/v1", listener.local_addr().unwrap());
     let server = std::thread::spawn(move || {
         let mut prior = None;
-        let write = |id: &str, old: &str| call(id, "edit", json!({
-            "path":"policy.txt","changes":[{"old_text":old,"new_text":"limit=60"}]
+        let edit = |id: &str, old: &str, new: &str| call(id, "edit", json!({
+            "path":"policy.txt","changes":[{"old_text":old,"new_text":new}]
         }));
         let (stream, _) = compact_round(&listener, &mut prior);
-        respond(stream, write("unobserved", "limit=30"));
+        respond(stream, edit("unobserved", "limit=30", "limit=60"));
         let (stream, req) = compact_round(&listener, &mut prior);
         assert!(last_output(&req).starts_with("READ_REQUIRED"));
-        respond_many(stream, vec![call("read", "read", json!({"path":"policy.txt"})), write("same_batch", "limit=30")]);
+        respond_many(stream, vec![
+            call("read", "read", json!({"path":"policy.txt"})),
+            edit("same_batch", "limit=30", "limit=60"),
+        ]);
         let (stream, req) = compact_round(&listener, &mut prior);
         let items = req["input"].as_array().unwrap();
         assert_eq!(items[items.len()-2]["output"], "\"policy.txt\"\n1\tkeep=1\n2\tlimit=30\n");
         assert!(last_output(&req).starts_with("READ_REQUIRED"));
         fs::write(&file, "keep=2\nlimit=30\n").unwrap();
-        respond(stream, write("stale", "limit=30"));
+        respond(stream, edit("stale", "limit=30", "limit=60"));
         let (stream, req) = compact_round(&listener, &mut prior);
         assert!(last_output(&req).starts_with("REVISION_CONFLICT"));
         assert!(last_output(&req).contains("+keep=2"));
@@ -444,8 +447,31 @@ fn compact_prefix_and_implicit_revision_hold_across_requests_and_followups() {
         assert_eq!(last_output(&req), "Edited policy.txt.");
         respond(stream, answer("Updated."));
         let (stream, req) = compact_round(&listener, &mut prior);
-        assert_eq!(user_texts(&req["input"]), ["Update the limit.", "Review the result."]);
-        respond(stream, answer("Reviewed."));
+        assert_eq!(user_texts(&req["input"]), ["Update the limit.", "Adjust it again."]);
+        respond(stream, edit("across_run", "limit=60", "limit=75"));
+        let (stream, req) = compact_round(&listener, &mut prior);
+        assert_eq!(last_output(&req), "Edited policy.txt.");
+        assert_eq!(fs::read_to_string(&file).unwrap(), "keep=3\nlimit=75\n");
+        respond(stream, answer("Adjusted."));
+
+        let (stream, _) = compact_round(&listener, &mut prior);
+        respond(stream, edit("across_run_conflict", "limit=75", "limit=90"));
+        let (stream, req) = compact_round(&listener, &mut prior);
+        assert!(last_output(&req).starts_with("REVISION_CONFLICT"));
+        assert!(last_output(&req).contains("+keep=4"));
+        assert_eq!(fs::read_to_string(&file).unwrap(), "keep=4\nlimit=75\n");
+        fs::remove_file(&file).unwrap();
+        respond_many(stream, vec![
+            call("missing", "read", json!({"path":"policy.txt"})),
+            call("unconfirmed_create", "write", json!({"path":"policy.txt","content":"limit=90\n"})),
+        ]);
+        let (stream, req) = compact_round(&listener, &mut prior);
+        assert!(last_output(&req).starts_with("REVISION_CONFLICT"));
+        assert!(!file.exists());
+        respond(stream, call("confirmed_create", "write", json!({"path":"policy.txt","content":"limit=90\n"})));
+        let (stream, req) = compact_round(&listener, &mut prior);
+        assert_eq!(last_output(&req), "Wrote policy.txt.");
+        respond(stream, answer("Recreated the requested file."));
     });
 
     let run = |prompt| invoke(root.path(), &gateway, false, &[
@@ -453,14 +479,69 @@ fn compact_prefix_and_implicit_revision_hold_across_requests_and_followups() {
     ]);
     let result = run("Update the limit.");
     assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
-    let result = run("Review the result.");
+    let result = run("Adjust it again.");
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    fs::write(root.path().join("policy.txt"), "keep=4\nlimit=75\n").unwrap();
+    let result = run("Update or recreate the file.");
     assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
     server.join().unwrap();
-    assert_eq!(fs::read_to_string(root.path().join("policy.txt")).unwrap(), "keep=3\nlimit=60\n");
+    assert_eq!(fs::read_to_string(root.path().join("policy.txt")).unwrap(), "limit=90\n");
     let events = session_events(root.path());
     let read = events.iter().find(|event| event["data"]["call_id"] == "read" && event["kind"] == "tool_result").unwrap();
     assert_eq!(read["data"]["revision"].as_str().unwrap().len(), 64);
     assert!(read["data"]["live_observation"] == true);
+}
+
+#[test]
+fn compact_budget_hints_follow_only_the_latest_result_and_preserve_the_prefix() {
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture.path().join("workspace");
+    fs::create_dir(&root).unwrap();
+    fs::write(root.join("short.txt"), "short\n").unwrap();
+    fs::write(root.join("long.txt"), "line\n".repeat(2800)).unwrap();
+    let checks = fixture.path().join("checks.json");
+    fs::write(&checks, json!({
+        "acceptance":{"program":env!("CARGO_BIN_EXE_source_harness"),"args":["--help"]}
+    }).to_string()).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let gateway = format!("http://{}/v1", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        let mut prior = None;
+        let limit = source_harness::transport::GatewayConfig::default().max_turns;
+        for round in 1..=limit {
+            let (stream, req) = compact_round(&listener, &mut prior);
+            match limit - round {
+                0 => {
+                    assert!(last_output(&req).starts_with("PASS acceptance. This revision is verified."));
+                    assert!(last_output(&req).contains("Re-run validate after any edit."));
+                    assert!(last_output(&req).contains("1 turn left. Finish in the next response"));
+                    respond(stream, answer("Validated and finished."));
+                }
+                1 => {
+                    let items = req["input"].as_array().unwrap();
+                    assert!(!items[items.len() - 2]["output"].as_str().unwrap().contains("[Budget"));
+                    assert!(last_output(&req).contains("More: read("));
+                    assert!(last_output(&req).ends_with("[Budget for this task: 2 turns left. Validate if needed, then finish.]"));
+                    assert!(last_output(&req).len() <= 8192);
+                    respond(stream, call("validate_budget", "validate", json!({})));
+                }
+                2 => {
+                    assert!(!req["input"].to_string().contains("[Budget"));
+                    respond_many(stream, vec![
+                        call("small_batch", "read", json!({"path":"short.txt"})),
+                        call("last_batch", "read", json!({"path":"long.txt"})),
+                    ]);
+                }
+                _ => respond(stream, call(&format!("read_{round}"), "read", json!({"path":"short.txt"}))),
+            }
+        }
+    });
+    let result = invoke(&root, &gateway, false, &[
+        "agent", "--tool-profile", "compact", "--checks", checks.to_str().unwrap(), "--prompt", "Inspect and verify."
+    ]);
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(String::from_utf8_lossy(&result.stdout).trim(), "Validated and finished.");
+    server.join().unwrap();
 }
 
 #[test]
@@ -490,7 +571,7 @@ fn compact_rollback_recovers_and_preserves_external_changes() {
         let (stream, _) = compact_round(&listener, &mut prior);
         respond(stream, call("validate", "validate", json!({})));
         let (stream, req) = compact_round(&listener, &mut prior);
-        assert_eq!(last_output(&req), "PASS acceptance");
+        assert!(last_output(&req).starts_with("PASS acceptance. This revision is verified."));
         respond_many(stream, vec![edit("bad", "limit=60", "limit=0"), call("create", "write", json!({
             "path":"z-added.txt","content":"temporary"
         }))]);
@@ -512,6 +593,11 @@ fn compact_rollback_recovers_and_preserves_external_changes() {
         assert!(last_output(&req).starts_with("ROLLBACK_CONFLICT"));
         assert_eq!(fs::read_to_string(&protected).unwrap(), "outside\n");
         respond(stream, answer("Restored the last passing version."));
+        let (stream, _) = compact_round(&listener, &mut prior);
+        respond(stream, edit("expired_next_run", "limit=60", "limit=80"));
+        let (stream, req) = compact_round(&listener, &mut prior);
+        assert!(last_output(&req).starts_with("READ_REQUIRED"));
+        respond(stream, answer("The restored file needs a new live read."));
     });
     let args = ["agent", "--tool-profile", "compact", "--checks", checks.to_str().unwrap()];
     let stopped = invoke_with_interruption(&root, &gateway, Some("during_rollback"), &[&args[..], &["--prompt", "Try the change."]].concat());
@@ -519,6 +605,8 @@ fn compact_rollback_recovers_and_preserves_external_changes() {
     assert!(root.join("z-added.txt").exists());
     let resumed = invoke(&root, &gateway, false, &[&args[..], &["--resume"]].concat());
     assert!(resumed.status.success(), "{}", String::from_utf8_lossy(&resumed.stderr));
+    let followup = invoke(&root, &gateway, false, &[&args[..], &["--prompt", "Update the restored file."]].concat());
+    assert!(followup.status.success(), "{}", String::from_utf8_lossy(&followup.stderr));
     server.join().unwrap();
     let events = session_events(&root);
     let events_of = |kind: &str| events.iter().filter(|event| event["kind"] == kind).count();
@@ -621,7 +709,7 @@ fn compact_exec_isolates_oracle_network_and_writes_and_folds_output() {
         assert!(last_output(&req).starts_with("EXEC_TIMEOUT"), "{}", last_output(&req));
         respond(stream, call("check", "validate", json!({})));
         let (stream, req) = compact_round(&listener, &mut prior);
-        assert_eq!(last_output(&req), "PASS acceptance");
+        assert!(last_output(&req).starts_with("PASS acceptance. This revision is verified."));
         respond(stream, answer("Isolated execution finished."));
     });
     let result = invoke(&root, &gateway, false, &[

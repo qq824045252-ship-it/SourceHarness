@@ -389,17 +389,23 @@ impl Session {
         gate.active_run = Some(run);
         drop(gate);
         let mut turn = None::<(TurnMetrics, Instant)>;
-        for step in 0..=client.config().max_turns {
+        let max_turns = client.config().max_turns;
+        for step in 0..=max_turns {
             let mut new_pause = None;
             while let Some(call) = checkpoint.pending.pop_front() {
                 self.collect_steering(&mut checkpoint, poll_steering)?;
                 let guarded = checkpoint.guard_pause.is_some() || new_pause.is_some();
+                let budget_hint = if compact && checkpoint.pending.is_empty() {
+                    compact::budget_hint(max_turns - step)
+                } else {
+                    None
+                };
                 let output = if checkpoint.queued_steering.is_empty() && !guarded {
-                    let (output, pause) = self.execute(run, checkpoint.round, &call, observer)?;
+                    let (output, pause) = self.execute(run, checkpoint.round, &call, observer, budget_hint)?;
                     new_pause = pause;
                     output
                 } else {
-                    self.close_pending_call(run, checkpoint.round, &call, observer, guarded)?
+                    self.close_pending_call(run, checkpoint.round, &call, observer, guarded, budget_hint)?
                 };
                 checkpoint.input.push(output);
             }
@@ -414,7 +420,7 @@ impl Session {
                 }))?;
                 return Err("Loop guard paused this run. Use :steer with guidance in chat or --continue --prompt with a correction.".to_owned());
             }
-            if step == client.config().max_turns {
+            if step == max_turns {
                 break;
             }
 
@@ -688,7 +694,7 @@ impl Session {
         let outputs: Vec<Value> = checkpoint.pending.iter().map(|call| {
             let result = self.observe_pending(call);
             let result = if self.options.compact {
-                compact::present(&call.name, &result, None)
+                compact::present(&call.name, &result, None, None)
             } else {
                 result
             };
@@ -747,6 +753,7 @@ impl Session {
         call: &Call,
         observer: &mut dyn RunObserver,
         guarded: bool,
+        budget_hint: Option<&str>,
     ) -> Result<Value, String> {
         let attempt = self.journal.events.iter().rev()
             .find(|e| e.kind == "tool_attempt" && e.data["operation"] == call.operation)
@@ -776,7 +783,7 @@ impl Session {
             "name":call.name,"arguments":args,"output":output,"status":result["status"],"code":result["code"]
         });
         let presented = if self.options.compact {
-            let text = compact::present(&call.name, &result, None);
+            let text = compact::present(&call.name, &result, None, budget_hint);
             data["model_output"] = json!(self.journal.store_json(&text)?);
             text
         } else {
@@ -787,7 +794,14 @@ impl Session {
         Ok(function_output(call, &presented))
     }
 
-    fn execute(&mut self, run: usize, round: usize, call: &Call, observer: &mut dyn RunObserver) -> Result<(Value, Option<Value>), String> {
+    fn execute(
+        &mut self,
+        run: usize,
+        round: usize,
+        call: &Call,
+        observer: &mut dyn RunObserver,
+        budget_hint: Option<&str>,
+    ) -> Result<(Value, Option<Value>), String> {
         let args: Result<Value, _> = serde_json::from_str(&call.raw_args);
         let compact = self.options.compact;
         let action_args = args.as_ref().ok();
@@ -845,7 +859,7 @@ impl Session {
         };
         let model_output = if compact {
             let warning = signal.as_ref().filter(|signal| signal["state"] != "observe");
-            Some(compact::present(&call.name, &result, warning))
+            Some(compact::present(&call.name, &result, warning, budget_hint))
         } else {
             self.classic_output(run, call, attempt, &result)?
         };
@@ -859,13 +873,23 @@ impl Session {
             data["model_output"] = json!(self.journal.store_json(output)?);
         }
         if compact {
+            let live_read = action_args
+                .filter(|args| call.name == "read" && args["result_ref"].is_null())
+                .and_then(|args| args["path"].as_str());
             let observed = result["status"] == "ok" && result["source"]["kind"] == "workspace"
                 && match call.name.as_str() {
-                    "read" => action_args.is_some_and(|args| args["result_ref"].is_null()),
+                    "read" => live_read.is_some(),
                     "edit" | "write" => true,
                     _ => false,
                 };
             data["live_observation"] = json!(observed);
+            if result["code"] == "FILE_NOT_FOUND" {
+                if let Some((_, path)) = live_read.and_then(|path| {
+                    tools::workspace_path(&self.ctx, path, tools::ResolvePath::MissingParents).ok()
+                }) {
+                    data["observed_absent"] = json!(path);
+                }
+            }
             data["guard"] = json!(signal);
         }
         self.journal.append(run, "tool_result", data)?;
