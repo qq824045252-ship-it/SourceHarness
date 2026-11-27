@@ -1,0 +1,278 @@
+{
+  "replay_scope": "Run original guard against archived tool results without applying its warnings or pauses",
+  "tool_results": 314,
+  "signals": [],
+  "phases": [
+    {
+      "session": "A",
+      "phase": 1,
+      "baseline_pass": true,
+      "archived_turn_limit": false,
+      "first_final_revision_verification": 101,
+      "calls_after_final_verification": [],
+      "warnings": 0,
+      "first_guard_pause": null,
+      "successful_mutations_after_first_guard_pause": []
+    },
+    {
+      "session": "A",
+      "phase": 2,
+      "baseline_pass": true,
+      "archived_turn_limit": false,
+      "first_final_revision_verification": 161,
+      "calls_after_final_verification": [
+        "read",
+        "read"
+      ],
+      "warnings": 0,
+      "first_guard_pause": null,
+      "successful_mutations_after_first_guard_pause": []
+    },
+    {
+      "session": "A",
+      "phase": 3,
+      "baseline_pass": true,
+      "archived_turn_limit": false,
+      "first_final_revision_verification": 258,
+      "calls_after_final_verification": [],
+      "warnings": 0,
+      "first_guard_pause": null,
+      "successful_mutations_after_first_guard_pause": []
+    },
+    {
+      "session": "A",
+      "phase": 4,
+      "baseline_pass": true,
+      "archived_turn_limit": false,
+      "first_final_revision_verification": 337,
+      "calls_after_final_verification": [],
+      "warnings": 0,
+      "first_guard_pause": null,
+      "successful_mutations_after_first_guard_pause": []
+    },
+    {
+      "session": "B",
+      "phase": 1,
+      "baseline_pass": true,
+      "archived_turn_limit": false,
+      "first_final_revision_verification": 91,
+      "calls_after_final_verification": [
+        "read",
+        "read"
+      ],
+      "warnings": 0,
+      "first_guard_pause": null,
+      "successful_mutations_after_first_guard_pause": []
+    },
+    {
+      "session": "B",
+      "phase": 2,
+      "baseline_pass": true,
+      "archived_turn_limit": false,
+      "first_final_revision_verification": 167,
+      "calls_after_final_verification": [
+        "read",
+        "read",
+        "read",
+        "read",
+        "read"
+      ],
+      "warnings": 0,
+      "first_guard_pause": null,
+      "successful_mutations_after_first_guard_pause": []
+    },
+    {
+      "session": "B",
+      "phase": 3,
+      "baseline_pass": true,
+      "archived_turn_limit": false,
+      "first_final_revision_verification": 243,
+      "calls_after_final_verification": [
+        "research",
+        "read",
+        "read"
+      ],
+      "warnings": 0,
+      "first_guard_pause": null,
+      "successful_mutations_after_first_guard_pause": []
+    },
+    {
+      "session": "B",
+      "phase": 4,
+      "baseline_pass": false,
+      "archived_turn_limit": false,
+      "first_final_revision_verification": null,
+      "calls_after_final_verification": [],
+      "warnings": 0,
+      "first_guard_pause": null,
+      "successful_mutations_after_first_guard_pause": []
+    },
+    {
+      "session": "C",
+      "phase": 1,
+      "baseline_pass": true,
+      "archived_turn_limit": false,
+      "first_final_revision_verification": 102,
+      "calls_after_final_verification": [],
+      "warnings": 0,
+      "first_guard_pause": null,
+      "successful_mutations_after_first_guard_pause": []
+    },
+    {
+      "session": "C",
+      "phase": 2,
+      "baseline_pass": true,
+      "archived_turn_limit": false,
+      "first_final_revision_verification": 199,
+      "calls_after_final_verification": [
+        "read",
+        "research"
+      ],
+      "warnings": 0,
+      "first_guard_pause": null,
+      "successful_mutations_after_first_guard_pause": []
+    },
+    {
+      "session": "C",
+      "phase": 3,
+      "baseline_pass": true,
+      "archived_turn_limit": false,
+      "first_final_revision_verification": 273,
+      "calls_after_final_verification": [
+        "research",
+        "research",
+        "research",
+        "research",
+        "read",
+        "read"
+      ],
+      "warnings": 0,
+      "first_guard_pause": null,
+      "successful_mutations_after_first_guard_pause": []
+    },
+    {
+      "session": "C",
+      "phase": 4,
+      "baseline_pass": true,
+      "archived_turn_limit": false,
+      "first_final_revision_verification": 431,
+      "calls_after_final_verification": [],
+      "warnings": 0,
+      "first_guard_pause": null,
+      "successful_mutations_after_first_guard_pause": []
+    },
+    {
+      "session": "D",
+      "phase": 1,
+      "baseline_pass": true,
+      "archived_turn_limit": true,
+      "first_final_revision_verification": 133,
+      "calls_after_final_verification": [
+        "research",
+        "research",
+        "research",
+        "read",
+        "read",
+        "read",
+        "read"
+      ],
+      "warnings": 0,
+      "first_guard_pause": null,
+      "successful_mutations_after_first_guard_pause": []
+    },
+    {
+      "session": "D",
+      "phase": 2,
+      "baseline_pass": true,
+      "archived_turn_limit": false,
+      "first_final_revision_verification": 232,
+      "calls_after_final_verification": [
+        "read",
+        "read"
+      ],
+      "warnings": 0,
+      "first_guard_pause": null,
+      "successful_mutations_after_first_guard_pause": []
+    },
+    {
+      "session": "D",
+      "phase": 3,
+      "baseline_pass": true,
+      "archived_turn_limit": false,
+      "first_final_revision_verification": 316,
+      "calls_after_final_verification": [
+        "read",
+        "read",
+        "research",
+        "research",
+        "research",
+        "research",
+        "research"
+      ],
+      "warnings": 0,
+      "first_guard_pause": null,
+      "successful_mutations_after_first_guard_pause": []
+    },
+    {
+      "session": "D",
+      "phase": 4,
+      "baseline_pass": true,
+      "archived_turn_limit": false,
+      "first_final_revision_verification": 488,
+      "calls_after_final_verification": [
+        "research",
+        "read"
+      ],
+      "warnings": 0,
+      "first_guard_pause": null,
+      "successful_mutations_after_first_guard_pause": []
+    },
+    {
+      "session": "markdown",
+      "phase": 1,
+      "baseline_pass": true,
+      "archived_turn_limit": false,
+      "first_final_revision_verification": 45,
+      "calls_after_final_verification": [
+        "read",
+        "read"
+      ],
+      "warnings": 0,
+      "first_guard_pause": null,
+      "successful_mutations_after_first_guard_pause": []
+    },
+    {
+      "session": "markdown",
+      "phase": 2,
+      "baseline_pass": true,
+      "archived_turn_limit": false,
+      "first_final_revision_verification": 91,
+      "calls_after_final_verification": [],
+      "warnings": 0,
+      "first_guard_pause": null,
+      "successful_mutations_after_first_guard_pause": []
+    }
+  ],
+  "archived_request_bytes": {
+    "A": {
+      "wire_bytes": 3933048,
+      "dynamic_history_bytes": 184400
+    },
+    "B": {
+      "wire_bytes": 8010418,
+      "dynamic_history_bytes": 266845
+    },
+    "C": {
+      "wire_bytes": 7641936,
+      "dynamic_history_bytes": 294353
+    },
+    "D": {
+      "wire_bytes": 7320280,
+      "dynamic_history_bytes": 284336
+    },
+    "markdown": {
+      "wire_bytes": 294033,
+      "dynamic_history_bytes": 42228
+    }
+  }
+}

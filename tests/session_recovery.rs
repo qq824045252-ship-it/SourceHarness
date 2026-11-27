@@ -152,7 +152,14 @@ fn a_followup_waits_until_a_paused_run_resumes_and_finishes() {
         let limit = source_harness::transport::GatewayConfig::default().max_turns;
         for turn in 2..=limit {
             let (mut pending, _) = listener.accept().unwrap();
-            assert_eq!(user_texts(&request(&mut pending)["input"]), ["Task A"]);
+            let body = request(&mut pending);
+            assert_eq!(user_texts(&body["input"]), ["Task A"]);
+            if turn >= 3 {
+                let last = body["input"].as_array().unwrap().last().unwrap();
+                let output: Value = serde_json::from_str(last["output"].as_str().unwrap()).unwrap();
+                assert_eq!(output["loop_warning"]["kind"], "EXACT_REPEAT");
+                assert_eq!(output["loop_warning"]["count"], turn - 1);
+            }
             respond(pending, call(&format!("count_{turn}"), "research", json!({"scope":"workspace"})));
         }
 
@@ -359,6 +366,80 @@ fn invoke(root: &Path, gateway: &str, interrupt: bool, args: &[&str]) -> Output 
         command.env("SOURCE_HARNESS_TEST_INTERRUPT", "after_file_replace");
     }
     command.output().unwrap()
+}
+
+#[test]
+fn validation_reports_changes_and_preserves_history_across_followup_requests() {
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture.path().join("workspace");
+    fs::create_dir(&root).unwrap();
+    fs::write(root.join("policy.txt"), "limit=30\n").unwrap();
+    let checks = fixture.path().join("checks.json");
+    fs::write(&checks, json!({
+        "acceptance":{"program":env!("CARGO_BIN_EXE_source_harness"),"args":["--help"]}
+    }).to_string()).unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let gateway = format!("http://{}/v1", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        let (mut first, _) = listener.accept().unwrap();
+        assert_eq!(user_texts(&request(&mut first)["input"]), ["Write a report."]);
+        respond(first, call("write_1", "write", json!({
+            "mode":"create","path":"report.txt","content":"limit=30\n"
+        })));
+
+        let (mut second, _) = listener.accept().unwrap();
+        request(&mut second);
+        respond(second, call("check_1", "validate", json!({"check":"acceptance"})));
+
+        let (mut validated, _) = listener.accept().unwrap();
+        let body = request(&mut validated);
+        let output = body["input"].as_array().unwrap().iter()
+            .find(|item| item["type"] == "function_call_output" && item["call_id"] == "check_1")
+            .unwrap();
+        let proof: Value = serde_json::from_str(output["output"].as_str().unwrap()).unwrap();
+        assert_eq!(proof["passed"], true);
+        assert_eq!(proof["workspace_changes_since_start"]["files"], json!([
+            {"path":"report.txt","change":"added"}
+        ]));
+        assert_eq!(proof["workspace_changes_since_start"]["total"], 1);
+        assert_eq!(proof["workspace_changes_since_start"]["complete"], true);
+        respond(validated, answer("Report complete."));
+
+        let (mut followup, _) = listener.accept().unwrap();
+        let before = request(&mut followup);
+        let texts = user_texts(&before["input"]);
+        assert_eq!(&texts[..2], ["Write a report.", "Check the policy."]);
+        assert_eq!(texts.len(), 3);
+        let notice = texts[2];
+        assert!(notice.contains("Related recorded evidence."));
+        assert!(notice.contains("previous_runs"));
+        respond(followup, call("read_1", "read", json!({"path":"policy.txt"})));
+
+        let (mut after_read, _) = listener.accept().unwrap();
+        let after = request(&mut after_read);
+        assert_eq!(user_texts(&after["input"]), texts);
+        assert_eq!(after["instructions"], before["instructions"]);
+        respond(after_read, answer("Policy confirmed."));
+        notice.len()
+    });
+
+    let check_path = checks.to_str().unwrap();
+    for prompt in ["Write a report.", "Check the policy."] {
+        let result = invoke(&root, &gateway, false, &["agent", "--checks", check_path, "--prompt", prompt]);
+        assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    }
+
+    let notice_bytes = server.join().unwrap();
+    let events = session_events(&root);
+    let followup = events.iter().rev().find(|event| event["kind"] == "user").unwrap();
+    let audits: Vec<_> = events.iter()
+        .filter(|event| event["kind"] == "model_request" && event["run"] == followup["run"])
+        .map(|event| &event["data"]["history_auxiliary"])
+        .collect();
+    assert_eq!(audits.len(), 2);
+    assert_eq!(audits[0]["bytes"], notice_bytes);
+    assert_eq!(audits[0], audits[1]);
 }
 
 #[test]

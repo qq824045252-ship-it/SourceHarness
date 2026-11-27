@@ -15,7 +15,6 @@ const HISTORY_HEADER: &str = "\nRelated recorded evidence. For changes since an 
 pub struct Auxiliary {
     pub static_suffix: String,
     pub dynamic_context: String,
-    pub notice_revision: Option<String>,
     pub audit: Value,
 }
 
@@ -234,11 +233,13 @@ pub fn prepare(
         records.pop();
     }
     let facts_revision = revision(json!(records).to_string().as_bytes());
-    let notice_revision = (!dynamic_context.is_empty()).then(|| revision(dynamic_context.as_bytes()));
+    let dynamic_context = dynamic_context.trim_start().to_owned();
+    let notice_revision =
+        (!dynamic_context.is_empty()).then(|| revision(dynamic_context.as_bytes()));
     Auxiliary {
         audit: json!({
             "representation":mode.label(),
-            "delivery":"input_tail",
+            "delivery":if dynamic_context.is_empty() { "none" } else { "input_tail" },
             "fact_count":records.len(),
             "available_facts":available,
             "facts_revision":facts_revision,
@@ -253,7 +254,6 @@ pub fn prepare(
         }),
         static_suffix,
         dynamic_context,
-        notice_revision,
     }
 }
 

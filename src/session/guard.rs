@@ -2,15 +2,7 @@ use super::journal::Journal;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
-pub const WARN_THRESHOLD: usize = 2;
-pub const PAUSE_THRESHOLD: usize = 3;
-
-#[derive(Debug, PartialEq)]
-pub enum Action {
-    Allow,
-    Warn(Value),
-    Pause(Value),
-}
+const WARN_THRESHOLD: usize = 2;
 
 pub struct PendingOutcome<'a> {
     pub operation: &'a str,
@@ -19,7 +11,7 @@ pub struct PendingOutcome<'a> {
     pub result: &'a Value,
 }
 
-/// Evaluate deterministic loop/thrashing signals within the current run.
+/// Report deterministic signs of repeated work within the current run.
 ///
 /// Signals:
 /// 1. `EXACT_REPEAT`: identical `(tool_name, args_hash)` repeated with no
@@ -27,7 +19,7 @@ pub struct PendingOutcome<'a> {
 /// 2. `ERROR_STREAK`: consecutive error results on the same `(tool_name, target, code)`.
 /// 3. `VALIDATION_OSCILLATION`: repeated identical failed validation fingerprint
 ///    or returning to a previously failed `workspace_revision` for the same check.
-pub fn evaluate(journal: &Journal, run: usize, pending: &PendingOutcome<'_>) -> Action {
+pub fn evaluate(journal: &Journal, run: usize, pending: &PendingOutcome<'_>) -> Option<Value> {
     let mut attempts: HashMap<usize, (&str, &str)> = HashMap::new();
     let mut workspace_epoch: usize = 0;
     let mut exact_counts: HashMap<(&str, &str, usize), usize> = HashMap::new();
@@ -151,7 +143,7 @@ pub fn evaluate(journal: &Journal, run: usize, pending: &PendingOutcome<'_>) -> 
             exact_count,
             "EXACT_REPEAT",
             format!(
-                "Repeated identical `{}` call {} times without any workspace change.",
+                "Repeated identical `{}` call {} times without an intervening recorded edit.",
                 pending.name, exact_count
             ),
         ),
@@ -175,29 +167,12 @@ pub fn evaluate(journal: &Journal, run: usize, pending: &PendingOutcome<'_>) -> 
         ),
     ];
 
-    let Some((count, kind, reason)) = candidates
+    let (count, kind, reason) = candidates
         .into_iter()
         .max_by_key(|(count, _, _)| *count)
-        .filter(|(count, _, _)| *count >= WARN_THRESHOLD)
-    else {
-        return Action::Allow;
-    };
+        .filter(|(count, _, _)| *count >= WARN_THRESHOLD)?;
 
-    if count >= PAUSE_THRESHOLD {
-        Action::Pause(json!({
-            "kind": kind,
-            "count": count,
-            "operation": pending.operation,
-            "tool": pending.name,
-            "reason": reason,
-        }))
-    } else {
-        Action::Warn(json!({
-            "kind": kind,
-            "count": count,
-            "reason": reason,
-        }))
-    }
+    Some(json!({"kind": kind, "count": count, "reason": reason}))
 }
 
 fn error_key(name: &str, data: &Value) -> (String, String, String) {
@@ -216,7 +191,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn exact_repeat_warns_on_second_and_pauses_on_third_and_resets_after_edit() {
+    fn exact_repeat_warns_and_resets_after_edit() {
         let dir = tempfile::tempdir().unwrap();
         let mut journal = Journal::open(dir.path()).unwrap();
         let args = journal.put(br#"{"path":"a.txt"}"#).unwrap();
@@ -227,7 +202,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             evaluate(&journal, 1, &PendingOutcome { operation: "1.1.1", attempt: a1, name: "read", result: &ok }),
-            Action::Allow
+            None
         );
         journal
             .append(1, "tool_result", json!({"operation":"1.1.1","attempt":a1,"name":"read","status":"ok"}))
@@ -238,7 +213,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             evaluate(&journal, 1, &PendingOutcome { operation: "1.2.1", attempt: a2, name: "read", result: &ok }),
-            Action::Warn(ref w) if w["kind"] == "EXACT_REPEAT" && w["count"] == 2
+            Some(ref w) if w["kind"] == "EXACT_REPEAT" && w["count"] == 2
         ));
         journal
             .append(1, "tool_result", json!({"operation":"1.2.1","attempt":a2,"name":"read","status":"ok"}))
@@ -249,7 +224,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             evaluate(&journal, 1, &PendingOutcome { operation: "1.3.1", attempt: a3, name: "read", result: &ok }),
-            Action::Pause(ref p) if p["kind"] == "EXACT_REPEAT" && p["count"] == 3
+            Some(ref p) if p["kind"] == "EXACT_REPEAT" && p["count"] == 3
         ));
 
         // After a successful edit_receipt, the workspace epoch advances so reading again is allowed.
@@ -261,17 +236,17 @@ mod tests {
             .unwrap();
         assert_eq!(
             evaluate(&journal, 1, &PendingOutcome { operation: "1.5.1", attempt: a4, name: "read", result: &ok }),
-            Action::Allow
+            None
         );
     }
 
     #[test]
-    fn error_streak_warns_then_pauses_on_same_target_and_code() {
+    fn error_streak_warns_on_same_target_and_code() {
         let dir = tempfile::tempdir().unwrap();
         let mut journal = Journal::open(dir.path()).unwrap();
         let err = json!({"status":"error","code":"TEXT_NOT_FOUND","source":{"kind":"workspace","path":"app.py"}});
 
-        for (round, expected) in [(1, "allow"), (2, "warn"), (3, "pause")] {
+        for (round, expected) in [(1, false), (2, true), (3, true)] {
             let op = format!("1.{round}.1");
             let args = journal.put(format!(r#"{{"round":{round}}}"#).as_bytes()).unwrap();
             let attempt = journal
@@ -282,11 +257,12 @@ mod tests {
                 1,
                 &PendingOutcome { operation: &op, attempt, name: "edit", result: &err },
             );
-            match expected {
-                "allow" => assert_eq!(action, Action::Allow),
-                "warn" => assert!(matches!(action, Action::Warn(ref w) if w["kind"] == "ERROR_STREAK")),
-                "pause" => assert!(matches!(action, Action::Pause(ref p) if p["kind"] == "ERROR_STREAK")),
-                _ => unreachable!(),
+            if expected {
+                let warning = action.unwrap();
+                assert_eq!(warning["kind"], "ERROR_STREAK");
+                assert_eq!(warning["count"], round);
+            } else {
+                assert_eq!(action, None);
             }
             journal
                 .append(1, "tool_result", json!({
@@ -303,7 +279,7 @@ mod tests {
         let mut journal = Journal::open(dir.path()).unwrap();
         let ok_res = json!({"status":"ok","passed":false});
 
-        for (round, ws_rev, expected) in [(1, "rev-a", "allow"), (2, "rev-b", "warn"), (3, "rev-a", "pause")] {
+        for (round, ws_rev, expected) in [(1, "rev-a", false), (2, "rev-b", true), (3, "rev-a", true)] {
             let op = format!("1.{round}.1");
             let args = journal.put(format!(r#"{{"check":"ci","r":{round}}}"#).as_bytes()).unwrap();
             let attempt = journal
@@ -320,11 +296,12 @@ mod tests {
                 1,
                 &PendingOutcome { operation: &op, attempt, name: "validate", result: &ok_res },
             );
-            match expected {
-                "allow" => assert_eq!(action, Action::Allow),
-                "warn" => assert!(matches!(action, Action::Warn(ref w) if w["kind"] == "VALIDATION_OSCILLATION")),
-                "pause" => assert!(matches!(action, Action::Pause(ref p) if p["kind"] == "VALIDATION_OSCILLATION")),
-                _ => unreachable!(),
+            if expected {
+                let warning = action.unwrap();
+                assert_eq!(warning["kind"], "VALIDATION_OSCILLATION");
+                assert_eq!(warning["count"], round);
+            } else {
+                assert_eq!(action, None);
             }
             journal
                 .append(1, "tool_result", json!({"operation":op,"attempt":attempt,"name":"validate","status":"ok"}))

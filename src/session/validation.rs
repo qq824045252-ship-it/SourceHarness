@@ -1,6 +1,6 @@
 use super::journal::{revision, Journal};
 use super::tools::{definition, walk};
-use crate::budget::truncate_utf8_bytes;
+use crate::budget::{json_byte_len, truncate_utf8_bytes, MAX_RESPONSE_BYTES};
 use crate::workspace::WorkspaceContext;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -155,6 +155,39 @@ pub fn workspace_version(ctx: &WorkspaceContext, journal: &Journal) -> Result<St
     manifest(ctx, journal, None)
 }
 
+// Compare the exact manifest the checker used to the one captured at run start.
+fn changes_since_start(journal: &Journal, run: usize, tested_revision: &str) -> Option<Value> {
+    let baseline = journal.events.iter()
+        .find(|event| event.run == run && event.kind == "user")?
+        .data["workspace_revision_at_start"].as_str()?;
+    let mut files = Vec::new();
+    let mut total = 0;
+    let mut bytes = 0;
+    if baseline != tested_revision {
+        let before: BTreeMap<String, String> =
+            serde_json::from_slice(&journal.get(baseline).ok()?).ok()?;
+        let tested: BTreeMap<String, String> =
+            serde_json::from_slice(&journal.get(tested_revision).ok()?).ok()?;
+        let paths = before.keys().chain(tested.keys().filter(|path| !before.contains_key(*path)));
+        for path in paths {
+            let change = match (before.get(path), tested.get(path)) {
+                (None, Some(_)) => "added",
+                (Some(_), None) => "removed",
+                (Some(old), Some(new)) if old != new => "modified",
+                _ => continue,
+            };
+            total += 1;
+            let file = json!({"path":path,"change":change});
+            let size = json_byte_len(&file) + 1;
+            if bytes + size <= 1024 {
+                bytes += size;
+                files.push(file);
+            }
+        }
+    }
+    Some(json!({"from_revision":baseline,"files":files,"total":total,"complete":files.len()==total}))
+}
+
 pub fn run(
     ctx: &WorkspaceContext,
     journal: &mut Journal,
@@ -288,6 +321,14 @@ pub fn run(
             match input_revisions_after {
                 Ok(after) => result["input_revisions_after"] = json!(after),
                 Err(error) => result["input_revisions_after_error"] = json!(error),
+            }
+        }
+    }
+    if result["passed"] == true && before == after {
+        if let Some(changes) = changes_since_start(journal, run, &before) {
+            let field = "workspace_changes_since_start";
+            if json_byte_len(&result) + json_byte_len(&changes) + field.len() + 4 <= MAX_RESPONSE_BYTES {
+                result[field] = changes;
             }
         }
     }
