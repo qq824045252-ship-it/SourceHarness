@@ -1,0 +1,32 @@
+{
+  "cli_binary_sha256": "767912a95564aa82ed956141a4332abd611fc03cf84f8fca554f745921f942de",
+  "planned": 1000,
+  "qwen_tasks_evaluated": 0,
+  "opencode_go": [
+    {
+      "model": "qwen3.8-flash",
+      "protocol": "responses",
+      "http_status": 403,
+      "failure": "model_access_disabled",
+      "requested_case": "inspect.qualified-count.00",
+      "responses": 0,
+      "seconds": 5.2287,
+      "cli_exit": 1
+    },
+    {
+      "model": "qwen3.8-max",
+      "protocol": "responses",
+      "http_status": 403,
+      "failure": "model_access_disabled",
+      "requested_case": "inspect.effective-setting.00",
+      "responses": 0,
+      "seconds": 4.0798,
+      "cli_exit": 1
+    }
+  ],
+  "earlier_gradio": {
+    "root_status": 404,
+    "chat_completions_status": 404,
+    "response_title": "No interface is running"
+  }
+}
