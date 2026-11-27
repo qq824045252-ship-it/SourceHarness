@@ -49,11 +49,12 @@ pub fn definitions(mode: EditMode) -> Vec<Value> {
     indexed_search["parameters"]["properties"]["result_ref"]["description"] =
         json!("Copy the immutable result_ref from a prior session tool result.");
     vec![
-        definition("research", "Find literal evidence in the workspace, a saved result, or session history. Pass next to enumerate saved hits or retry to run the suggested query. Read a hit's result_ref for original bytes. Historical calls can include arguments_ref for read.",
-            json!({"scope":{"type":"string","enum":["workspace","result","history","page","retry"]},
+        definition("research", "Find literal evidence in the workspace, a saved result, or session history. For a local edit, start with context_lines=2 around its anchor. If context.text contains the whole edit target, use it directly as source for edit. Copy source.path and revision from that same hit into path and expected_revision. Pass next to enumerate saved hits or retry to run the suggested query. Historical calls can include arguments_ref for read.",
+            json!({"scope":{"type":"string","enum":["workspace","result","history","page","retry"],"description":"Required. Use workspace for current files, result for a saved result, history for prior events, or copy the scope in next or retry."},
                 "path":{"type":"string","description":"Workspace scope only. Omit to search the whole workspace."},
                 "result_ref":{"type":"string","description":"Result, page or retry scope only. Copy the corresponding result_ref."},
                 "query":{"type":"string","description":"Case-sensitive literal, including exact line endings for multiline text. Omit to list workspace paths or recent history."},
+                "context_lines":{"type":"integer","minimum":0,"maximum":MAX_RESEARCH_CONTEXT_LINES,"description":"For a workspace or result query, include this many full lines on each side of every text hit. The separate context field gives exact text and its range, or read arguments for a larger block. The hit range and counts describe only matches. Defaults to 0."},
                 "offset":{"type":"integer","minimum":0,"description":"Copy the offset from next when scope is page."},
                 "limit":{"type":"integer","minimum":1,"default":8,"description":"Requested hits per page. Each page returns at most 20 hits. Follow next for more."}}), &["scope"]),
         definition("read", "Read exact original text by file path or an immutable result_ref. A path supplied with a reference must match its source. Use inclusive 1-based line bounds, a starting line and line_count, or UTF-8 byte offsets. Follow next exactly to keep the same snapshot and requested range.",
@@ -90,6 +91,7 @@ struct ResearchArgs {
     query: Option<String>,
     limit: Option<usize>,
     offset: Option<usize>,
+    context_lines: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -548,6 +550,8 @@ pub fn search_result(journal: &Journal, args: &Value) -> Reply {
 
 const RESEARCH_BATCH_SIZE: usize = 128;
 const RESEARCH_FLAT_BYTES: usize = 8 * 1024 * 1024;
+const MAX_RESEARCH_CONTEXT_LINES: usize = 6;
+const MAX_RESEARCH_CONTEXT_BYTES: usize = 1200;
 
 #[derive(Default)]
 struct ResearchHits {
@@ -758,21 +762,41 @@ fn match_lines(
     text: &str,
     query: &str,
     artifact: &Artifact,
+    context_lines: usize,
     hits: &mut ResearchHits,
 ) -> Result<(), String> {
+    let lines = if context_lines > 0 || query.contains('\n') {
+        line_offsets(text)
+    } else {
+        Vec::new()
+    };
+    let mut push = |start_line: usize, end_line: usize, range, matched| {
+        let mut hit = research_hit(artifact, start_line, end_line, range, matched);
+        if context_lines > 0 {
+            let first = start_line.saturating_sub(context_lines).max(1);
+            let last = (end_line + context_lines).min(lines.len() - 1);
+            let lo = lines[first - 1];
+            let hi = lines[last];
+            let mut context =
+                json!({"range":{"start_line":first,"end_line":last,"byte_start":lo,"byte_end":hi}});
+            if hi - lo <= MAX_RESEARCH_CONTEXT_BYTES {
+                context["text"] = json!(&text[lo..hi]);
+            } else {
+                context["read"] =
+                    json!({"result_ref":artifact.result_ref,"start_line":first,"end_line":last});
+            }
+            hit["context"] = context;
+        }
+        hits.push(journal, hit)
+    };
     if query.contains('\n') {
-        let lines = line_offsets(text);
         for (start, exact) in text.match_indices(query) {
             let stop = start + exact.len();
-            hits.push(
-                journal,
-                research_hit(
-                    artifact,
-                    line_location(&lines, start),
-                    line_location(&lines, stop - 1),
-                    (start, stop),
-                    exact,
-                ),
+            push(
+                line_location(&lines, start),
+                line_location(&lines, stop - 1),
+                (start, stop),
+                exact,
             )?;
         }
         return Ok(());
@@ -782,10 +806,7 @@ fn match_lines(
     for (idx, line) in text.split_inclusive('\n').enumerate() {
         let end = offset + line.len();
         if line.contains(query) {
-            hits.push(
-                journal,
-                research_hit(artifact, idx + 1, idx + 1, (offset, end), line),
-            )?;
+            push(idx + 1, idx + 1, (offset, end), line)?;
         }
         offset = end;
     }
@@ -840,9 +861,9 @@ pub fn research(
     let saved_query: Value;
     let input = if args.scope == "retry" {
         if args.path.is_some()
-            || args.query.is_some()
             || args.offset.is_some()
             || args.limit.is_some()
+            || args.context_lines.is_some()
         {
             return Ok(rejected(
                 "INVALID_ARGUMENT",
@@ -862,6 +883,13 @@ pub fn research(
         };
         saved_query = serde_json::from_slice(&journal.get(&artifact.revision)?)
             .map_err(|err| err.to_string())?;
+        if args.query.as_deref().is_some_and(|query| {
+            !query.is_empty()
+                && saved_query["query"] != query
+                && artifact.source["original_query_revision"] != revision(query.as_bytes())
+        }) {
+            return Ok(rejected("INVALID_ARGUMENT", "The retry reference identifies a different query. Use retry alone or start a new research query."));
+        }
         args = serde_json::from_value(saved_query.clone()).map_err(|err| err.to_string())?;
         &saved_query
     } else {
@@ -871,6 +899,18 @@ pub fn research(
     args.result_ref = args.result_ref.filter(|value| !value.is_empty());
     args.query = args.query.filter(|value| !value.is_empty());
     let query = args.query.as_deref().unwrap_or("");
+    let context_lines = args.context_lines.unwrap_or_default();
+    if context_lines > MAX_RESEARCH_CONTEXT_LINES
+        || (context_lines > 0
+            && (query.is_empty() || !matches!(args.scope.as_str(), "workspace" | "result")))
+    {
+        let mut error = rejected(
+            "INVALID_ARGUMENT",
+            &format!("Use context_lines from 0 through {MAX_RESEARCH_CONTEXT_LINES} with a workspace or result text query."),
+        );
+        error["field"] = json!("context_lines");
+        return Ok(error);
+    }
     let requested_limit = args.limit.unwrap_or(8);
     if requested_limit == 0 {
         let mut error = rejected(
@@ -972,7 +1012,7 @@ pub fn research(
                 let text = std::str::from_utf8(&bytes).map_err(|e| e.to_string())?;
                 if text.contains(query) {
                     let artifact = file_snapshot(journal, run, &display, &bytes)?;
-                    match_lines(journal, text, query, &artifact, &mut hits)?;
+                    match_lines(journal, text, query, &artifact, context_lines, &mut hits)?;
                 } else if display.contains(query) {
                     hits.push(journal, json!({"source":source(&display)}))?;
                 }
@@ -997,6 +1037,7 @@ pub fn research(
                     revision,
                     ..artifact
                 },
+                context_lines,
                 &mut hits,
             )?;
             inspected = 1;
@@ -1146,11 +1187,12 @@ pub fn research(
                     "The literal LF query had no matches. If the source may use CRLF, pass retry unchanged to run the CRLF query.",
                 ))
             });
-        if let Some((query, hint)) = alternative {
+        if let Some((alternative_query, hint)) = alternative {
             let mut retry = input.clone();
-            retry["query"] = json!(query);
+            retry["query"] = json!(alternative_query);
             let args = serde_json::to_vec(&retry).map_err(|err| err.to_string())?;
-            let saved = journal.artifact(run, json!({"kind":"research_retry"}), &args)?;
+            let source = json!({"kind":"research_retry","original_query_revision":revision(query.as_bytes())});
+            let saved = journal.artifact(run, source, &args)?;
             reply["query_hint"] = json!(hint);
             reply["retry"] = json!({"scope":"retry","result_ref":saved.result_ref});
         }

@@ -3,6 +3,8 @@ name = "source_harness"
 version = "0.1.0"
 edition = "2021"
 description = "Responses API native SourceHarness tool kernel and stateless transport loop"
+license = "MIT"
+repository = "https://github.com/qq824045252-ship-it/SourceHarness"
 
 [dependencies]
 diffy = "0.4"

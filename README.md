@@ -60,7 +60,7 @@ Session chat streams model text and tool progress. Enter `:steer <instruction>` 
 
 Use `history --event <n>` to inspect a request or receipt and `history --ref <ref>` to open its original text. A `result_ref` belongs to its session and retains the old content when a live file changes. A validation receipt includes `workspace_revision`. Use `fork --revision <hash> --to <new-directory>` with the same `--root` and `--session` to open that tested file snapshot in a fresh workspace.
 
-`research` searches the workspace, stored results, and session history. Literal queries can span lines. Pass the returned `next` arguments back to `research` to enumerate the same stored hit set. The report's `result_ref` refers to the complete set. `read`, `search_result`, and `research` in result scope expand reports up to 8 MiB. Larger reports return `RESEARCH_PAGED` with a cursor. A `preview_ref` covers only its labeled subset. Open `arguments_ref` with `read` to retrieve the original arguments of a historical tool call.
+`research` requires `scope` to select the workspace, stored results, session history, a page, or a retry. Literal queries can span lines. In workspace and result searches, `context_lines` adds up to six complete lines on each side of a hit. Context over 1,200 bytes includes a `read` request for the same range and snapshot. Pass the returned `next` arguments back to `research` to enumerate the same stored hit set. The report's `result_ref` refers to the complete set. `read`, `search_result`, and `research` in result scope expand reports up to 8 MiB. Larger reports return `RESEARCH_PAGED` with a cursor. A `preview_ref` covers only its labeled subset. Open `arguments_ref` with `read` to retrieve the original arguments of a historical tool call.
 
 `read` returns literal UTF-8 text and the source revision, with continuation coordinates when a result spans pages. `edit` matches exact old text by default. `--edit-mode range` and `--edit-mode patch` select alternative contracts. Use `--resume` with the original model, executable, tool options, and validation setup. Use `--continue` to open a linked run under current conditions and optionally supply a correction. It reports the observed state of outstanding calls for the model to decide what remains. A recovery conflict includes the diff from the planned file to the current file when both versions are available.
 
@@ -101,3 +101,9 @@ python -B scripts/eval_session.py --exe target/release/source_harness.exe --out 
 The runner scores the final workspace against fixtures and expected values held outside the model workspace. A passing run also needs a successful model-initiated validation of the delivered revision. The report keeps known token and latency totals and counts requests with missing usage separately.
 
 `feedback` compares direct tool receipts with automatic history enabled. `feedback-isolated` disables automatic history for all three modes and checks each archived request for receipt fields delivered through other channels. `context` runs four policy validations and a recap in one session per setting. It records actual request sizes and shared input items as the conversation grows. Provider usage records supply the token and cache counts.
+
+The [continuous-session evaluation](docs/evidence/natural-session-2026-11-27/README.md) runs successive user tasks in one workspace and includes an interrupted-write recovery run.
+
+## License
+
+SourceHarness is released under the [MIT License](LICENSE).

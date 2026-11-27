@@ -35,6 +35,13 @@ fn research_accepts_empty_defaults_for_optional_fields() {
     )
     .unwrap();
     assert_eq!(invalid["code"], "INVALID_ARGUMENT");
+    let missing_scope = research(&ctx, &mut journal, 1, None, &json!({})).unwrap();
+    assert_eq!(missing_scope["code"], "INVALID_ARGUMENT");
+    assert_eq!(missing_scope["reason"], "missing field `scope`");
+    assert_eq!(
+        super::definitions(super::EditMode::Text)[0]["parameters"]["required"],
+        json!(["scope"])
+    );
 }
 
 #[test]
@@ -103,6 +110,71 @@ fn literal_multiline_hits_report_exact_bytes_and_original_line_ranges() {
     assert_eq!(hit["range"]["start_line"], 4);
     assert_eq!(hit["range"]["end_line"], 5);
     assert_eq!(hit["text"], lf);
+}
+
+#[test]
+fn research_context_keeps_match_coordinates_and_reads_from_the_same_snapshot() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("service.cfg");
+    let long = "值".repeat(410);
+    let raw = format!("前言\r\n[primary]\r\ntimeout=30\r\nretries=2\r\n{long}\r\n");
+    fs::write(&path, &raw).unwrap();
+    let ctx = WorkspaceContext::new(WorkspaceConfig::with_root(root.path())).unwrap();
+    let mut journal = Journal::open(&root.path().join(".sourceharness")).unwrap();
+    let found = research(
+        &ctx,
+        &mut journal,
+        1,
+        None,
+        &json!({
+            "scope":"workspace","path":"service.cfg","query":"[primary]","context_lines":1,
+        }),
+    )
+    .unwrap();
+    let hit = &found["hits"][0];
+    assert_eq!(found["presentation"]["matching_items"], 1);
+    assert_eq!(found["source"]["scope"], "workspace");
+    assert_eq!(hit["range"]["start_line"], 2);
+    assert_eq!(hit["range"]["end_line"], 2);
+    assert_eq!(
+        hit["context"]["text"],
+        "前言\r\n[primary]\r\ntimeout=30\r\n"
+    );
+    assert_eq!(hit["context"]["range"]["byte_start"], 0);
+    assert_eq!(
+        hit["context"]["range"]["byte_end"],
+        "前言\r\n[primary]\r\ntimeout=30\r\n".len()
+    );
+    let reference = &hit["result_ref"];
+    let revision = &hit["revision"];
+    let missing_scope = research(
+        &ctx,
+        &mut journal,
+        1,
+        None,
+        &json!({
+            "result_ref":reference,"query":"timeout=30",
+        }),
+    )
+    .unwrap();
+    assert_eq!(missing_scope["code"], "INVALID_ARGUMENT");
+    fs::write(path, "new version\n").unwrap();
+
+    let found = research(&ctx, &mut journal, 1, None, &json!({
+        "scope":"result","result_ref":reference,"query":"timeout=30\r\nretries=2","context_lines":1,
+    })).unwrap();
+    let hit = &found["hits"][0];
+    assert_eq!(hit["revision"], *revision);
+    assert_eq!(hit["range"]["start_line"], 3);
+    assert_eq!(hit["range"]["end_line"], 4);
+    assert!(hit["context"].get("text").is_none());
+    assert_eq!(
+        hit["context"]["read"],
+        json!({"result_ref":reference,"start_line":2,"end_line":5})
+    );
+    let original = read(&ctx, &mut journal, 1, &hit["context"]["read"]).unwrap();
+    assert_eq!(original["content"], raw.split_once("\r\n").unwrap().1);
+    assert_eq!(original["revision"], *revision);
 }
 
 #[test]
@@ -520,6 +592,13 @@ fn history_search_matches_decoded_argument_and_result_text_without_losing_origin
     .unwrap();
     assert_eq!(retried["presentation"]["matching_items"], 2);
     assert_eq!(retried["hits"][1]["seq"], attempt);
+    let mut echoed = missed["retry"].clone();
+    echoed["query"] = json!(normalized);
+    let retried = research(&ctx, &mut journal, 2, Some(current_attempt), &echoed).unwrap();
+    assert_eq!(retried["presentation"]["matching_items"], 2);
+    echoed["query"] = json!("different query");
+    let invalid = research(&ctx, &mut journal, 2, Some(current_attempt), &echoed).unwrap();
+    assert_eq!(invalid["code"], "INVALID_ARGUMENT");
 }
 
 #[test]
