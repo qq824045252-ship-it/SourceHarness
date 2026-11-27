@@ -1,4 +1,4 @@
-"""Run the compact CLI against Qwen3.8 with independent workspace and answer checks."""
+"""Run the compact CLI with independent workspace and answer checks."""
 
 import argparse
 from collections import Counter
@@ -28,6 +28,7 @@ from session_wire_audit import request_context
 
 
 MODEL = "qwen3.8-flash"
+DEEPSEEK_MODEL = "deepseek-v4.1-flash"
 BASE_URL = "https://opencode.ai/inference/go/openai/v1"
 CHECKER = Path(__file__).with_name("check_qwen_benchmark.py").resolve()
 GENERATOR = Path(__file__).with_name("qwen_benchmark_cases.py").resolve()
@@ -111,6 +112,17 @@ class Gateway:
         except error.HTTPError as exc:
             row["status"] = exc.code
             raw_error = exc.read(4096)
+            if exc.code == 429:
+                retry_after = exc.headers.get("Retry-After")
+                if retry_after is not None and len(retry_after) <= 96:
+                    row["retry_after"] = retry_after
+                try:
+                    detail = json.loads(raw_error).get("error", {})
+                    code = detail.get("type") or detail.get("code")
+                    if isinstance(code, str) and re.fullmatch(r"[\w.-]{1,80}", code):
+                        row["error_type"] = code
+                except (ValueError, AttributeError):
+                    pass
             if exc.code == 403 and b"Model access is disabled" in raw_error:
                 row["failure"] = "model_access_disabled"
             else:
@@ -408,8 +420,8 @@ def benchmark(args, parser):
     if (url.scheme != "https" or not url.hostname or url.username is not None or url.query
             or url.fragment or not url.path.endswith("/v1")):
         parser.error("Use an HTTPS API base URL ending in /v1")
-    if not re.search(r"qwen[^\d]*3[.\-]8\b",args.model,re.I):
-        parser.error("Use an explicit Qwen3.8 model ID")
+    if args.model != DEEPSEEK_MODEL and not re.search(r"qwen[^\d]*3[.\-]8\b",args.model,re.I):
+        parser.error(f"Use an explicit Qwen3.8 model ID or {DEEPSEEK_MODEL}")
     selected = [case for case in all_cases if not args.case or case.id in args.case]
     if args.case and set(args.case) != {case.id for case in selected}:
         parser.error("Unknown case ID")
@@ -432,7 +444,7 @@ def benchmark(args, parser):
     key = os.environ.get("SOURCEHARNESS_QWEN_API_KEY")
     if not key and url.hostname == "opencode.ai" and url.port in (None,443):
         key = os.environ.get("SOURCEHARNESS_OPENCODE_GO_API_KEY")
-    key = key or getpass.getpass("Qwen benchmark credential (hidden): ")
+    key = key or getpass.getpass("Benchmark API credential (hidden): ")
     if not key or any(char.isspace() for char in key):
         parser.error("A nonempty API credential is required")
     if key.startswith("oc_sk_") and (url.hostname != "opencode.ai" or url.port not in (None,443)):
@@ -473,7 +485,7 @@ def benchmark(args, parser):
                     for job in as_completed(futures):
                         complete(futures[job],job.result())
     if gateway.failure:
-        print(f"Qwen gateway stopped the batch: {gateway.failure}",file=sys.stderr)
+        print(f"Benchmark gateway stopped the batch: {gateway.failure}",file=sys.stderr)
     return int(gateway.blocked.is_set() or any(case.id not in rows for case in pending))
 
 

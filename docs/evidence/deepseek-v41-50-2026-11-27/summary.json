@@ -1,0 +1,445 @@
+{
+  "cache_telemetry": {
+    "attempts_without_reported_usage": 0,
+    "cache_metered_input_tokens": 113758,
+    "cache_metered_requests": 83,
+    "cached_input_tokens": 80640
+  },
+  "case_seconds_p50": 24.578,
+  "case_seconds_p95": 41.999,
+  "categories": {
+    "guard": {
+      "evaluated": 0,
+      "passed": 0,
+      "planned": 5
+    },
+    "inspect": {
+      "evaluated": 10,
+      "passed": 9,
+      "planned": 10
+    },
+    "patch": {
+      "evaluated": 8,
+      "passed": 8,
+      "planned": 10
+    },
+    "repair": {
+      "evaluated": 0,
+      "passed": 0,
+      "planned": 10
+    },
+    "report": {
+      "evaluated": 3,
+      "passed": 3,
+      "planned": 8
+    },
+    "workflow": {
+      "evaluated": 0,
+      "passed": 0,
+      "planned": 7
+    }
+  },
+  "evaluated": 21,
+  "independent_passed": 20,
+  "infrastructure_attempts": [
+    {
+      "case": "report.qualified-count.00",
+      "known_usage": {
+        "input_tokens": 7830,
+        "output_tokens": 595,
+        "reasoning_tokens": 122,
+        "total_tokens": 8425
+      },
+      "provider_failures": [
+        "upstream_http_429",
+        "upstream_http_429"
+      ],
+      "provider_statuses": [
+        200,
+        200,
+        200,
+        200,
+        200,
+        null,
+        null
+      ],
+      "requests": 7
+    },
+    {
+      "case": "report.newest-per-group.00",
+      "known_usage": {
+        "input_tokens": 8629,
+        "output_tokens": 623,
+        "reasoning_tokens": 190,
+        "total_tokens": 9252
+      },
+      "provider_failures": [
+        "upstream_http_429",
+        "upstream_http_429"
+      ],
+      "provider_statuses": [
+        200,
+        200,
+        200,
+        200,
+        200,
+        null,
+        null
+      ],
+      "requests": 7
+    },
+    {
+      "case": "patch.tsv-row.00",
+      "known_usage": {
+        "input_tokens": 4778,
+        "output_tokens": 364,
+        "reasoning_tokens": 56,
+        "total_tokens": 5142
+      },
+      "provider_failures": [
+        "upstream_http_429",
+        "upstream_http_429"
+      ],
+      "provider_statuses": [
+        200,
+        200,
+        200,
+        200,
+        null,
+        null
+      ],
+      "requests": 6
+    },
+    {
+      "case": "patch.unicode-quoted.00",
+      "known_usage": {
+        "input_tokens": 4696,
+        "output_tokens": 255,
+        "reasoning_tokens": 49,
+        "total_tokens": 4951
+      },
+      "provider_failures": [
+        "upstream_http_429",
+        "upstream_http_429"
+      ],
+      "provider_statuses": [
+        200,
+        200,
+        200,
+        200,
+        429,
+        null
+      ],
+      "requests": 6
+    },
+    {
+      "case": "patch.section-insert.00",
+      "known_usage": {
+        "input_tokens": 4543,
+        "output_tokens": 306,
+        "reasoning_tokens": 63,
+        "total_tokens": 4849
+      },
+      "provider_failures": [
+        "upstream_http_429",
+        "upstream_http_429"
+      ],
+      "provider_statuses": [
+        200,
+        200,
+        200,
+        200,
+        429,
+        null
+      ],
+      "requests": 6
+    }
+  ],
+  "known_usage": {
+    "input_tokens": 113758,
+    "output_tokens": 8321,
+    "reasoning_tokens": 2658,
+    "total_tokens": 122079
+  },
+  "manifest_sha256": "3c4bc30467be0a81475e9104c04bfb24817714c8ee714e53fbd18b7a08cd41c8",
+  "passed": 20,
+  "pauses": {},
+  "phase_failure_reasons": {
+    "answer differs": 1
+  },
+  "planned": 50,
+  "prefix_exact_pairs": 62,
+  "prefix_pairs": 62,
+  "requests": 83,
+  "requests_p50": 4,
+  "requests_p95": 7,
+  "settings": {
+    "base_url": "https://opencode.ai/inference/go/openai/v1",
+    "binary_sha256": "767912a95564aa82ed956141a4332abd611fc03cf84f8fca554f745921f942de",
+    "checker_sha256": "18440c1514184c714df96089d8cbbd62432951e5f404c3ff059242c9aed3d957",
+    "model": "deepseek-v4.1-flash",
+    "phase_timeout_seconds": 600
+  },
+  "shapes": {
+    "guard.incompatible-checks": {
+      "evaluated": 0,
+      "passed": 0,
+      "planned": 1
+    },
+    "guard.missing-anchor": {
+      "evaluated": 0,
+      "passed": 0,
+      "planned": 1
+    },
+    "guard.missing-input": {
+      "evaluated": 0,
+      "passed": 0,
+      "planned": 1
+    },
+    "guard.must-delete": {
+      "evaluated": 0,
+      "passed": 0,
+      "planned": 1
+    },
+    "guard.noisy-oracle": {
+      "evaluated": 0,
+      "passed": 0,
+      "planned": 1
+    },
+    "inspect.effective-setting": {
+      "evaluated": 1,
+      "passed": 1,
+      "planned": 1
+    },
+    "inspect.lower-median": {
+      "evaluated": 1,
+      "passed": 1,
+      "planned": 1
+    },
+    "inspect.negative-groups": {
+      "evaluated": 1,
+      "passed": 1,
+      "planned": 1
+    },
+    "inspect.newest-per-group": {
+      "evaluated": 1,
+      "passed": 1,
+      "planned": 1
+    },
+    "inspect.paged-window": {
+      "evaluated": 1,
+      "passed": 1,
+      "planned": 1
+    },
+    "inspect.qualified-count": {
+      "evaluated": 1,
+      "passed": 1,
+      "planned": 1
+    },
+    "inspect.qualifying-ids": {
+      "evaluated": 1,
+      "passed": 1,
+      "planned": 1
+    },
+    "inspect.ranked-three": {
+      "evaluated": 1,
+      "passed": 1,
+      "planned": 1
+    },
+    "inspect.status-cross-tab": {
+      "evaluated": 1,
+      "passed": 1,
+      "planned": 1
+    },
+    "inspect.unique-times": {
+      "evaluated": 1,
+      "passed": 0,
+      "planned": 1
+    },
+    "patch.crlf-lines": {
+      "evaluated": 1,
+      "passed": 1,
+      "planned": 1
+    },
+    "patch.dedup-aliases": {
+      "evaluated": 1,
+      "passed": 1,
+      "planned": 1
+    },
+    "patch.json-property": {
+      "evaluated": 1,
+      "passed": 1,
+      "planned": 1
+    },
+    "patch.relative-links": {
+      "evaluated": 1,
+      "passed": 1,
+      "planned": 1
+    },
+    "patch.section-insert": {
+      "evaluated": 0,
+      "passed": 0,
+      "planned": 1
+    },
+    "patch.section-match": {
+      "evaluated": 1,
+      "passed": 1,
+      "planned": 1
+    },
+    "patch.toml-scope": {
+      "evaluated": 1,
+      "passed": 1,
+      "planned": 1
+    },
+    "patch.tsv-row": {
+      "evaluated": 0,
+      "passed": 0,
+      "planned": 1
+    },
+    "patch.unicode-quoted": {
+      "evaluated": 1,
+      "passed": 1,
+      "planned": 1
+    },
+    "patch.version-sync": {
+      "evaluated": 1,
+      "passed": 1,
+      "planned": 1
+    },
+    "repair.index-matches": {
+      "evaluated": 0,
+      "passed": 0,
+      "planned": 1
+    },
+    "repair.inventory-delta": {
+      "evaluated": 0,
+      "passed": 0,
+      "planned": 1
+    },
+    "repair.joined-labels": {
+      "evaluated": 0,
+      "passed": 0,
+      "planned": 1
+    },
+    "repair.key-value": {
+      "evaluated": 0,
+      "passed": 0,
+      "planned": 1
+    },
+    "repair.lower-median": {
+      "evaluated": 0,
+      "passed": 0,
+      "planned": 1
+    },
+    "repair.override-map": {
+      "evaluated": 0,
+      "passed": 0,
+      "planned": 1
+    },
+    "repair.range-runs": {
+      "evaluated": 0,
+      "passed": 0,
+      "planned": 1
+    },
+    "repair.rounded-cents": {
+      "evaluated": 0,
+      "passed": 0,
+      "planned": 1
+    },
+    "repair.stable-dedup": {
+      "evaluated": 0,
+      "passed": 0,
+      "planned": 1
+    },
+    "repair.status-filter": {
+      "evaluated": 0,
+      "passed": 0,
+      "planned": 1
+    },
+    "report.lower-median": {
+      "evaluated": 1,
+      "passed": 1,
+      "planned": 1
+    },
+    "report.negative-groups": {
+      "evaluated": 0,
+      "passed": 0,
+      "planned": 1
+    },
+    "report.newest-per-group": {
+      "evaluated": 0,
+      "passed": 0,
+      "planned": 1
+    },
+    "report.qualified-count": {
+      "evaluated": 0,
+      "passed": 0,
+      "planned": 1
+    },
+    "report.qualifying-ids": {
+      "evaluated": 1,
+      "passed": 1,
+      "planned": 1
+    },
+    "report.ranked-three": {
+      "evaluated": 1,
+      "passed": 1,
+      "planned": 1
+    },
+    "report.status-cross-tab": {
+      "evaluated": 0,
+      "passed": 0,
+      "planned": 1
+    },
+    "report.unique-times": {
+      "evaluated": 0,
+      "passed": 0,
+      "planned": 1
+    },
+    "workflow.exec-observation": {
+      "evaluated": 0,
+      "passed": 0,
+      "planned": 1
+    },
+    "workflow.history-audit": {
+      "evaluated": 0,
+      "passed": 0,
+      "planned": 1
+    },
+    "workflow.kill-recover": {
+      "evaluated": 0,
+      "passed": 0,
+      "planned": 1
+    },
+    "workflow.live-observation": {
+      "evaluated": 0,
+      "passed": 0,
+      "planned": 1
+    },
+    "workflow.multi-phase": {
+      "evaluated": 0,
+      "passed": 0,
+      "planned": 1
+    },
+    "workflow.rollback-trial": {
+      "evaluated": 0,
+      "passed": 0,
+      "planned": 1
+    },
+    "workflow.validation-drift": {
+      "evaluated": 0,
+      "passed": 0,
+      "planned": 1
+    }
+  },
+  "tool_errors": {
+    "EXEC_FAILED": 4
+  },
+  "tools": {
+    "edit": 11,
+    "exec": 39,
+    "read": 3,
+    "validate": 13,
+    "write": 3
+  }
+}
