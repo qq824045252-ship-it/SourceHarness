@@ -32,6 +32,7 @@ CASES = {
     "named-conflict": "The configured mode-a and mode-b checks both need to pass on the same workspace. Try each check, investigate whether that is possible, and report the verified outcome.",
     "sandbox-write": "Set the live legacy.txt status to ready while preserving CRLF. You can try the change in exec first. Run the configured acceptance check on the resulting workspace.",
     "rollback-cycle": "Test alternate candidates and use rollback to restore the checkpoint when a candidate fails validation.",
+    "empty-rollback": "Investigate the missing fixture after checking whether rollback changes the workspace.",
 }
 
 # The original cohort is reproduced with the first nine cases.
@@ -39,7 +40,7 @@ ORIGINAL = tuple(CASES)[:9]
 PAUSE_BY = {
     "noisy-validation": 3, "static-noise": 3, "alternating-checks": 5,
     "empty-search": 4, "failed-probes": 4, "bad-edits": 3, "named-conflict": 5,
-    "rollback-cycle": 5,
+    "rollback-cycle": 5, "empty-rollback": 4,
 }
 
 CHECKER = """from pathlib import Path
@@ -89,6 +90,8 @@ def actions(case, round_number):
             return [tool("validate")]
         change = tool("write", path="state.txt", content="header\n") if round_number % 2 == 0 else tool("rollback")
         return [change, tool("validate")]
+    if case == "empty-rollback":
+        return [tool("rollback"), tool("exec", command=f"cat absent-{round_number}.txt")]
     if case == "empty-search":
         return [tool("exec", command=f"find . -type f -name 'missing-{round_number}.marker'", timeout_seconds=5 + round_number)]
     if case == "failed-probes":
@@ -233,6 +236,8 @@ def run_case(exe, directory, case, paired=None, token=None):
         "validation_outputs":len({event["data"]["streams"]["stderr"] for event in events if event["kind"]=="validation_receipt"}),
         "tool_counts":dict(Counter(row["tool"] for row in trace)),
         "rollback_receipts":sum(event["kind"] == "rollback_receipt" for event in events),
+        "changing_rollbacks":sum(event["kind"] == "rollback_receipt" and event["data"]["from"] != event["data"]["target"]
+                                 for event in events),
         "errors":dict(Counter(row["code"] for row in trace if row["code"])),
         "prefix_pairs":max(0,len(wire)-1),
         "prefix_preserved":all(b["input"][:len(a["input"])]==a["input"] and b["instructions"]==a["instructions"]
@@ -251,7 +256,9 @@ def run_case(exe, directory, case, paired=None, token=None):
                               and pauses[0]["reason"] == "LOOP_GUARD_TRIGGERED"
                               and pauses[0]["round"] <= PAUSE_BY[case] and data["prefix_preserved"])
             if case == "rollback-cycle":
-                data["passed"] = data["passed"] and data["rollback_receipts"] == 2
+                data["passed"] = data["passed"] and data["changing_rollbacks"] == 2
+            if case == "empty-rollback":
+                data["passed"] = data["passed"] and data["rollback_receipts"] == 4 and data["changing_rollbacks"] == 0
         else:
             data["passed"] = (data["natural_end"] and not pauses and data.get("independent_passed", True)
                               and data["prefix_preserved"])

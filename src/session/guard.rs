@@ -50,7 +50,8 @@ pub(super) fn compact_signal(
     let mut same_exact = true;
     let mut same_stall = stall.is_some();
     for event in journal.events.iter().rev().take_while(|event| event.run == run) {
-        if matches!(event.kind.as_str(), "steer" | "rollback_receipt" | "paused" | "edit_receipt")
+        if matches!(event.kind.as_str(), "steer" | "paused" | "edit_receipt")
+            || (event.kind == "rollback_receipt" && event.data["from"] != event.data["target"])
             || (event.kind == "validation_receipt" && event.data["passed"] == true)
         {
             break;
@@ -152,7 +153,7 @@ fn validation_signal(journal: &Journal, run: usize, round: usize, result: &Value
     for event in journal.events.iter().rev().take_while(|event| event.run == run) {
         match event.kind.as_str() {
             "steer" | "paused" => break,
-            "rollback_receipt" => same_diagnostic = false,
+            "rollback_receipt" if event.data["from"] != event.data["target"] => same_diagnostic = false,
             "validation_receipt" if event.data["passed"] == true
                 && event.data["workspace_changed_during_check"] != true
                 && validation_conditions(&event.data) == conditions =>
