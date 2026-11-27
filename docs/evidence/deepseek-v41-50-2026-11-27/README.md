@@ -6,6 +6,21 @@ A strict pass requires the expected answer or workspace behavior, final-revision
 
 The first run used eight workers. An upstream 429 interrupted five in-flight cases after 20 results had been saved. OpenCode Go's usage meter showed quota available. The next invocation restricted scheduling to the selected 50 IDs and used three workers. Cases with confirmed model responses and completed evaluation are recorded in compressed JSON Lines files. Interrupted attempts stay outside the pass-rate denominator and appear separately in the summary.
 
+## Results
+
+The 50 selected real-model cases completed, with 46 strict passes (92%). Across evaluated cases, the CLI recorded 267 requests and 486,443 metered tokens. Requests per case were 5 at the median and 11 at the 95th percentile. All 217 adjacent requests preserved the exact input prefix. The five infrastructure-interrupted attempts and their usage are reported separately.
+
+| Family | Strict passes |
+| --- | ---: |
+| Inspect | 9/10 |
+| Patch | 10/10 |
+| Report | 8/8 |
+| Repair | 10/10 |
+| Workflow | 6/7 |
+| Guard | 3/5 |
+
+Two outputs violated the requested JSON-only format. The historical audit gave the correct old and current numbers with an unverifiable reference. The inconsistent-check case triggered the loop guard while its protected file still differed from the original. The kill-recovery workflow and explicit rollback workflow passed. [Per-case data, first 21](completed-0001-0021.jsonl.gz) · [Per-case data, remaining 29](completed-0022-0050.jsonl.gz)
+
 ## Reproduce
 
 Use the Qwen benchmark runner with the DeepSeek model ID on Linux.
