@@ -185,3 +185,78 @@ fn create_and_resume_reject_nested_directories_redirected_outside_workspace() {
     #[cfg(unix)]
     fs::remove_file(link).unwrap();
 }
+
+#[test]
+fn edit_text_diagnoses_line_ending_mismatch_and_anchor_lines() {
+    let root = tempfile::tempdir().unwrap();
+    let ctx = WorkspaceContext::new(WorkspaceConfig::with_root(root.path())).unwrap();
+    let mut journal = Journal::open(&root.path().join(".sourceharness")).unwrap();
+    let file = root.path().join("service.cfg");
+    let raw = b"header\r\n[primary]\r\ntimeout=30\r\nretries=2\r\n";
+    fs::write(&file, raw).unwrap();
+
+    let crlf_err = modify(
+        &ctx,
+        &mut journal,
+        1,
+        "1.1.1",
+        "edit",
+        EditMode::Text,
+        &json!({
+            "path": "service.cfg",
+            "expected_revision": revision(raw),
+            "changes": [{"old_text": "timeout=30\nretries=2", "new_text": "timeout=60\nretries=2"}]
+        }),
+    )
+    .unwrap();
+    assert_eq!(crlf_err["code"], "TEXT_NOT_FOUND");
+    assert_eq!(crlf_err["line_ending_mismatch"], json!({"file":"crlf","old_text":"lf"}));
+    assert_eq!(crlf_err["candidate_range"], json!({"start_line":3,"end_line":4}));
+    assert_eq!(crlf_err["read"]["start_line"], 3);
+    assert_eq!(crlf_err["read"]["end_line"], 4);
+
+    let anchor_err = modify(
+        &ctx,
+        &mut journal,
+        1,
+        "1.2.1",
+        "edit",
+        EditMode::Text,
+        &json!({
+            "path": "service.cfg",
+            "expected_revision": revision(raw),
+            "changes": [{"old_text": "  timeout=30\r\nwrong_next_line", "new_text": "timeout=60"}]
+        }),
+    )
+    .unwrap();
+    assert_eq!(anchor_err["code"], "TEXT_NOT_FOUND");
+    assert_eq!(anchor_err["anchor_lines"], json!([3]));
+    assert!(anchor_err["read"]["result_ref"].is_string());
+}
+
+#[test]
+fn normal_no_op_edit_is_rejected_without_creating_intent() {
+    let root = tempfile::tempdir().unwrap();
+    let ctx = WorkspaceContext::new(WorkspaceConfig::with_root(root.path())).unwrap();
+    let mut journal = Journal::open(&root.path().join(".sourceharness")).unwrap();
+    let file = root.path().join("note.txt");
+    let raw = b"alpha=1\n";
+    fs::write(&file, raw).unwrap();
+
+    let rejected = modify(
+        &ctx,
+        &mut journal,
+        1,
+        "1.1.1",
+        "edit",
+        EditMode::Text,
+        &json!({
+            "path": "note.txt",
+            "expected_revision": revision(raw),
+            "changes": [{"old_text": "alpha=1", "new_text": "alpha=1"}]
+        }),
+    )
+    .unwrap();
+    assert_eq!(rejected["code"], "NO_OP_EDIT");
+    assert!(!journal.events.iter().any(|event| event.kind == "edit_intent"));
+}

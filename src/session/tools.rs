@@ -958,10 +958,31 @@ pub fn research(
         return report.page(journal, run, &artifact, offset, limit);
     }
     if args.offset.unwrap_or_default() != 0 {
-        return Ok(rejected(
-            "INVALID_ARGUMENT",
-            "Use offset only with scope=page.",
-        ));
+        let mut error = rejected("INVALID_ARGUMENT", "Use offset only with scope=page.");
+        if let (Some(reference), Some(offset)) = (
+            args.result_ref.as_deref().filter(|reference| {
+                journal
+                    .resolve(reference)
+                    .is_some_and(|artifact| artifact.source["research_report"].is_string())
+            }),
+            args.offset,
+        ) {
+            error["suggested"] = json!({"scope":"page","result_ref":reference,"offset":offset});
+        }
+        return Ok(error);
+    }
+    if let Some(reference) = args.result_ref.as_deref() {
+        if journal
+            .resolve(reference)
+            .is_some_and(|artifact| artifact.source["kind"] == "research_retry")
+        {
+            let mut error = rejected(
+                "INVALID_ARGUMENT",
+                "Use scope=retry with this retry reference.",
+            );
+            error["suggested"] = json!({"scope":"retry","result_ref":reference});
+            return Ok(error);
+        }
     }
 
     let mut hits = ResearchHits::default();
@@ -1260,10 +1281,7 @@ fn edit_text(old: &str, changes: Vec<TextChange>) -> Result<String, Value> {
             ));
         }
         let Some(start) = old.find(&change.old_text) else {
-            return Err(rejected(
-                "TEXT_NOT_FOUND",
-                "old_text is absent. Read the exact source range.",
-            ));
+            return Err(missing_text_error(old, &change.old_text));
         };
         let first_char = change
             .old_text
@@ -1291,6 +1309,53 @@ fn edit_text(old: &str, changes: Vec<TextChange>) -> Result<String, Value> {
         located.push((start, start + change.old_text.len(), change.new_text));
     }
     transform(old, located)
+}
+
+fn missing_text_error(old: &str, needle: &str) -> Value {
+    let mut error = rejected(
+        "TEXT_NOT_FOUND",
+        "old_text is absent. Read the exact source range.",
+    );
+    let file_crlf = old.contains("\r\n");
+    let needle_crlf = needle.contains("\r\n");
+    let needle_lf = needle.contains('\n') && !needle_crlf;
+    let swapped = if file_crlf && needle_lf {
+        Some((needle.replace('\n', "\r\n"), "crlf", "lf"))
+    } else if !file_crlf && needle_crlf {
+        Some((needle.replace("\r\n", "\n"), "lf", "crlf"))
+    } else {
+        None
+    };
+    if let Some((converted, file_eol, needle_eol)) = swapped {
+        if let Some(start) = old.find(&converted) {
+            let offsets = line_offsets(old);
+            let start_line = line_location(&offsets, start);
+            let end_line = line_location(&offsets, start + converted.len().saturating_sub(1));
+            error["reason"] = json!(format!(
+                "old_text is absent. The file uses {file_eol} line endings while old_text uses {needle_eol}; read the exact range before retrying."
+            ));
+            error["line_ending_mismatch"] = json!({"file":file_eol,"old_text":needle_eol});
+            error["candidate_range"] = json!({"start_line":start_line,"end_line":end_line});
+            return error;
+        }
+    }
+    if let Some(anchor) = needle.lines().map(str::trim).find(|line| !line.is_empty()) {
+        let mut total_lines = 0usize;
+        let mut anchor_lines = Vec::new();
+        for (idx, line) in old.lines().enumerate() {
+            total_lines = idx + 1;
+            if line.trim().contains(anchor) && anchor_lines.len() < 3 {
+                anchor_lines.push(idx + 1);
+            }
+        }
+        if let Some(&first) = anchor_lines.first() {
+            let start_line = first.saturating_sub(2).max(1);
+            let end_line = (first + 2).min(total_lines.max(1));
+            error["anchor_lines"] = json!(anchor_lines);
+            error["candidate_range"] = json!({"start_line":start_line,"end_line":end_line});
+        }
+    }
+    error
 }
 
 fn edit_range(old: &str, changes: Vec<RangeChange>) -> Result<String, Value> {
@@ -1454,8 +1519,16 @@ pub fn modify(
         Ok(next) => next,
         Err(mut error) => {
             let artifact = file_snapshot(journal, run, &path, old.as_bytes())?;
+            error["source"] = json!(artifact.source);
             error["result_ref"] = json!(artifact.result_ref);
             error["current_revision"] = json!(artifact.revision);
+            if let Some(range) = error.get("candidate_range").cloned() {
+                error["read"] = json!({
+                    "result_ref": artifact.result_ref,
+                    "start_line": range["start_line"],
+                    "end_line": range["end_line"]
+                });
+            }
             return Ok(error);
         }
     };
@@ -1469,6 +1542,17 @@ pub fn modify(
         journal.put(bytes)?;
     }
     let after = journal.put(next.as_bytes())?;
+    if before.as_deref() == Some(after.as_str()) {
+        let artifact = file_snapshot(journal, run, &path, old.as_bytes())?;
+        let mut error = rejected(
+            "NO_OP_EDIT",
+            "The requested change produces identical file bytes; nothing was written.",
+        );
+        error["source"] = json!(artifact.source);
+        error["current_revision"] = json!(artifact.revision);
+        error["result_ref"] = json!(artifact.result_ref);
+        return Ok(error);
+    }
     let intent = Intent {
         operation: operation.to_owned(),
         path,

@@ -1,3 +1,4 @@
+mod guard;
 mod history;
 mod inbox;
 mod journal;
@@ -352,15 +353,32 @@ impl Session {
         gate.active_run = Some(run);
         drop(gate);
         let mut turn = None::<(TurnMetrics, Instant)>;
+        let mut last_notice_revision = None::<String>;
         for step in 0..=client.config().max_turns {
             while let Some(call) = checkpoint.pending.pop_front() {
                 self.collect_steering(&mut checkpoint, poll_steering)?;
-                let output = if checkpoint.queued_steering.is_empty() {
+                let (output, guard_pause) = if checkpoint.queued_steering.is_empty() {
                     self.execute(run, checkpoint.round, &call, observer)?
                 } else {
-                    self.close_steered_call(run, checkpoint.round, &call, observer)?
+                    (self.close_steered_call(run, checkpoint.round, &call, observer)?, None)
                 };
                 checkpoint.input.push(output);
+                if let Some(details) = guard_pause {
+                    if let Some((mut metrics, start)) = turn.take() {
+                        metrics.latency_ms = start.elapsed().as_millis();
+                        observer.on_turn_complete(&metrics);
+                    }
+                    self.journal.append(
+                        run,
+                        "paused",
+                        json!({"reason":"LOOP_GUARD_TRIGGERED","round":checkpoint.round,"guard":details}),
+                    )?;
+                    return Err(format!(
+                        "Loop guard paused the run ({}): {}. Use --continue with guidance or inspect history.",
+                        details["kind"].as_str().unwrap_or("LOOP"),
+                        details["reason"].as_str().unwrap_or("Repeated state detected")
+                    ));
+                }
             }
             if let Some((mut metrics, start)) = turn.take() {
                 metrics.latency_ms = start.elapsed().as_millis();
@@ -394,7 +412,18 @@ impl Session {
                 changes,
                 records,
             );
-            body["instructions"] = json!(format!("{INSTRUCTIONS}{}", auxiliary.suffix));
+            body["instructions"] = json!(format!("{INSTRUCTIONS}{}", auxiliary.static_suffix));
+            if !auxiliary.dynamic_context.is_empty()
+                && (round == 1 || auxiliary.notice_revision != last_notice_revision)
+            {
+                if let Some(items) = body["input"].as_array_mut() {
+                    items.push(json!({
+                        "role": "user",
+                        "content": auxiliary.dynamic_context.trim_start()
+                    }));
+                }
+                last_notice_revision = auxiliary.notice_revision.clone();
+            }
             let exchange = self.request(client, &checkpoint, &body, &auxiliary.audit, observer);
             if exchange.is_err() {
                 self.collect_steering(&mut checkpoint, poll_steering)?;
@@ -698,7 +727,7 @@ impl Session {
         Ok(function_output(call, &result))
     }
 
-    fn execute(&mut self, run: usize, round: usize, call: &Call, observer: &mut dyn RunObserver) -> Result<Value, String> {
+    fn execute(&mut self, run: usize, round: usize, call: &Call, observer: &mut dyn RunObserver) -> Result<(Value, Option<Value>), String> {
         let args: Result<Value, _> = serde_json::from_str(&call.raw_args);
         let input = self.journal.put(call.raw_args.as_bytes())?;
         let attempt = self.journal.append(
@@ -751,6 +780,30 @@ impl Session {
             }
             model_output = Some(envelope);
         }
+        let guard_action = guard::evaluate(
+            &self.journal,
+            run,
+            &guard::PendingOutcome {
+                operation: &call.operation,
+                attempt,
+                name: &call.name,
+                result: &result,
+            },
+        );
+        let guard_pause = match guard_action {
+            guard::Action::Allow => None,
+            guard::Action::Warn(warning) => {
+                let mut candidate = model_output.clone().unwrap_or_else(|| result.clone());
+                if let Some(map) = candidate.as_object_mut() {
+                    map.insert("loop_warning".to_owned(), warning);
+                    if json_byte_len(&candidate) <= MAX_RESPONSE_BYTES {
+                        model_output = Some(candidate);
+                    }
+                }
+                None
+            }
+            guard::Action::Pause(details) => Some(details),
+        };
         let output = self.journal.store_json(&result)?;
         let elapsed = started.elapsed().as_millis();
         let mut data = json!({"operation":call.operation,"attempt":attempt,"round":round,
@@ -763,7 +816,7 @@ impl Session {
         self.journal.append(run, "tool_result", data)?;
         let delivered = model_output.as_ref().unwrap_or(&result);
         observer.on_tool_call(&tool_trace(call, round, delivered, elapsed));
-        Ok(function_output(call, delivered))
+        Ok((function_output(call, delivered), guard_pause))
     }
 
     fn project_workspace_evidence(

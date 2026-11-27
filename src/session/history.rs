@@ -13,7 +13,9 @@ const FRESHNESS_INSTRUCTIONS: &str = "Use fresh workspace evidence for requireme
 const HISTORY_HEADER: &str = "\nRelated recorded evidence. For changes since an earlier check, use validation_provenance with scope=previous_runs. For what this run tested, use scope=current_run. A validation receipt establishes the workspace and conditions it actually tested.\n";
 
 pub struct Auxiliary {
-    pub suffix: String,
+    pub static_suffix: String,
+    pub dynamic_context: String,
+    pub notice_revision: Option<String>,
     pub audit: Value,
 }
 
@@ -198,11 +200,12 @@ pub fn prepare(
     workspace_changes: Vec<Value>,
     mut records: Vec<Value>,
 ) -> Auxiliary {
-    let mut suffix = String::new();
-    if freshness {
-        suffix.push('\n');
-        suffix.push_str(FRESHNESS_INSTRUCTIONS);
-    }
+    let static_suffix = if freshness {
+        format!("\n{FRESHNESS_INSTRUCTIONS}")
+    } else {
+        String::new()
+    };
+    let mut dynamic_context = String::new();
     let all_changes = workspace_changes.len();
     let mut changes = Vec::new();
     for item in workspace_changes {
@@ -213,15 +216,15 @@ pub fn prepare(
         }
     }
     if all_changes > 0 {
-        suffix.push_str(&changes_section(all_changes, &changes));
+        dynamic_context.push_str(&changes_section(all_changes, &changes));
     }
     let available = records.len();
     while !records.is_empty() {
         let events = json!(records).to_string();
         let facts = grouped(&records).to_string();
-        if suffix.len() + HISTORY_HEADER.len() + events.len().max(facts.len()) <= budget {
-            suffix.push_str(HISTORY_HEADER);
-            suffix.push_str(match mode {
+        if dynamic_context.len() + HISTORY_HEADER.len() + events.len().max(facts.len()) <= budget {
+            dynamic_context.push_str(HISTORY_HEADER);
+            dynamic_context.push_str(match mode {
                 HistoryMode::Facts => &facts,
                 HistoryMode::Events => &events,
                 HistoryMode::Conversation => unreachable!("Conversation has no additional records"),
@@ -231,21 +234,26 @@ pub fn prepare(
         records.pop();
     }
     let facts_revision = revision(json!(records).to_string().as_bytes());
+    let notice_revision = (!dynamic_context.is_empty()).then(|| revision(dynamic_context.as_bytes()));
     Auxiliary {
         audit: json!({
             "representation":mode.label(),
+            "delivery":"input_tail",
             "fact_count":records.len(),
             "available_facts":available,
             "facts_revision":facts_revision,
+            "notice_revision":notice_revision,
             "freshness_instructions":freshness,
             "stale_projection":projection,
             "workspace_changes_shown":changes.len(),
             "workspace_changes_available":all_changes,
-            "bytes":suffix.len(),
+            "bytes":dynamic_context.len(),
             "budget_bytes":budget,
             "tokens":null,
         }),
-        suffix,
+        static_suffix,
+        dynamic_context,
+        notice_revision,
     }
 }
 

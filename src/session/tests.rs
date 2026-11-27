@@ -379,7 +379,8 @@ fn historical_validation_distinguishes_changed_conditions_from_unchanged_workspa
     })).unwrap();
     let records = history::related(&session.ctx, &session.journal, 2, &profile, &commands);
     let auxiliary = history::prepare(HistoryMode::Events, false, false, 8192, Vec::new(), records);
-    let sent: Value = serde_json::from_str(auxiliary.suffix.lines().last().unwrap()).unwrap();
+    assert!(auxiliary.static_suffix.is_empty());
+    let sent: Value = serde_json::from_str(auxiliary.dynamic_context.lines().last().unwrap()).unwrap();
     assert_eq!(sent[0]["validation_event"], receipt);
     assert_eq!(sent[0]["scope"], "previous_runs");
     assert_eq!(sent[0]["comparisons"]["tools_revision"]["status"], "changed");
@@ -398,8 +399,8 @@ fn history_representations_send_the_same_records_under_the_same_budget() {
     let options = |mode| history::prepare(mode, false, false, 1024, Vec::new(), records.clone());
     let events = options(HistoryMode::Events);
     let facts = options(HistoryMode::Facts);
-    let sent_events: Value = serde_json::from_str(events.suffix.lines().last().unwrap()).unwrap();
-    let sent_facts: Value = serde_json::from_str(facts.suffix.lines().last().unwrap()).unwrap();
+    let sent_events: Value = serde_json::from_str(events.dynamic_context.lines().last().unwrap()).unwrap();
+    let sent_facts: Value = serde_json::from_str(facts.dynamic_context.lines().last().unwrap()).unwrap();
     for record in sent_events.as_array().unwrap() {
         assert!(sent_facts[record["kind"].as_str().unwrap()]
             .as_array().unwrap().contains(record));
@@ -408,8 +409,9 @@ fn history_representations_send_the_same_records_under_the_same_budget() {
     assert_eq!(events.audit["fact_count"], 2);
     assert_eq!(events.audit["facts_revision"], facts.audit["facts_revision"]);
     for prepared in [events, facts] {
-        assert!(prepared.suffix.len() <= 1024);
-        assert_eq!(prepared.audit["bytes"], prepared.suffix.len());
+        assert!(prepared.static_suffix.is_empty());
+        assert!(prepared.dynamic_context.len() <= 1024);
+        assert_eq!(prepared.audit["bytes"], prepared.dynamic_context.len());
         assert_eq!(prepared.audit["freshness_instructions"], false);
         assert_eq!(prepared.audit["stale_projection"], false);
         assert!(prepared.audit["tokens"].is_null());

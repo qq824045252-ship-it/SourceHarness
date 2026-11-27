@@ -71,13 +71,17 @@ def read_events(root):
 def visible_facts(root, request):
     blob = root / ".sourceharness/sessions/work/blobs" / request["input"]
     wire = json.loads(blob.read_bytes())
-    _, marker, tail = wire.get("instructions", "").partition(
-        "A validation receipt establishes the workspace and conditions it actually tested.\n"
-    )
-    if not marker:
-        return []
-    facts, _ = json.JSONDecoder().raw_decode(tail)
-    return facts if isinstance(facts, list) else [row for bucket in facts.values() for row in bucket]
+    needle = "A validation receipt establishes the workspace and conditions it actually tested.\n"
+    candidates = [wire.get("instructions", "")]
+    for item in reversed(wire.get("input", [])):
+        if isinstance(item, dict) and isinstance(item.get("content"), str):
+            candidates.append(item["content"])
+    for text in candidates:
+        _, marker, tail = text.partition(needle)
+        if marker:
+            facts, _ = json.JSONDecoder().raw_decode(tail)
+            return facts if isinstance(facts, list) else [row for bucket in facts.values() for row in bucket]
+    return []
 
 
 def request_cost(events):

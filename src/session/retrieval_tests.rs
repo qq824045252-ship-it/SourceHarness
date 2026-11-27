@@ -662,3 +662,34 @@ fn session_search_result_reuses_exact_regex_counts_on_an_old_snapshot() {
         json!([{"value":"A","count":2},{"value":"B","count":1}])
     );
 }
+
+#[test]
+fn research_suggests_page_scope_when_offset_is_passed_with_report_ref() {
+    let root = tempfile::tempdir().unwrap();
+    let lines = (1..=12).map(|i| format!("hit={i}\n")).collect::<String>();
+    fs::write(root.path().join("items.txt"), lines).unwrap();
+    let ctx = WorkspaceContext::new(WorkspaceConfig::with_root(root.path())).unwrap();
+    let mut journal = Journal::open(&root.path().join(".sourceharness")).unwrap();
+    let first = research(
+        &ctx,
+        &mut journal,
+        1,
+        None,
+        &json!({"scope":"workspace","query":"hit=","limit":4}),
+    )
+    .unwrap();
+    let report_ref = first["result_ref"].as_str().unwrap();
+    let wrong = research(
+        &ctx,
+        &mut journal,
+        1,
+        None,
+        &json!({"scope":"workspace","result_ref":report_ref,"offset":4}),
+    )
+    .unwrap();
+    assert_eq!(wrong["code"], "INVALID_ARGUMENT");
+    assert_eq!(
+        wrong["suggested"],
+        json!({"scope":"page","result_ref":report_ref,"offset":4})
+    );
+}
