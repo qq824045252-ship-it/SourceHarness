@@ -1,12 +1,13 @@
+use super::exec;
 use super::journal::Journal;
-use super::tools::{self, definition, parse, rejected, EditMode, Reply, ResolvePath};
+use super::tools::{self, definition, parse, rejected, Edit, Reply, ResolvePath, TextChange};
 use crate::budget::{truncate_utf8_bytes, MAX_RESPONSE_BYTES};
 use crate::workspace::WorkspaceContext;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::fmt::Write;
 
-pub(super) const INSTRUCTIONS: &str = "Use workspace-relative paths. Read unobserved files together with read(paths), reuse earlier live observations, and reread on conflict. Group independent changes, use edit for targeted replacements, and keep code and docs focused on the request. Once the requested changes are in place, run the configured validate as the first check. On success, report the verified result and finish if the task is complete. Use exec for discovery, diagnosing a specific failure, or focused tests when no check is configured. Each exec starts at the root of a fresh disposable copy. Use rollback to recover from unsuccessful edits.";
+pub(super) const INSTRUCTIONS: &str = "Work on the user's task in the workspace and report the result. Exec runs in a disposable sandbox, edit and write change the live workspace, and validate runs the configured checker.";
 
 const MAX_READ_PATHS: usize = 8;
 
@@ -14,33 +15,45 @@ pub(super) fn definitions() -> Vec<Value> {
     let text = json!({"type":"string"});
     let line = json!({"type":"integer","minimum":1});
     let byte = json!({"type":"integer","minimum":0});
-    vec![
+    let mut definitions = vec![
         definition("exec", "Run a shell command for inspection or local tests in a disposable workspace copy, without network access. Changes are discarded.",
-            json!({"command":text,"timeout_seconds":{"type":"integer","minimum":1,"maximum":60}}), &["command"]),
-        definition("read", "Read numbered live text from path or paths. Use paths to observe several files together before editing. Use result_ref for saved output. Supply exactly one source. Line and byte bounds apply to a single source.",
+            json!({"command":{"type":"string","maxLength":exec::MAX_COMMAND_BYTES},
+                "timeout_seconds":{"type":"integer","minimum":1,"maximum":exec::MAX_TIMEOUT_SECONDS,
+                    "default":exec::DEFAULT_TIMEOUT_SECONDS}}), &["command"]),
+        definition("read", "Read numbered text from a live file, multiple files, or saved output. Use path, paths, or result_ref. Line and byte bounds apply to a single source.",
             json!({"path":text,"paths":{"type":"array","items":text,"minItems":1,"maxItems":MAX_READ_PATHS},
                 "result_ref":text,"start_line":line,"end_line":line,"start_byte":byte,"end_byte":byte}), &[]),
-        definition("edit", "Apply exact, non-overlapping replacements to a file observed by read, edit or write in an earlier model turn of this session. Each old_text must appear once.",
+        definition("edit", "Apply exact, non-overlapping replacements to a workspace-relative file. Each old_text must appear once.",
             json!({"path":text,"changes":{"type":"array","items":{"type":"object","properties":{
-                "old_text":text,"new_text":text},"required":["old_text","new_text"],"additionalProperties":false}}}), &["path","changes"]),
-        definition("write", "Write a complete UTF-8 file. Replacing an existing file requires an earlier live read, edit or write in this session.",
+                "old_text":text,"new_text":text},"required":["old_text","new_text"]}}}), &["path","changes"]),
+        definition("write", "Create or replace a workspace-relative UTF-8 file with complete content.",
             json!({"path":text,"content":text}), &["path","content"]),
-        definition("validate", "Run the configured acceptance check directly on the current workspace. Use this to verify the finished changes. Omit check when only one is configured.",
+        definition("validate", "Run a configured check against the current workspace snapshot. Omit check when only one is configured.",
             json!({"check":text}), &[]),
         definition("rollback", "Undo this run's edits since its latest passing validation or start. Stops if workspace files changed outside those edits.",
             json!({}), &[]),
-    ]
+    ];
+    for tool in &mut definitions {
+        if tool["name"] != "rollback" {
+            tool["parameters"]["additionalProperties"] = json!(true);
+        }
+    }
+    definitions
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct ReadPaths {
     paths: Vec<String>,
 }
 
 pub(super) fn read(ctx: &WorkspaceContext, journal: &mut Journal, run: usize, args: &Value) -> Reply {
-    if args.get("paths").is_none() {
+    if args["paths"].is_null() {
         return read_one(ctx, journal, run, args);
+    }
+    if ["path", "result_ref", "start_line", "end_line", "line_count", "start_byte", "end_byte"]
+        .iter().any(|key| !args[*key].is_null())
+    {
+        return Ok(rejected("INVALID_ARGUMENT", "Use paths alone. Range bounds apply to a single path or result_ref."));
     }
     let batch: ReadPaths = match parse(args) {
         Ok(batch) => batch,
@@ -94,10 +107,17 @@ pub(super) fn validate(
     if commands.0.is_empty() {
         return Ok(rejected("NO_CHECKS", "No external checks were configured. Use exec for workspace-local tests."));
     }
-    let check = if args.as_object().is_some_and(|args| args.is_empty()) && commands.0.len() == 1 {
-        commands.0.keys().next().map(String::as_str)
-    } else {
-        args["check"].as_str().filter(|_| args.as_object().is_some_and(|args| args.len() == 1))
+    #[derive(Deserialize)]
+    struct Check {
+        check: Option<String>,
+    }
+    let args: Check = match parse(args) {
+        Ok(args) => args,
+        Err(error) => return Ok(error),
+    };
+    let check = match args.check.as_deref() {
+        None if commands.0.len() == 1 => commands.0.keys().next().map(String::as_str),
+        check => check,
     };
     if let Some(check) = check.filter(|check| commands.0.contains_key(*check)) {
         super::validation::run(ctx, journal, run, operation, commands, &json!({"check":check}))
@@ -108,14 +128,12 @@ pub(super) fn validate(
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct EditArgs {
     path: String,
-    changes: Vec<Value>,
+    changes: Vec<TextChange>,
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct WriteArgs {
     path: String,
     content: String,
@@ -125,114 +143,68 @@ pub(super) fn modify(
     ctx: &WorkspaceContext,
     journal: &mut Journal,
     run: usize,
-    round: usize,
     operation: &str,
     tool: &str,
     args: &Value,
 ) -> Reply {
-    let (path, mut input) = if tool == "edit" {
+    if let Some(result) = tools::resume_edit(ctx, journal, run, operation) {
+        return result;
+    }
+    let (path, edit) = if tool == "edit" {
         let args: EditArgs = match parse(args) {
             Ok(args) => args,
             Err(err) => return Ok(err),
         };
-        (args.path, json!({"changes":args.changes}))
+        (args.path, Edit::Text(args.changes))
     } else {
         let args: WriteArgs = match parse(args) {
             Ok(args) => args,
             Err(err) => return Ok(err),
         };
-        (args.path, json!({"content":args.content}))
+        (args.path, Edit::Write(args.content))
     };
-    let saved = journal.events.iter().any(|event|
-        matches!(event.kind.as_str(), "edit_intent" | "edit_receipt") && event.data["operation"] == operation
-    );
-    if !saved {
-        let (_, path) = match tools::workspace_path(ctx, &path, ResolvePath::MissingParents) {
-            Ok(value) => value,
-            Err(err) => return Ok(err),
-        };
-        let expected = observed_revision(journal, run, round, &path);
-        if tool == "edit" && expected.is_none() {
-            let mut error = rejected("READ_REQUIRED", "Use read with the live path before editing.");
-            error["path"] = json!(path);
-            return Ok(error);
-        }
-        input["path"] = json!(path);
-        if tool == "write" {
-            input["mode"] = json!(if expected.is_some() { "replace" } else { "create" });
-        }
-        if let Some(revision) = expected {
-            input["expected_revision"] = json!(revision);
-        }
-    }
-    let mut result = tools::modify(ctx, journal, run, operation, tool, EditMode::Text, &input)?;
-    if tool == "write" && input["mode"] == "create" && result["code"] == "REVISION_CONFLICT"
-        && result["current_revision"].is_string()
-    {
-        result["code"] = json!("READ_REQUIRED");
-        result["reason"] = json!("Use read with the live path before replacing an existing file.");
-    }
+    let target = match tools::workspace_path(ctx, &path, ResolvePath::MissingParents) {
+        Ok(value) => value,
+        Err(err) => return Ok(err),
+    };
+    let expected = observed_revision(journal, &target.1).map(|revision| revision.map(str::to_owned));
+    let mut result = tools::apply_edit(ctx, journal, run, operation, target, expected, edit)?;
     if result["code"] == "REVISION_CONFLICT" && result["planned_to_current"].is_null() {
         tools::add_conflict_diff(journal, run, &mut result)?;
     }
     Ok(result)
 }
 
-fn observed_revision<'a>(
-    journal: &'a Journal,
-    run: usize,
-    round: usize,
-    path: &str,
-) -> Option<&'a str> {
+fn observed_revision<'a>(journal: &'a Journal, path: &str) -> Option<Option<&'a str>> {
     for event in journal.events.iter().rev() {
         if event.kind == "rollback_receipt" && event.data["paths"].as_array()
             .is_some_and(|paths| paths.iter().any(|saved| saved == path))
         {
             break;
         }
-        let earlier = event.run < run || (event.run == run
-            && event.data["round"].as_u64().is_some_and(|observed| observed < round as u64));
-        if event.kind != "tool_result" || !earlier {
+        if event.kind != "tool_result" {
             continue;
         }
         if let Some(observation) = event.data["live_observations"].as_array()
             .and_then(|files| files.iter().rev().find(|file| file["path"] == path))
         {
-            return observation["revision"].as_str();
+            return Some(observation["revision"].as_str());
         }
         if event.data["observed_absent"] == path {
-            break;
+            return Some(None);
         }
         if event.data["live_observation"] == true && event.data["source"]["path"] == path {
-            return event.data["revision"].as_str();
+            return event.data["revision"].as_str().map(Some);
         }
     }
     None
 }
 
-pub(super) fn budget_hint(remaining: usize) -> Option<&'static str> {
-    match remaining {
-        3 => Some("[Budget for this task: 3 turns left. Complete the needed edits, validate, then finish.]"),
-        2 => Some("[Budget for this task: 2 turns left. Validate if needed, then finish.]"),
-        1 => Some("[Budget for this task: 1 turn left. Finish in the next response and report validation status.]"),
-        _ => None,
-    }
-}
-
-pub(super) fn present(
-    tool: &str,
-    result: &Value,
-    warning: Option<&Value>,
-    budget_hint: Option<&str>,
-) -> Value {
+pub(super) fn present(tool: &str, result: &Value, warning: Option<&Value>) -> Value {
     let mut footer = String::new();
     if let Some(warning) = warning {
         let _ = write!(footer, "\n{}: Repeated failure ({} rounds). Inspect fresh evidence or use rollback.",
             warning["kind"].as_str().unwrap_or("LOOP_WARNING"), warning["count"]);
-    }
-    if let Some(hint) = budget_hint {
-        footer.push('\n');
-        footer.push_str(hint);
     }
     let budget = MAX_RESPONSE_BYTES.saturating_sub(footer.len());
     let text = if let Some(files) = result["files"].as_array().filter(|_| tool == "read") {
@@ -261,13 +233,13 @@ fn result_text(tool: &str, result: &Value, budget: usize) -> String {
         ("edit", "ok") => format!("Edited {}.", path.unwrap_or("file")),
         ("write", "ok") => format!("Wrote {}.", path.unwrap_or("file")),
         ("rollback", "ok") => format!(
-            "Restored {} files to the checkpoint. Read live files before editing again.",
+            "Restored {} files to the checkpoint.",
             result["paths"].as_array().map_or(0, Vec::len)
         ),
         ("validate", "ok") => {
             let check = result["check"].as_str().unwrap_or("check");
             if result["passed"] == true && result["workspace_changed_during_check"] == false {
-                format!("PASS {check}. This revision is verified. Finish if done. Re-run validate after any edit.")
+                format!("PASS {check}. This revision is verified. Re-run validate after any edit.")
             } else if result["passed"] == true {
                 format!("PASS {check} on the tested snapshot. Workspace changed during validation. Run the check again.")
             } else {
@@ -303,7 +275,7 @@ fn result_text(tool: &str, result: &Value, budget: usize) -> String {
             let mut reason = result["reason"].as_str().unwrap_or("Inspect the workspace.");
             if code == "REVISION_CONFLICT" {
                 reason = if result["current_revision"].is_null() {
-                    "The live file is absent."
+                    "The live file is absent. Read the path to confirm before recreating it."
                 } else {
                     "The live file differs from the observed version. Read it before writing."
                 };

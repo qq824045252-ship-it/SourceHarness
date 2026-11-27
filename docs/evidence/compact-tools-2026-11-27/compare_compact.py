@@ -18,12 +18,17 @@ def main():
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--case", choices=["markdown-links", "sample-report"])
     parser.add_argument("--repeats", type=int, default=1)
+    parser.add_argument("--request-limit", type=int, help="Override the historical provider request limit per phase")
     args = parser.parse_args()
     if args.repeats < 1:
         parser.error("--repeats must be positive")
+    if args.request_limit is not None and args.request_limit < 1:
+        parser.error("--request-limit must be positive")
     args.out.mkdir(parents=True)
     sys.path.insert(0, str(args.runner_dir.resolve()))
     import compare_pi_public as paired
+    if args.request_limit is not None:
+        paired.MAX_ATTEMPTS = args.request_limit
 
     paired.SH = args.exe.resolve()
     repo = Path(__file__).resolve().parents[3]
@@ -83,6 +88,10 @@ def main():
             for event in events if event["kind"] == "tool_result"
         }
         for row, run in zip(rows, runs):
+            row["pauses"] = [
+                {"reason": event["data"]["reason"], "round": event["data"]["round"]}
+                for event in events if event["run"] == run and event["kind"] == "paused"
+            ]
             row["tool_errors"] = dict(Counter(
                 event["data"]["code"] for event in events if event["run"] == run
                 and event["kind"] == "tool_result" and event["data"].get("code")

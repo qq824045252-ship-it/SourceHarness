@@ -52,8 +52,11 @@ pub(super) fn open_snapshot_file(root: &Path, relative: &Path) -> io::Result<Fil
     }
 }
 
+pub(super) const MAX_COMMAND_BYTES: usize = 32768;
+pub(super) const DEFAULT_TIMEOUT_SECONDS: u64 = 60;
+pub(super) const MAX_TIMEOUT_SECONDS: u64 = 300;
+
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct Args {
     command: String,
     timeout_seconds: Option<u64>,
@@ -70,9 +73,11 @@ pub(super) fn run(
         Ok(args) => args,
         Err(error) => return Ok(error),
     };
-    let timeout = args.timeout_seconds.unwrap_or(15);
-    if args.command.trim().is_empty() || args.command.len() > 4096 || !(1..=60).contains(&timeout) {
-        return Ok(rejected("INVALID_ARGUMENT", "Supply a command of at most 4096 bytes and a timeout of 1–60 seconds."));
+    let timeout = args.timeout_seconds.unwrap_or(DEFAULT_TIMEOUT_SECONDS);
+    if args.command.trim().is_empty() || args.command.len() > MAX_COMMAND_BYTES
+        || !(1..=MAX_TIMEOUT_SECONDS).contains(&timeout)
+    {
+        return Ok(rejected("INVALID_ARGUMENT", "Supply a command of at most 32768 bytes and a timeout of 1–300 seconds."));
     }
 
     #[cfg(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64")))]

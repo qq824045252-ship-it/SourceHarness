@@ -411,36 +411,47 @@ fn compact_prefix_and_implicit_revision_hold_across_requests_and_followups() {
     let root = tempfile::tempdir().unwrap();
     let file = root.path().join("policy.txt");
     fs::write(&file, "keep=1\nlimit=30\n").unwrap();
+    fs::write(root.path().join("notes.txt"), "previous\n").unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let gateway = format!("http://{}/v1", listener.local_addr().unwrap());
     let server = std::thread::spawn(move || {
         let mut prior = None;
         let edit = |id: &str, old: &str, new: &str| call(id, "edit", json!({
-            "path":"policy.txt","changes":[{"old_text":old,"new_text":new}]
+            "path":"policy.txt","changes":[{"old_text":old,"new_text":new,"note":null}]
         }));
         let (stream, _) = compact_round(&listener, &mut prior);
-        respond(stream, edit("unobserved", "limit=30", "limit=60"));
-        let (stream, req) = compact_round(&listener, &mut prior);
-        assert!(last_output(&req).starts_with("READ_REQUIRED"));
         respond_many(stream, vec![
-            call("read", "read", json!({"path":"policy.txt"})),
-            edit("same_batch", "limit=30", "limit=60"),
+            edit("unobserved", "limit=30", "limit=40"),
+            call("overwrite", "write", json!({
+                "path":"notes.txt","content":"replacement\n","expected_revision":"extra field"
+            })),
         ]);
         let (stream, req) = compact_round(&listener, &mut prior);
         let items = req["input"].as_array().unwrap();
-        assert_eq!(items[items.len()-2]["output"], "\"policy.txt\"\n1\tkeep=1\n2\tlimit=30\n");
-        assert!(last_output(&req).starts_with("READ_REQUIRED"));
-        fs::write(&file, "keep=2\nlimit=30\n").unwrap();
-        respond(stream, edit("stale", "limit=30", "limit=60"));
+        assert_eq!(items[items.len()-2]["output"], "Edited policy.txt.");
+        assert_eq!(last_output(&req), "Wrote notes.txt.");
+        respond(stream, edit("inexact", "limit=999", "limit=50"));
+        let (stream, req) = compact_round(&listener, &mut prior);
+        assert!(last_output(&req).starts_with("TEXT_NOT_FOUND"));
+        respond_many(stream, vec![
+            call("read", "read", json!({"path":"policy.txt","limit":10,"paths":null})),
+            edit("same_batch", "limit=40", "limit=50"),
+        ]);
+        let (stream, req) = compact_round(&listener, &mut prior);
+        let items = req["input"].as_array().unwrap();
+        assert_eq!(items[items.len()-2]["output"], "\"policy.txt\"\n1\tkeep=1\n2\tlimit=40\n");
+        assert_eq!(last_output(&req), "Edited policy.txt.");
+        fs::write(&file, "keep=2\nlimit=50\n").unwrap();
+        respond(stream, edit("stale", "limit=50", "limit=60"));
         let (stream, req) = compact_round(&listener, &mut prior);
         assert!(last_output(&req).starts_with("REVISION_CONFLICT"));
         assert!(last_output(&req).contains("+keep=2"));
-        assert_eq!(fs::read_to_string(&file).unwrap(), "keep=2\nlimit=30\n");
+        assert_eq!(fs::read_to_string(&file).unwrap(), "keep=2\nlimit=50\n");
         respond(stream, call("fresh", "read", json!({"path":"policy.txt","start_line":2})));
         let (stream, req) = compact_round(&listener, &mut prior);
-        assert_eq!(last_output(&req), "\"policy.txt\"\n2\tlimit=30\n");
+        assert_eq!(last_output(&req), "\"policy.txt\"\n2\tlimit=50\n");
         respond(stream, call("edited", "edit", json!({"path":"policy.txt","changes":[
-            {"old_text":"limit=30","new_text":"limit=60"},
+            {"old_text":"limit=50","new_text":"limit=60"},
             {"old_text":"keep=2","new_text":"keep=3"}
         ]})));
         let (stream, req) = compact_round(&listener, &mut prior);
@@ -461,14 +472,14 @@ fn compact_prefix_and_implicit_revision_hold_across_requests_and_followups() {
         assert!(last_output(&req).contains("+keep=4"));
         assert_eq!(fs::read_to_string(&file).unwrap(), "keep=4\nlimit=75\n");
         fs::remove_file(&file).unwrap();
-        respond_many(stream, vec![
-            call("missing", "read", json!({"path":"policy.txt"})),
-            call("unconfirmed_create", "write", json!({"path":"policy.txt","content":"limit=90\n"})),
-        ]);
+        respond(stream, call("unconfirmed_create", "write", json!({"path":"policy.txt","content":"limit=90\n"})));
         let (stream, req) = compact_round(&listener, &mut prior);
         assert!(last_output(&req).starts_with("REVISION_CONFLICT"));
         assert!(!file.exists());
-        respond(stream, call("confirmed_create", "write", json!({"path":"policy.txt","content":"limit=90\n"})));
+        respond_many(stream, vec![
+            call("missing", "read", json!({"path":"policy.txt"})),
+            call("confirmed_create", "write", json!({"path":"policy.txt","content":"limit=90\n"})),
+        ]);
         let (stream, req) = compact_round(&listener, &mut prior);
         assert_eq!(last_output(&req), "Wrote policy.txt.");
         respond(stream, answer("Recreated the requested file."));
@@ -486,6 +497,7 @@ fn compact_prefix_and_implicit_revision_hold_across_requests_and_followups() {
     assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
     server.join().unwrap();
     assert_eq!(fs::read_to_string(root.path().join("policy.txt")).unwrap(), "limit=90\n");
+    assert_eq!(fs::read_to_string(root.path().join("notes.txt")).unwrap(), "replacement\n");
     let events = session_events(root.path());
     let read = events.iter().find(|event| event["data"]["call_id"] == "read" && event["kind"] == "tool_result").unwrap();
     assert_eq!(read["data"]["revision"].as_str().unwrap().len(), 64);
@@ -497,6 +509,7 @@ fn compact_batch_read_keeps_each_result_and_live_revision() {
     let root = tempfile::tempdir().unwrap();
     let a = root.path().join("a.txt");
     let b = root.path().join("b.txt");
+    let missing = root.path().join("missing.txt");
     fs::write(&a, "alpha=1\n").unwrap();
     fs::write(&b, "beta=1\n").unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -508,7 +521,9 @@ fn compact_batch_read_keeps_each_result_and_live_revision() {
         }));
         let (stream, _) = compact_round(&listener, &mut prior);
         respond_many(stream, vec![
-            call("batch", "read", json!({"paths":["a.txt","missing.txt","../outside.txt","./b.txt"]})),
+            call("batch", "read", json!({
+                "paths":["a.txt","missing.txt","../outside.txt","./b.txt"],"path":null,"limit":10
+            })),
             edit("early", "a.txt", "alpha=1", "alpha=2"),
         ]);
         let (stream, req) = compact_round(&listener, &mut prior);
@@ -518,18 +533,23 @@ fn compact_batch_read_keeps_each_result_and_live_revision() {
         assert!(text.contains("FILE_NOT_FOUND") && text.contains("missing.txt"));
         assert!(text.contains("INVALID_PATH") && text.contains("../outside.txt"));
         assert!(text.contains("\"b.txt\"\n1\tbeta=1\n"));
-        assert!(last_output(&req).starts_with("READ_REQUIRED"));
-        assert_eq!(fs::read_to_string(&a).unwrap(), "alpha=1\n");
+        assert_eq!(last_output(&req), "Edited a.txt.");
+        assert_eq!(fs::read_to_string(&a).unwrap(), "alpha=2\n");
         fs::write(&b, "beta=1\nexternal=true\n").unwrap();
+        fs::write(&missing, "externally created\n").unwrap();
         respond_many(stream, vec![
-            edit("a", "a.txt", "alpha=1", "alpha=2"),
             edit("stale_b", "b.txt", "beta=1", "beta=2"),
+            call("stale_absent", "write", json!({"path":"missing.txt","content":"overwrite\n"})),
+            call("outside", "write", json!({"path":"../outside.txt","content":"blocked\n"})),
         ]);
         let (stream, req) = compact_round(&listener, &mut prior);
         let items = req["input"].as_array().unwrap();
-        assert_eq!(items[items.len() - 2]["output"], "Edited a.txt.");
-        assert!(last_output(&req).starts_with("REVISION_CONFLICT"));
-        assert!(last_output(&req).contains("+external=true"));
+        let stale_b = items[items.len() - 3]["output"].as_str().unwrap();
+        assert!(stale_b.starts_with("REVISION_CONFLICT"));
+        assert!(stale_b.contains("+external=true"));
+        assert!(items[items.len() - 2]["output"].as_str().unwrap().starts_with("REVISION_CONFLICT"));
+        assert!(last_output(&req).starts_with("INVALID_PATH"));
+        assert_eq!(fs::read_to_string(&missing).unwrap(), "externally created\n");
         respond(stream, call("mixed", "read", json!({"paths":["a.txt"],"path":"b.txt"})));
         let (stream, req) = compact_round(&listener, &mut prior);
         assert!(last_output(&req).starts_with("INVALID_ARGUMENT"));
@@ -552,7 +572,7 @@ fn compact_batch_read_keeps_each_result_and_live_revision() {
 }
 
 #[test]
-fn compact_budget_hints_follow_the_saved_round_after_resume() {
+fn compact_resumes_past_the_old_limit_without_turn_reminders() {
     let fixture = tempfile::tempdir().unwrap();
     let root = fixture.path().join("workspace");
     fs::create_dir(&root).unwrap();
@@ -567,33 +587,27 @@ fn compact_budget_hints_follow_the_saved_round_after_resume() {
     let server = std::thread::spawn(move || {
         let mut prior = None;
         let limit = source_harness::transport::GatewayConfig::default().max_turns;
+        assert_eq!(limit, 50);
         for round in 1..=limit {
             let (stream, req) = compact_round(&listener, &mut prior);
+            assert!(!req["input"].to_string().contains("[Budget"));
+            if round == 13 {
+                respond(stream, call("interrupted_write", "write", json!({"path":"log.txt","content":"saved"})));
+                continue;
+            }
             match limit - round {
                 0 => {
                     assert!(last_output(&req).starts_with("PASS acceptance. This revision is verified."));
                     assert!(last_output(&req).contains("Re-run validate after any edit."));
-                    assert!(last_output(&req).contains("1 turn left. Finish in the next response"));
                     respond(stream, call("last_read", "read", json!({"path":"short.txt"})));
                 }
                 1 => {
-                    let items = req["input"].as_array().unwrap();
-                    assert!(!items[items.len() - 2]["output"].as_str().unwrap().contains("[Budget"));
                     assert!(last_output(&req).contains("More: read("));
-                    assert!(last_output(&req).ends_with("[Budget for this task: 2 turns left. Validate if needed, then finish.]"));
                     assert!(last_output(&req).len() <= 8192);
-                    respond(stream, call("validate_budget", "validate", json!({})));
+                    respond(stream, call("validate_late", "validate", json!({"check":null,"limit":1})));
                 }
                 2 => {
-                    assert!(last_output(&req).contains("3 turns left. Complete the needed edits"));
-                    respond_many(stream, vec![
-                        call("small_batch", "read", json!({"path":"short.txt"})),
-                        call("last_batch", "read", json!({"paths":["short.txt","long.txt"]})),
-                    ]);
-                }
-                3 => {
-                    assert!(!req["input"].to_string().contains("[Budget"));
-                    respond(stream, call("interrupted_write", "write", json!({"path":"log.txt","content":"saved"})));
+                    respond(stream, call("last_batch", "read", json!({"paths":["short.txt","long.txt"]})));
                 }
                 _ => respond(stream, call(&format!("read_{round}"), "read", json!({"path":"short.txt"}))),
             }
@@ -653,9 +667,9 @@ fn compact_rollback_recovers_and_preserves_external_changes() {
         assert!(last_output(&req).starts_with("Restored 2 files"));
         assert_eq!(fs::read_to_string(&policy).unwrap(), "limit=60\n");
         assert!(!policy.with_file_name("z-added.txt").exists());
-        respond(stream, edit("expired", "limit=60", "limit=20"));
+        respond(stream, edit("expired", "limit=0", "limit=20"));
         let (stream, req) = compact_round(&listener, &mut prior);
-        assert!(last_output(&req).starts_with("READ_REQUIRED"));
+        assert!(last_output(&req).starts_with("TEXT_NOT_FOUND"));
         respond(stream, call("noop", "rollback", json!({})));
         let (stream, req) = compact_round(&listener, &mut prior);
         assert!(last_output(&req).starts_with("Restored 0 files"));
@@ -668,8 +682,8 @@ fn compact_rollback_recovers_and_preserves_external_changes() {
         let (stream, _) = compact_round(&listener, &mut prior);
         respond(stream, edit("expired_next_run", "limit=60", "limit=80"));
         let (stream, req) = compact_round(&listener, &mut prior);
-        assert!(last_output(&req).starts_with("READ_REQUIRED"));
-        respond(stream, answer("The restored file needs a new live read."));
+        assert_eq!(last_output(&req), "Edited policy.txt.");
+        respond(stream, answer("Updated the restored file."));
     });
     let args = ["agent", "--tool-profile", "compact", "--checks", checks.to_str().unwrap()];
     let stopped = invoke_with_interruption(&root, &gateway, Some("during_rollback"), &[&args[..], &["--prompt", "Try the change."]].concat());
@@ -684,7 +698,8 @@ fn compact_rollback_recovers_and_preserves_external_changes() {
     let events_of = |kind: &str| events.iter().filter(|event| event["kind"] == kind).count();
     assert_eq!(events_of("rollback_intent"), 2);
     assert_eq!(events_of("rollback_receipt"), 2);
-    assert_eq!(events_of("edit_receipt"), 4);
+    assert_eq!(events_of("edit_receipt"), 5);
+    assert_eq!(fs::read_to_string(root.join("policy.txt")).unwrap(), "limit=80\n");
 }
 
 #[test]
@@ -768,7 +783,8 @@ fn compact_exec_isolates_oracle_network_and_writes_and_folds_output() {
              python3 -c \"print('x' * 2500); print('FOLDED_TAIL')\"",
             oracle.display()
         );
-        respond(stream, call("exec", "exec", json!({"command":command})));
+        let padding = "#".repeat(32768 - command.len() - 1);
+        respond(stream, call("exec", "exec", json!({"command":format!("{padding}\n{command}"),"note":null})));
         let (stream, req) = compact_round(&listener, &mut prior);
         let output = last_output(&req);
         assert!(output.starts_with("limit=30\nSOCKET_BLOCKED\n"), "{output}");
@@ -779,7 +795,17 @@ fn compact_exec_isolates_oracle_network_and_writes_and_folds_output() {
         respond(stream, call("timed", "exec", json!({"command":"sleep 20 & wait","timeout_seconds":1})));
         let (stream, req) = compact_round(&listener, &mut prior);
         assert!(last_output(&req).starts_with("EXEC_TIMEOUT"), "{}", last_output(&req));
-        respond(stream, call("check", "validate", json!({})));
+        respond_many(stream, vec![
+            call("too_long", "exec", json!({"command":"#".repeat(32769)})),
+            call("over_timeout", "exec", json!({"command":"true","timeout_seconds":301})),
+            call("max_timeout", "exec", json!({"command":"printf done","timeout_seconds":300})),
+        ]);
+        let (stream, req) = compact_round(&listener, &mut prior);
+        let items = req["input"].as_array().unwrap();
+        assert!(items[items.len()-3]["output"].as_str().unwrap().starts_with("INVALID_ARGUMENT"));
+        assert!(items[items.len()-2]["output"].as_str().unwrap().starts_with("INVALID_ARGUMENT"));
+        assert_eq!(last_output(&req), "done");
+        respond(stream, call("check", "validate", json!({"trace":null})));
         let (stream, req) = compact_round(&listener, &mut prior);
         assert!(last_output(&req).starts_with("PASS acceptance. This revision is verified."));
         respond(stream, answer("Isolated execution finished."));
@@ -792,6 +818,9 @@ fn compact_exec_isolates_oracle_network_and_writes_and_folds_output() {
     assert_eq!(fs::read_to_string(root.join("policy.txt")).unwrap(), "limit=30\n");
     let events = session_events(&root);
     assert!(events.iter().any(|event| event["kind"] == "exec_receipt" && event["data"]["delivery"] == "folded"));
+    let timeouts: Vec<_> = events.iter().filter(|event| event["kind"] == "exec_intent")
+        .map(|event| event["data"]["timeout_seconds"].as_u64().unwrap()).collect();
+    assert_eq!(timeouts, [60, 1, 300]);
 }
 
 #[test]

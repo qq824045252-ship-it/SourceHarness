@@ -1,0 +1,260 @@
+{
+  "model": "deepseek-v4.1-flash",
+  "effort": "low",
+  "endpoint": "https://opencode.ai/inference/go/openai/v1/responses",
+  "limits": {
+    "requests_per_phase": 50,
+    "phase_seconds": 600
+  },
+  "source_base": "d4d531133396a616a162fefc4198827e595b9a6a",
+  "executable_sha256": "aea4af82e510478d091f2137e114cd4c89eab83162a26dfea0c3e2dba2038796",
+  "baseline": "pi-comparison-2026-11-27, pair 1 of each fixture",
+  "trials": [
+    {
+      "case": "markdown-links",
+      "pair": 1,
+      "arm": "compact",
+      "expected_phases": 2,
+      "phases": [
+        {
+          "phase": 1,
+          "prompt_sha256": "bc9b84c8f2b16d1c0d52ea9276bf343f7448bce12fda71daa3875191471bf4f6",
+          "oracle_sha256": "216949631a806d31951692bf84e608d4ec468cbcc9cb9da86fcd5462971c5bac",
+          "external_changes": [],
+          "exit": 0,
+          "seconds": 48.882,
+          "accepted": true,
+          "natural_end": true,
+          "strict_pass": true,
+          "verified_final": true,
+          "no_calls_after_verified_final": true,
+          "calls_after_verified_final": [],
+          "tool_attempts": 7,
+          "tools": {
+            "exec": 4,
+            "edit": 2,
+            "validate": 1
+          },
+          "checks": [
+            {
+              "index": 49,
+              "passed": true,
+              "verified_final": true
+            }
+          ],
+          "independent": {
+            "passed": true,
+            "changed_protected_paths": [],
+            "failures": {},
+            "observed": {},
+            "workspace_revision": "8b889f0cc4ef1d0b8cf7e03ccf3ba9a3d301a01b3a7dfb029f1301c2631ff428",
+            "oracle_revision": "216949631a806d31951692bf84e608d4ec468cbcc9cb9da86fcd5462971c5bac",
+            "stable_workspace": true
+          },
+          "claims": {
+            "claims_success": false,
+            "unsupported_success_claim": false,
+            "claimed_validation_revisions": [],
+            "mismatched_validation_revisions": []
+          },
+          "final_workspace_revision": "8b889f0cc4ef1d0b8cf7e03ccf3ba9a3d301a01b3a7dfb029f1301c2631ff428",
+          "cost": {
+            "model_requests": 7,
+            "requests_without_usage": 0,
+            "request_statuses": {
+              "200": 7
+            },
+            "input_tokens": 11768,
+            "cached_input_tokens": 8960,
+            "requests_without_cache_usage": 0,
+            "output_tokens": 1065,
+            "reasoning_tokens": 206,
+            "total_tokens": 12833,
+            "block_count": 0,
+            "response_models": [
+              "deepseek-v4.1-flash"
+            ]
+          },
+          "errors": [],
+          "pauses": [],
+          "tool_errors": {},
+          "tool_rounds": [
+            {
+              "round": 1,
+              "calls": [
+                {
+                  "name": "exec",
+                  "argument_bytes": 69,
+                  "code": null
+                }
+              ]
+            },
+            {
+              "round": 2,
+              "calls": [
+                {
+                  "name": "exec",
+                  "argument_bytes": 138,
+                  "code": null
+                }
+              ]
+            },
+            {
+              "round": 3,
+              "calls": [
+                {
+                  "name": "exec",
+                  "argument_bytes": 134,
+                  "code": null
+                }
+              ]
+            },
+            {
+              "round": 4,
+              "calls": [
+                {
+                  "name": "edit",
+                  "argument_bytes": 146,
+                  "code": null
+                },
+                {
+                  "name": "edit",
+                  "argument_bytes": 146,
+                  "code": null
+                }
+              ]
+            },
+            {
+              "round": 5,
+              "calls": [
+                {
+                  "name": "exec",
+                  "argument_bytes": 666,
+                  "code": null
+                }
+              ]
+            },
+            {
+              "round": 6,
+              "calls": [
+                {
+                  "name": "validate",
+                  "argument_bytes": 22,
+                  "code": null
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "phase": 2,
+          "prompt_sha256": "1e5e17c8eabadc2a48631757f59178c39146853eeb789a98bf47663dd7c3aa5c",
+          "oracle_sha256": "35236f151a9868a48d7a55a27707bfdf865de6d0e4a14e61c24af991a6e2464d",
+          "external_changes": [
+            "references/schema.md",
+            "references/fields.md"
+          ],
+          "exit": 0,
+          "seconds": 35.704,
+          "accepted": true,
+          "natural_end": true,
+          "strict_pass": true,
+          "verified_final": true,
+          "no_calls_after_verified_final": true,
+          "calls_after_verified_final": [],
+          "tool_attempts": 4,
+          "tools": {
+            "exec": 2,
+            "edit": 1,
+            "validate": 1
+          },
+          "checks": [
+            {
+              "index": 81,
+              "passed": true,
+              "verified_final": true
+            }
+          ],
+          "independent": {
+            "passed": true,
+            "changed_protected_paths": [],
+            "failures": {},
+            "observed": {},
+            "workspace_revision": "32df94e44c991c718ce6cb59af7e5856c4b553196a0d180f72382ccb46ce6ec9",
+            "oracle_revision": "35236f151a9868a48d7a55a27707bfdf865de6d0e4a14e61c24af991a6e2464d",
+            "stable_workspace": true
+          },
+          "claims": {
+            "claims_success": false,
+            "unsupported_success_claim": false,
+            "claimed_validation_revisions": [],
+            "mismatched_validation_revisions": []
+          },
+          "final_workspace_revision": "32df94e44c991c718ce6cb59af7e5856c4b553196a0d180f72382ccb46ce6ec9",
+          "cost": {
+            "model_requests": 5,
+            "requests_without_usage": 0,
+            "request_statuses": {
+              "200": 5
+            },
+            "input_tokens": 15818,
+            "cached_input_tokens": 14464,
+            "requests_without_cache_usage": 0,
+            "output_tokens": 716,
+            "reasoning_tokens": 55,
+            "total_tokens": 16534,
+            "block_count": 0,
+            "response_models": [
+              "deepseek-v4.1-flash"
+            ]
+          },
+          "errors": [],
+          "pauses": [],
+          "tool_errors": {},
+          "tool_rounds": [
+            {
+              "round": 1,
+              "calls": [
+                {
+                  "name": "exec",
+                  "argument_bytes": 185,
+                  "code": null
+                }
+              ]
+            },
+            {
+              "round": 2,
+              "calls": [
+                {
+                  "name": "edit",
+                  "argument_bytes": 150,
+                  "code": null
+                }
+              ]
+            },
+            {
+              "round": 3,
+              "calls": [
+                {
+                  "name": "exec",
+                  "argument_bytes": 777,
+                  "code": null
+                }
+              ]
+            },
+            {
+              "round": 4,
+              "calls": [
+                {
+                  "name": "validate",
+                  "argument_bytes": 22,
+                  "code": null
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

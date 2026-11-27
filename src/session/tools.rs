@@ -71,7 +71,6 @@ pub fn definitions(mode: EditMode) -> Vec<Value> {
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct ReadArgs {
     path: Option<String>,
     result_ref: Option<String>,
@@ -112,15 +111,14 @@ struct EditArgs<T> {
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct TextChange {
+pub(super) struct TextChange {
     old_text: String,
     new_text: String,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RangeChange {
+pub(super) struct RangeChange {
     start_line: usize,
     end_line: usize,
     new_text: String,
@@ -1400,6 +1398,30 @@ fn edit_range(old: &str, changes: Vec<RangeChange>) -> Result<String, Value> {
     transform(old, located)
 }
 
+pub(super) fn resume_edit(
+    ctx: &WorkspaceContext,
+    journal: &mut Journal,
+    run: usize,
+    operation: &str,
+) -> Option<Reply> {
+    if let Some(receipt) = journal
+        .events
+        .iter()
+        .find(|event| event.kind == "edit_receipt" && event.data["operation"] == operation)
+    {
+        return Some(Ok(receipt.data.clone()));
+    }
+    if let Some(saved) = journal
+        .events
+        .iter()
+        .find(|event| event.kind == "edit_intent" && event.data["operation"] == operation)
+    {
+        let intent = serde_json::from_value(saved.data.clone()).map_err(|err| err.to_string());
+        return Some(intent.and_then(|intent| commit(ctx, journal, run, &intent, true)));
+    }
+    None
+}
+
 pub fn modify(
     ctx: &WorkspaceContext,
     journal: &mut Journal,
@@ -1409,23 +1431,10 @@ pub fn modify(
     mode: EditMode,
     input: &Value,
 ) -> Reply {
-    if let Some(receipt) = journal
-        .events
-        .iter()
-        .find(|event| event.kind == "edit_receipt" && event.data["operation"] == operation)
-    {
-        return Ok(receipt.data.clone());
+    if let Some(result) = resume_edit(ctx, journal, run, operation) {
+        return result;
     }
-    if let Some(saved) = journal
-        .events
-        .iter()
-        .find(|event| event.kind == "edit_intent" && event.data["operation"] == operation)
-    {
-        let intent = serde_json::from_value(saved.data.clone()).map_err(|err| err.to_string())?;
-        return commit(ctx, journal, run, &intent, true);
-    }
-
-    let (path, before, edit, content) = if tool == "write" {
+    let (path, before, edit) = if tool == "write" {
         let args: WriteArgs = match parse(input) {
             Ok(v) => v,
             Err(e) => return Ok(e),
@@ -1433,8 +1442,8 @@ pub fn modify(
         // Some providers supply an empty string for an omitted optional argument.
         let expected = args.expected_revision.filter(|value| !value.is_empty());
         match (args.mode.as_str(), expected) {
-            ("create", None) => (args.path, None, None, Some(args.content)),
-            ("replace", Some(rev)) => (args.path, Some(rev), None, Some(args.content)),
+            ("create", None) => (args.path, None, Edit::Write(args.content)),
+            ("replace", Some(rev)) => (args.path, Some(rev), Edit::Write(args.content)),
             ("create", Some(_)) => {
                 let mut error = rejected(
                     "INVALID_ARGUMENT",
@@ -1491,31 +1500,50 @@ pub fn modify(
                 (args.path, args.expected_revision, Edit::Patch(args.patch))
             }
         };
-        (path, Some(rev), Some(edit), None)
+        (path, Some(rev), edit)
     };
     let resolve = if before.is_none() {
         ResolvePath::MissingParents
     } else {
         ResolvePath::MissingFile
     };
-    let (target, path) = match workspace_path(ctx, &path, resolve) {
+    let target = match workspace_path(ctx, &path, resolve) {
         Ok(p) => p,
         Err(e) => return Ok(e),
     };
+    apply_edit(ctx, journal, run, operation, target, Some(before), edit)
+}
+
+pub(super) fn apply_edit(
+    ctx: &WorkspaceContext,
+    journal: &mut Journal,
+    run: usize,
+    operation: &str,
+    (target, path): (PathBuf, String),
+    expected: Option<Option<String>>,
+    edit: Edit,
+) -> Reply {
     let origin = match file_bytes(&target, ctx.config().max_file_bytes) {
         Ok(b) => b,
         Err(e) => return Ok(e),
     };
-    let actual = origin.as_deref().map(revision);
-    if actual != before {
-        return conflict(journal, run, &path, &before, origin.as_deref());
+    let before = origin.as_deref().map(revision);
+    // An unobserved path can start at its current revision. Observed absence is
+    // a precondition, just like an observed file revision.
+    if let Some(expected) = expected.filter(|expected| *expected != before) {
+        return conflict(journal, run, &path, &expected, origin.as_deref());
+    }
+    if before.is_none() && !matches!(edit, Edit::Write(_)) {
+        let mut error = rejected("FILE_NOT_FOUND", "The file is absent. Use write to create it.");
+        error["path"] = json!(path);
+        return Ok(error);
     }
     let old = std::str::from_utf8(origin.as_deref().unwrap_or_default())
         .map_err(|err| err.to_string())?;
     let next = match edit {
-        Some(Edit::Text(changes)) => edit_text(old, changes),
-        Some(Edit::Range(changes)) => edit_range(old, changes),
-        Some(Edit::Patch(mut patch)) => {
+        Edit::Text(changes) => edit_text(old, changes),
+        Edit::Range(changes) => edit_range(old, changes),
+        Edit::Patch(mut patch) => {
             // An omitted transport delimiter is different from a diff's explicit no-newline marker.
             if !patch.ends_with('\n') {
                 patch.push('\n');
@@ -1533,7 +1561,7 @@ pub fn modify(
                         .map_err(|err| rejected("PATCH_MISMATCH", &err.to_string()))
                 })
         }
-        None => Ok(content.ok_or("Missing write content")?),
+        Edit::Write(content) => Ok(content),
     };
     let next = match next {
         Ok(next) => next,
@@ -1583,7 +1611,8 @@ pub fn modify(
     commit(ctx, journal, run, &intent, false)
 }
 
-enum Edit {
+pub(super) enum Edit {
+    Write(String),
     Text(Vec<TextChange>),
     Range(Vec<RangeChange>),
     Patch(String),
@@ -1697,6 +1726,9 @@ fn commit(
                 return Ok(error);
             }
         }
+        if let Err(error) = verify_parent(parent) {
+            return Ok(error);
+        }
         let mut temp = tempfile::Builder::new()
             .prefix(".sourceharness-write-")
             .tempfile_in(parent)
@@ -1711,10 +1743,8 @@ fn commit(
                 .map_err(|e| e.to_string())?;
         }
         temp.as_file().sync_all().map_err(|e| e.to_string())?;
-        if creating {
-            if let Err(error) = verify_parent(parent) {
-                return Ok(error);
-            }
+        if let Err(error) = verify_parent(parent) {
+            return Ok(error);
         }
         let latest = match file_bytes(&target, ctx.config().max_file_bytes) {
             Ok(v) => v,

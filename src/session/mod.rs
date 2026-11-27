@@ -407,17 +407,12 @@ impl Session {
             while let Some(call) = checkpoint.pending.pop_front() {
                 self.collect_steering(&mut checkpoint, poll_steering)?;
                 let guarded = checkpoint.guard_pause.is_some() || new_pause.is_some();
-                let budget_hint = if compact && checkpoint.pending.is_empty() {
-                    compact::budget_hint(turn_limit.saturating_sub(checkpoint.round))
-                } else {
-                    None
-                };
                 let output = if checkpoint.queued_steering.is_empty() && !guarded {
-                    let (output, pause) = self.execute(run, checkpoint.round, &call, observer, budget_hint)?;
+                    let (output, pause) = self.execute(run, checkpoint.round, &call, observer)?;
                     new_pause = pause;
                     output
                 } else {
-                    self.close_pending_call(run, checkpoint.round, &call, observer, guarded, budget_hint)?
+                    self.close_pending_call(run, checkpoint.round, &call, observer, guarded)?
                 };
                 checkpoint.input.push(output);
             }
@@ -706,7 +701,7 @@ impl Session {
         let outputs: Vec<Value> = checkpoint.pending.iter().map(|call| {
             let result = self.observe_pending(call);
             let result = if self.options.compact {
-                compact::present(&call.name, &result, None, None)
+                compact::present(&call.name, &result, None)
             } else {
                 result
             };
@@ -765,7 +760,6 @@ impl Session {
         call: &Call,
         observer: &mut dyn RunObserver,
         guarded: bool,
-        budget_hint: Option<&str>,
     ) -> Result<Value, String> {
         let attempt = self.journal.events.iter().rev()
             .find(|e| e.kind == "tool_attempt" && e.data["operation"] == call.operation)
@@ -795,7 +789,7 @@ impl Session {
             "name":call.name,"arguments":args,"output":output,"status":result["status"],"code":result["code"]
         });
         let presented = if self.options.compact {
-            let text = compact::present(&call.name, &result, None, budget_hint);
+            let text = compact::present(&call.name, &result, None);
             data["model_output"] = json!(self.journal.store_json(&text)?);
             text
         } else {
@@ -812,7 +806,6 @@ impl Session {
         round: usize,
         call: &Call,
         observer: &mut dyn RunObserver,
-        budget_hint: Option<&str>,
     ) -> Result<(Value, Option<Value>), String> {
         let args: Result<Value, _> = serde_json::from_str(&call.raw_args);
         let compact = self.options.compact;
@@ -836,7 +829,7 @@ impl Session {
             ("research", Ok(args)) if !compact => tools::research(&self.ctx, &mut self.journal, run, Some(attempt), args)?,
             ("search_result", Ok(args)) if !compact => tools::search_result(&self.journal, args)?,
             ("edit" | "write", Ok(args)) if compact => compact::modify(
-                &self.ctx, &mut self.journal, run, round, &call.operation, &call.name, args,
+                &self.ctx, &mut self.journal, run, &call.operation, &call.name, args,
             )?,
             ("edit" | "write", Ok(args)) => tools::modify(
                 &self.ctx,
@@ -872,7 +865,7 @@ impl Session {
         };
         let model_output = if compact {
             let warning = signal.as_ref().filter(|signal| signal["state"] != "observe");
-            Some(compact::present(&call.name, &result, warning, budget_hint))
+            Some(compact::present(&call.name, &result, warning))
         } else {
             self.classic_output(run, call, attempt, &result)?
         };

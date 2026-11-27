@@ -75,7 +75,7 @@ impl GatewayConfig {
             api_key,
             model,
             reasoning_effort: Some(reasoning_effort),
-            max_turns: 16,
+            max_turns: 50,
             timeout_secs: 120,
         }
     }
