@@ -129,7 +129,8 @@ def request_cache(root, events):
     }
 
 
-def execute(args, checks, root, trial, prompt, interrupt=False, continuation=False, executable=None, label=None):
+def execute(args, checks, root, trial, prompt, interrupt=False, continuation=False, executable=None, label=None,
+            timeout=240):
     env = os.environ.copy()
     env.pop("SOURCE_HARNESS_TEST_INTERRUPT", None)
     if interrupt:
@@ -146,12 +147,12 @@ def execute(args, checks, root, trial, prompt, interrupt=False, continuation=Fal
         command.append("--resume")
     start = time.monotonic()
     try:
-        result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", env=env, timeout=240)
+        result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", env=env, timeout=timeout)
         exit_code, stdout, stderr = result.returncode, result.stdout, result.stderr
     except subprocess.TimeoutExpired as error:
         exit_code = None
         stdout = (error.stdout or b"").decode("utf-8", "replace")
-        stderr = "Evaluation process exceeded 240 seconds"
+        stderr = f"Evaluation process exceeded {timeout} seconds"
     suffix = label or ("continue" if continuation else "resume" if prompt is None else "start")
     (root.parent / f"{root.name}-{suffix}.stdout.txt").write_text(stdout, encoding="utf-8")
     (root.parent / f"{root.name}-{suffix}.stderr.txt").write_text(stderr, encoding="utf-8")

@@ -216,14 +216,15 @@ def run_scenario(args, case, index, start_phase=None):
         inject = args.interrupt_phase == phase
         interruption_mode = "kill_after_file_replace" if args.sigkill else True
         expected_exit = -signal.SIGKILL if args.sigkill else 86
-        runs = [execute(args, checks, root, trial, prompt, interrupt=inject and interruption_mode, label=label)]
+        runs = [execute(args, checks, root, trial, prompt, interrupt=inject and interruption_mode, label=label,
+                        timeout=args.phase_timeout)]
         interrupted = {"requested": inject, "triggered": False}
         if inject and runs[-1]["exit"] == expected_exit:
             interrupted.update(interrupt_evidence(root, read_events(root)[checkpoint:]))
-            runs.append(execute(args, checks, root, trial, None, label=f"{label}-resume-01"))
+            runs.append(execute(args, checks, root, trial, None, label=f"{label}-resume-01", timeout=args.phase_timeout))
         if (not compact and runs[-1]["exit"] != 0
                 and "The run can be resumed" in runs[-1]["error"]):
-            runs.append(execute(args, checks, root, trial, None, label=f"{label}-resume-limit"))
+            runs.append(execute(args, checks, root, trial, None, label=f"{label}-resume-limit", timeout=args.phase_timeout))
         all_events = read_events(root)
         events = all_events[checkpoint:]
         if interrupted["triggered"]:
@@ -279,7 +280,7 @@ def run_scenario(args, case, index, start_phase=None):
         "settings": {"tool_profile": trial.tool_profile, "edit": trial.edit, "history": trial.history,
                      "receipt": trial.receipt,
                      "freshness": trial.freshness, "projection": trial.projection, "notices": trial.notices,
-                     "history_budget_bytes": 8192},
+                     "history_budget_bytes": 8192, "phase_timeout_seconds": args.phase_timeout},
         "checker_inputs": {path.name: sha(path.read_bytes()) for path in sources},
         "profile": profiles[0] if profiles else None,
         "execution_conditions_unchanged": bool(profiles) and all(
@@ -305,7 +306,12 @@ def main():
     parser.add_argument("--sigkill", action="store_true", help="Use SIGKILL for the injected interruption on Linux")
     parser.add_argument("--tool-profile", choices=("classic", "compact"), default="classic")
     parser.add_argument("--live-runner", type=Path, help="Published Pi comparison runner directory for OpenCode Go")
+    parser.add_argument("--phase-timeout", type=int, help="CLI wall-clock timeout per execution in seconds")
     args = parser.parse_args()
+    if args.phase_timeout is not None and args.phase_timeout < 1:
+        parser.error("--phase-timeout must be positive")
+    if args.phase_timeout is None:
+        args.phase_timeout = 600 if args.tool_profile == "compact" else 240
     case = CASES[args.case]
     if args.repeats < 1 or (args.interrupt_phase is not None and not 1 <= args.interrupt_phase <= len(case.prompts)):
         parser.error("repeats must be positive and the interrupt phase must exist in the selected case")

@@ -1,0 +1,580 @@
+{
+  "provider": "deepseek-v4.1-flash",
+  "binary_sha256": "50efab470dc3e3f84d7d9f305fc3117b1e5ae82750ccadc66adc9c6eb986fbd7",
+  "trials": [
+    {
+      "case": "edit-recovery",
+      "requests": 8,
+      "exit": 0,
+      "natural_end": true,
+      "pauses": [],
+      "validation_results": [],
+      "validation_outputs": 0,
+      "tool_counts": {
+        "exec": 5,
+        "edit": 1,
+        "validate": 1
+      },
+      "errors": {
+        "EXEC_FAILED": 1,
+        "NO_CHECKS": 1
+      },
+      "prefix_pairs": 7,
+      "prefix_preserved": true,
+      "cost": {
+        "model_requests": 8,
+        "requests_without_usage": 0,
+        "request_statuses": {
+          "200": 8
+        },
+        "input_tokens": 17558,
+        "cached_input_tokens": 13696,
+        "requests_without_cache_usage": 0,
+        "output_tokens": 1512,
+        "reasoning_tokens": 1029,
+        "total_tokens": 19070,
+        "block_count": 0,
+        "response_models": [
+          "deepseek-v4.1-flash"
+        ]
+      },
+      "trace": [
+        {
+          "round": 1,
+          "tool": "exec",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 2,
+          "tool": "exec",
+          "status": "error",
+          "code": "EXEC_FAILED",
+          "guard": "REPEATED_FAILURE",
+          "state": "observe"
+        },
+        {
+          "round": 3,
+          "tool": "exec",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 4,
+          "tool": "exec",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 5,
+          "tool": "edit",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 6,
+          "tool": "exec",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 7,
+          "tool": "validate",
+          "status": "error",
+          "code": "NO_CHECKS",
+          "guard": "REPEATED_FAILURE",
+          "state": "observe"
+        }
+      ],
+      "independent_passed": true,
+      "final": "Updated `legacy.txt` from `status=draft` to `status=ready`. The file still uses CRLF (`\\r\\n`) line endings, verified with `od`:\n\n```\nkind=example\\r\\n\nstatus=ready\\r\\n\n```\n\n`state.txt` was left unchanged."
+    },
+    {
+      "case": "quiet-match",
+      "requests": 8,
+      "exit": 0,
+      "natural_end": true,
+      "pauses": [],
+      "validation_results": [],
+      "validation_outputs": 0,
+      "tool_counts": {
+        "exec": 7
+      },
+      "errors": {},
+      "prefix_pairs": 7,
+      "prefix_preserved": true,
+      "cost": {
+        "model_requests": 8,
+        "requests_without_usage": 0,
+        "request_statuses": {
+          "200": 8
+        },
+        "input_tokens": 15910,
+        "cached_input_tokens": 12288,
+        "requests_without_cache_usage": 0,
+        "output_tokens": 1618,
+        "reasoning_tokens": 539,
+        "total_tokens": 17528,
+        "block_count": 0,
+        "response_models": [
+          "deepseek-v4.1-flash"
+        ]
+      },
+      "trace": [
+        {
+          "round": 1,
+          "tool": "exec",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 2,
+          "tool": "exec",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 3,
+          "tool": "exec",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 4,
+          "tool": "exec",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 5,
+          "tool": "exec",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 6,
+          "tool": "exec",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 7,
+          "tool": "exec",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        }
+      ],
+      "final": "Verified with quiet (`-q`, output-suppressed) shell probes \u2014 no files were modified.\n\n**What's in the workspace**\n\n| File | Size | Content | Line endings |\n|---|---|---|---|\n| `state.txt` | 6 B | single line `draft` | LF |\n| `legacy.txt` | 28 B | `kind=example`, `status=draft` | **CRLF** |\n\n**Probe results**\n\n| Claim | Probe | Exit/Result |\n|---|---|---|\n| `draft` present in `state.txt` | `grep -qx 'draft' state.txt` | **0 \u2014 confirmed** |\n| `kind=example` header present in `legacy.txt` | `grep -qx 'kind=example' legacy.txt` | **1 \u2014 false negative** |\n| same, with `\\r` stripped | `tr -d '\\r' < legacy.txt \\| grep -qx 'kind=example'` | **0 \u2014 confirmed** |\n| `status=draft` in `legacy.txt` (CR-stripped) | `tr -d '\\r' < legacy.txt \\| grep -qx 'status=draft'` | **0 \u2014 confirmed** |\n| combined assertion | all three above chained with `&&` | **ALL_OK \u2014 pass** |\n\n**Notes worth flagging**\n\n- The example header *is* present, but `legacy.txt` is CRLF-terminated (`od -c` shows `... e x a m p l e \\r \\n s t a t u s = d r a f t \\r \\n`). A naive exact-match probe fails against it; anchors like `$` and `-x` won't match until `\\r` is stripped. Any downstream parser for this file should be CR-tolerant.\n- Empty/unused tools: `awk` and `file` are unavailable in this environment (`awk: not found`; `/etc/magic` warnings), so verification relied on `grep`/`tr`/`od`.\n- Nothing to change \u2014 both the draft marker and the example header are confirmed present, so I made no edits."
+    },
+    {
+      "case": "named-conflict",
+      "requests": 16,
+      "exit": 1,
+      "natural_end": false,
+      "pauses": [
+        {
+          "guard": {
+            "check": "mode-a",
+            "count": 3,
+            "diagnostic": "7a8eed8cc02cc1be19ece5d224797d2dbcbb0549a9e308ffddcfce2d41003fd2",
+            "failed_revision": "2096380f6fd4b257cebe85bd0cf4135642fca87a3dd8206c708c7fb19e8ba2a0",
+            "kind": "VALIDATION_OSCILLATION",
+            "state": "pause",
+            "workspace_revision": "914ee67168c9251b2c8e8351af4acb2464c3469b803d8ea9c1c48a1fb4e2302b"
+          },
+          "reason": "LOOP_GUARD_TRIGGERED",
+          "round": 16
+        }
+      ],
+      "validation_results": [
+        false,
+        false,
+        true,
+        false,
+        false,
+        true,
+        false,
+        false,
+        false
+      ],
+      "validation_outputs": 8,
+      "tool_counts": {
+        "exec": 11,
+        "validate": 9,
+        "read": 2,
+        "write": 4
+      },
+      "errors": {
+        "EXEC_FAILED": 1
+      },
+      "prefix_pairs": 15,
+      "prefix_preserved": true,
+      "cost": {
+        "model_requests": 16,
+        "requests_without_usage": 0,
+        "request_statuses": {
+          "200": 16
+        },
+        "input_tokens": 82789,
+        "cached_input_tokens": 72064,
+        "requests_without_cache_usage": 0,
+        "output_tokens": 5255,
+        "reasoning_tokens": 3764,
+        "total_tokens": 88044,
+        "block_count": 0,
+        "response_models": [
+          "deepseek-v4.1-flash"
+        ]
+      },
+      "trace": [
+        {
+          "round": 1,
+          "tool": "exec",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 1,
+          "tool": "validate",
+          "status": "ok",
+          "code": null,
+          "guard": "VALIDATION_OSCILLATION",
+          "state": "observe"
+        },
+        {
+          "round": 1,
+          "tool": "validate",
+          "status": "ok",
+          "code": null,
+          "guard": "VALIDATION_OSCILLATION",
+          "state": "observe"
+        },
+        {
+          "round": 2,
+          "tool": "exec",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 2,
+          "tool": "read",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 2,
+          "tool": "read",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 3,
+          "tool": "exec",
+          "status": "error",
+          "code": "EXEC_FAILED",
+          "guard": "REPEATED_FAILURE",
+          "state": "observe"
+        },
+        {
+          "round": 3,
+          "tool": "exec",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 4,
+          "tool": "exec",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 5,
+          "tool": "exec",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 5,
+          "tool": "exec",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 6,
+          "tool": "exec",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 7,
+          "tool": "exec",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 7,
+          "tool": "exec",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 8,
+          "tool": "write",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 9,
+          "tool": "validate",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 9,
+          "tool": "validate",
+          "status": "ok",
+          "code": null,
+          "guard": "VALIDATION_OSCILLATION",
+          "state": "warn"
+        },
+        {
+          "round": 10,
+          "tool": "write",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 11,
+          "tool": "validate",
+          "status": "ok",
+          "code": null,
+          "guard": "VALIDATION_OSCILLATION",
+          "state": "observe"
+        },
+        {
+          "round": 11,
+          "tool": "validate",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 12,
+          "tool": "write",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 13,
+          "tool": "validate",
+          "status": "ok",
+          "code": null,
+          "guard": "VALIDATION_OSCILLATION",
+          "state": "warn"
+        },
+        {
+          "round": 13,
+          "tool": "validate",
+          "status": "ok",
+          "code": null,
+          "guard": "VALIDATION_OSCILLATION",
+          "state": "observe"
+        },
+        {
+          "round": 14,
+          "tool": "exec",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 15,
+          "tool": "write",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 16,
+          "tool": "validate",
+          "status": "ok",
+          "code": null,
+          "guard": "VALIDATION_OSCILLATION",
+          "state": "pause"
+        }
+      ],
+      "final": ""
+    },
+    {
+      "case": "sandbox-write",
+      "requests": 7,
+      "exit": 0,
+      "natural_end": true,
+      "pauses": [],
+      "validation_results": [
+        false,
+        true
+      ],
+      "validation_outputs": 1,
+      "tool_counts": {
+        "exec": 5,
+        "validate": 2,
+        "read": 1,
+        "edit": 1
+      },
+      "errors": {},
+      "prefix_pairs": 6,
+      "prefix_preserved": true,
+      "cost": {
+        "model_requests": 7,
+        "requests_without_usage": 0,
+        "request_statuses": {
+          "200": 7
+        },
+        "input_tokens": 12988,
+        "cached_input_tokens": 9856,
+        "requests_without_cache_usage": 0,
+        "output_tokens": 1003,
+        "reasoning_tokens": 302,
+        "total_tokens": 13991,
+        "block_count": 0,
+        "response_models": [
+          "deepseek-v4.1-flash"
+        ]
+      },
+      "trace": [
+        {
+          "round": 1,
+          "tool": "exec",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 1,
+          "tool": "validate",
+          "status": "ok",
+          "code": null,
+          "guard": "VALIDATION_OSCILLATION",
+          "state": "observe"
+        },
+        {
+          "round": 2,
+          "tool": "read",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 2,
+          "tool": "exec",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 3,
+          "tool": "exec",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 4,
+          "tool": "exec",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 5,
+          "tool": "edit",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 6,
+          "tool": "exec",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        },
+        {
+          "round": 6,
+          "tool": "validate",
+          "status": "ok",
+          "code": null,
+          "guard": null,
+          "state": null
+        }
+      ],
+      "independent_passed": true,
+      "final": "Done \u2014 the change is in the live workspace and the configured check passes.\n\n**What I did**\n1. Inspected `legacy.txt` with `od -c`: it holds `kind=example\\r\\nstatus=draft\\r\\n` (28 bytes, CRLF line endings), plus a sibling `state.txt` containing `draft`.\n2. Made a byte-precise, in-line replacement `status=draft` \u2192 `status=ready` via `edit` (only the substring inside one line changed, so the `\\r\\n` terminators were untouched \u2014 no whole-file rewrite that could normalize line endings).\n3. Verified the result and ran `validate`.\n\n**Result**\n- `legacy.txt` is now `kind=example\\r\\nstatus=ready\\r\\n` (byte dump confirms `\\r\\n` on both lines, so CRLF is preserved).\n- Acceptance check: **PASS \u2014 \"This revision is verified.\"**\n- `state.txt` was left as-is (`draft`); the checker didn't require it, so I didn't touch it \u2014 say the word if that copy is supposed to track the status too."
+    }
+  ]
+}

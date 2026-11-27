@@ -31,6 +31,7 @@ CASES = {
     "quiet-match": "Confirm that draft and the example header are present, using quiet shell probes. Report what you verified.",
     "named-conflict": "The configured mode-a and mode-b checks both need to pass on the same workspace. Try each check, investigate whether that is possible, and report the verified outcome.",
     "sandbox-write": "Set the live legacy.txt status to ready while preserving CRLF. You can try the change in exec first. Run the configured acceptance check on the resulting workspace.",
+    "rollback-cycle": "Test alternate candidates and use rollback to restore the checkpoint when a candidate fails validation.",
 }
 
 # The original cohort is reproduced with the first nine cases.
@@ -38,6 +39,7 @@ ORIGINAL = tuple(CASES)[:9]
 PAUSE_BY = {
     "noisy-validation": 3, "static-noise": 3, "alternating-checks": 5,
     "empty-search": 4, "failed-probes": 4, "bad-edits": 3, "named-conflict": 5,
+    "rollback-cycle": 5,
 }
 
 CHECKER = """from pathlib import Path
@@ -82,6 +84,11 @@ def actions(case, round_number):
         mode = "A" if round_number % 2 else "B"
         return [tool("write", path="state.txt", content=f"{mode}\n"),
                 tool("validate", check="mode-a"), tool("validate", check="mode-b")]
+    if case == "rollback-cycle":
+        if round_number == 1:
+            return [tool("validate")]
+        change = tool("write", path="state.txt", content="header\n") if round_number % 2 == 0 else tool("rollback")
+        return [change, tool("validate")]
     if case == "empty-search":
         return [tool("exec", command=f"find . -type f -name 'missing-{round_number}.marker'", timeout_seconds=5 + round_number)]
     if case == "failed-probes":
@@ -176,6 +183,7 @@ def prepare(directory, case):
         "named-conflict": {"mode-a":"A", "mode-b":"B"},
         "sandbox-write": {"acceptance":"legacy-ready"},
         "validation-progress": {"acceptance":"progress"},
+        "rollback-cycle": {"acceptance":"progress"},
         "noisy-validation": {"acceptance":"readiness"},
         "static-noise": {"acceptance":"readiness"},
     }.get(case, {})
@@ -224,6 +232,7 @@ def run_case(exe, directory, case, paired=None, token=None):
         "pauses":pauses, "validation_results":verification,
         "validation_outputs":len({event["data"]["streams"]["stderr"] for event in events if event["kind"]=="validation_receipt"}),
         "tool_counts":dict(Counter(row["tool"] for row in trace)),
+        "rollback_receipts":sum(event["kind"] == "rollback_receipt" for event in events),
         "errors":dict(Counter(row["code"] for row in trace if row["code"])),
         "prefix_pairs":max(0,len(wire)-1),
         "prefix_preserved":all(b["input"][:len(a["input"])]==a["input"] and b["instructions"]==a["instructions"]
@@ -241,6 +250,8 @@ def run_case(exe, directory, case, paired=None, token=None):
             data["passed"] = (run.returncode != 0 and len(pauses) == 1
                               and pauses[0]["reason"] == "LOOP_GUARD_TRIGGERED"
                               and pauses[0]["round"] <= PAUSE_BY[case] and data["prefix_preserved"])
+            if case == "rollback-cycle":
+                data["passed"] = data["passed"] and data["rollback_receipts"] == 2
         else:
             data["passed"] = (data["natural_end"] and not pauses and data.get("independent_passed", True)
                               and data["prefix_preserved"])
