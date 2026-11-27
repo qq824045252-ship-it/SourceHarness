@@ -58,6 +58,7 @@ fn research_samples_keep_source_coordinates_and_shared_edit_revision() {
         &ctx,
         &mut journal,
         1,
+        None,
         &json!({"scope":"workspace","query":"code=27","limit":1}),
     )
     .unwrap();
@@ -182,6 +183,7 @@ fn historical_validation_hit_links_to_the_original_stdout() {
         &ctx,
         &mut journal,
         2,
+        None,
         &json!({"scope":"history","query":"POL-031"}),
     )
     .unwrap();
@@ -208,6 +210,7 @@ fn model_request_marks_stale_history_and_keeps_the_archived_snapshot_available()
         &session.ctx,
         &mut session.journal,
         1,
+        None,
         &json!({"scope":"workspace","query":"limit="}),
     )
     .unwrap();

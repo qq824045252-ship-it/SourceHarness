@@ -1,0 +1,175 @@
+{
+  "model": "auto/deepseek-v4.1-flash-1017",
+  "effort": "low",
+  "exe_sha256": "25989b1ec338623e54ca8398b9e3e2d34b9668a5915126219686f43915fa828a",
+  "archive_sha256": "1ce6986eaebc3367aec3a8eee007fcb7cba101af3c93630996e2359bef572c99",
+  "old_report_sha256": "4603cb8f12d0e026bbd23bd688d3d624fcb3a7e8dd491787d927915e203d50ee",
+  "live_report_sha256": "180d7e46ef17dc8c50dc4dcfbfa73caf3ea9dd8317a8b75e4be7cea99d0ac2d6",
+  "baseline_verified_full_interval": true,
+  "historical_snapshot_refs": [
+    "r10"
+  ],
+  "initial": {
+    "issues": [
+      {
+        "code": "EXPECTED_SINGLE_JSON_OBJECT"
+      },
+      {
+        "code": "ARCHIVED_VALUE_MISMATCH",
+        "field": "line_117"
+      }
+    ],
+    "correct_fields": [
+      "line_44",
+      "line_179"
+    ]
+  },
+  "final": {
+    "issues": [],
+    "correct_fields": [
+      "line_44",
+      "line_117",
+      "line_179"
+    ]
+  },
+  "report_preserved": true,
+  "repair_process_exit": 0,
+  "final_validation_matches_delivered_revision": true,
+  "initial_request_contains_archived_value": false,
+  "validation": [
+    {
+      "artifacts": {},
+      "check": "acceptance",
+      "exit_code": 1,
+      "input_revisions": {
+        "C:\\Users\\servi\\Documents\\GitHub\\SourceHarness\\scripts\\eval_repair_loop.py": "6602ae92d94b60913d2741761e27926c1f7511c6902174af891b9ad299b66759",
+        "C:\\Users\\servi\\Documents\\GitHub\\SourceHarness\\target\\timeline-repair-20261127\\oracle.json": "5635faceff38b465f71708ad634fd875c4c982fee14c5eb38595033edaa77099"
+      },
+      "input_revisions_stable": true,
+      "launch_error": null,
+      "operation": "30.2.2",
+      "output_complete": true,
+      "passed": false,
+      "preview": "{\"issues\":[{\"code\":\"EXPECTED_SINGLE_JSON_OBJECT\"},{\"code\":\"ARCHIVED_VALUE_MISMATCH\",\"field\":\"line_117\"}],\"correct_fields\":[\"line_44\",\"line_179\"]}\r\n",
+      "program_revision": "5353e232b064a5b6957a9534e1007dda70fb5994eb2b877b3e0b2d47a5560ea1",
+      "result_ref": "r43",
+      "status": "ok",
+      "streams": {
+        "stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdout": "25c0cc4289ca3c823181f9891a11561080a094b0e933df4479ae76e0875f40cc"
+      },
+      "timed_out": false,
+      "workspace_changed_during_check": false,
+      "workspace_revision": "a77da211b3c6d42726455ea45514f585b5664735f98a79659add48f5f7ab5734",
+      "event": 44
+    },
+    {
+      "artifacts": {},
+      "check": "acceptance",
+      "exit_code": 0,
+      "input_revisions": {
+        "C:\\Users\\servi\\Documents\\GitHub\\SourceHarness\\scripts\\eval_repair_loop.py": "6602ae92d94b60913d2741761e27926c1f7511c6902174af891b9ad299b66759",
+        "C:\\Users\\servi\\Documents\\GitHub\\SourceHarness\\target\\timeline-repair-20261127\\oracle.json": "5635faceff38b465f71708ad634fd875c4c982fee14c5eb38595033edaa77099"
+      },
+      "input_revisions_stable": true,
+      "launch_error": null,
+      "operation": "30.5.1",
+      "output_complete": true,
+      "passed": true,
+      "preview": "{\"issues\":[],\"correct_fields\":[\"line_44\",\"line_117\",\"line_179\"]}\r\n",
+      "program_revision": "5353e232b064a5b6957a9534e1007dda70fb5994eb2b877b3e0b2d47a5560ea1",
+      "result_ref": "r62",
+      "status": "ok",
+      "streams": {
+        "stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdout": "106716a81c29062ac5c7cbe764c9fee0cf0043a6d96fc1957d18853953bbfe1a"
+      },
+      "timed_out": false,
+      "workspace_changed_during_check": false,
+      "workspace_revision": "8f622f73de26eca2498930ab912c70d01591d630009501eb7880cbed1c613655",
+      "event": 63
+    }
+  ],
+  "initial_failure_preview": "{\"issues\":[{\"code\":\"EXPECTED_SINGLE_JSON_OBJECT\"},{\"code\":\"ARCHIVED_VALUE_MISMATCH\",\"field\":\"line_117\"}],\"correct_fields\":[\"line_44\",\"line_179\"]}\r\n",
+  "failed_check_visible_before_edit": true,
+  "archived_value_delivered_after_failure_before_edit": true,
+  "archived_reads": [
+    {
+      "event": 49,
+      "ref": "r10",
+      "revision": "4603cb8f12d0e026bbd23bd688d3d624fcb3a7e8dd491787d927915e203d50ee",
+      "range": {
+        "byte_end": 16704,
+        "byte_start": 16530,
+        "end_line": 117,
+        "start_line": 117
+      }
+    }
+  ],
+  "live_report_reads": 0,
+  "corrections": [
+    56
+  ],
+  "tools": [
+    {
+      "event": 35,
+      "name": "research",
+      "status": "ok",
+      "code": null
+    },
+    {
+      "event": 40,
+      "name": "read",
+      "status": "ok",
+      "code": null
+    },
+    {
+      "event": 45,
+      "name": "validate",
+      "status": "ok",
+      "code": null
+    },
+    {
+      "event": 49,
+      "name": "read",
+      "status": "ok",
+      "code": null
+    },
+    {
+      "event": 57,
+      "name": "write",
+      "status": "ok",
+      "code": null
+    },
+    {
+      "event": 64,
+      "name": "validate",
+      "status": "ok",
+      "code": null
+    }
+  ],
+  "model_cost": {
+    "attempts": 6,
+    "known_usage": {
+      "input_tokens": 37183,
+      "output_tokens": 1449,
+      "reasoning_tokens": 715,
+      "total_tokens": 38632
+    },
+    "unknown_usage_attempts": 0,
+    "known_model_ms": 10602,
+    "unknown_duration_attempts": 0
+  },
+  "passed": true,
+  "exact_old_line_visible_in_repair_requests": {
+    "31": false,
+    "36": false,
+    "46": false,
+    "50": true,
+    "58": true,
+    "65": true
+  },
+  "checker_sha256": "6602ae92d94b60913d2741761e27926c1f7511c6902174af891b9ad299b66759",
+  "trace_entries_verified": 87,
+  "trace_sha256": "71eb89e740a88a6764b02135d28abb113e6f7d0ec00675ab6d4a9ad1319a4b1c"
+}

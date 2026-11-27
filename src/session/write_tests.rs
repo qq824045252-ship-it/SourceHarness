@@ -37,6 +37,32 @@ fn create_makes_workspace_parents_and_preserves_no_clobber_behavior() {
 }
 
 #[test]
+fn missing_replacement_explains_create_instead_of_requesting_another_read() {
+    let root = tempfile::tempdir().unwrap();
+    let ctx = WorkspaceContext::new(WorkspaceConfig::with_root(root.path())).unwrap();
+    let mut journal = Journal::open(&root.path().join(".sourceharness")).unwrap();
+    let rejected = write(
+        &ctx,
+        &mut journal,
+        "replace",
+        json!({"path":"evidence.md","mode":"replace","expected_revision":revision(b"old content"),"content":"new content"}),
+    );
+    assert_eq!(rejected["code"], "REVISION_CONFLICT");
+    assert_eq!(rejected["current_revision"], Value::Null);
+    let guidance = rejected["reason"].as_str().unwrap();
+    assert!(guidance.contains("mode=create") && guidance.contains("omit expected_revision"));
+    assert!(!root.path().join("evidence.md").exists());
+    let created = write(
+        &ctx,
+        &mut journal,
+        "create",
+        json!({"path":"evidence.md","mode":"create","content":"new content"}),
+    );
+    assert_eq!(created["status"], "ok");
+    assert_eq!(fs::read(root.path().join("evidence.md")).unwrap(), b"new content");
+}
+
+#[test]
 fn resumes_a_create_intent_after_only_some_parents_were_created() {
     let root = tempfile::tempdir().unwrap();
     let ctx = WorkspaceContext::new(WorkspaceConfig::with_root(root.path())).unwrap();

@@ -1,4 +1,5 @@
 mod history;
+mod inbox;
 mod journal;
 mod receipt;
 #[cfg(test)]
@@ -7,6 +8,7 @@ mod tools;
 mod validation;
 
 pub use history::{DEFAULT_BUDGET as DEFAULT_HISTORY_BUDGET, MAX_BUDGET as MAX_HISTORY_BUDGET, MIN_BUDGET as MIN_HISTORY_BUDGET};
+pub use inbox::InputInbox;
 pub use receipt::ReceiptMode;
 pub use tools::EditMode;
 pub use validation::Commands;
@@ -75,6 +77,7 @@ impl Default for Options {
 pub struct Session {
     ctx: WorkspaceContext,
     journal: Journal,
+    inbox: InputInbox,
     options: Options,
     binary_revision: String,
     _workspace_lock: File,
@@ -98,15 +101,33 @@ struct Checkpoint {
     final_text: Option<String>,
     profile: Value,
     queued_steering: Vec<(usize, Value)>,
-    attached_steering: Vec<usize>,
+    attached_steering: Vec<(usize, usize)>,
+    claimed_inputs: HashSet<usize>,
 }
 
 impl Checkpoint {
     fn attach_steering(&mut self) {
         for (event, text) in self.queued_steering.drain(..) {
+            self.attached_steering.push((event, self.input.len()));
             self.input.push(json!({"role":"user","content":text}));
-            self.attached_steering.push(event);
         }
+    }
+
+    fn steer_events(&self) -> Vec<usize> {
+        self.attached_steering.iter().map(|&(event, _)| event).collect()
+    }
+
+    fn steer_input_indices(&self) -> Vec<usize> {
+        self.attached_steering.iter().map(|&(_, index)| index).collect()
+    }
+
+    fn claim_input(&mut self, data: &Value) -> Result<(), String> {
+        if let Some(id) = data["inbox_id"].as_u64() {
+            if !self.claimed_inputs.insert(id as usize) {
+                return Err(format!("Session inbox entry {id} was already claimed"));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -117,6 +138,7 @@ pub struct SteeringInput {
 
 enum Start<'a> {
     Prompt(&'a str),
+    InboxPrompt(usize),
     Resume,
     Continue(Option<&'a str>),
 }
@@ -171,16 +193,23 @@ impl Session {
         lock.try_lock()
             .map_err(|err| format!("Workspace already has an open SourceHarness session: {err}"))?;
         let journal = Journal::open(&canonical)?;
+        let inbox = InputInbox::open(&canonical)?;
         let binary = std::env::current_exe()
             .and_then(fs::read)
             .map_err(|err| err.to_string())?;
-        Ok(Self {
+        let session = Self {
             ctx,
             journal,
+            inbox,
             options,
             binary_revision: revision(&binary),
             _workspace_lock: lock,
-        })
+        };
+        let checkpoint = session.checkpoint()?;
+        if checkpoint.run > 0 && checkpoint.final_text.is_none() {
+            session.inbox.lock()?.active_run = Some(checkpoint.run);
+        }
+        Ok(session)
     }
 
     pub fn is_pending(&self) -> Result<bool, String> {
@@ -204,6 +233,37 @@ impl Session {
         poll_steering: &mut dyn FnMut() -> Option<SteeringInput>,
     ) -> Result<String, String> {
         self.run_with_start(client, prompt.map_or(Start::Resume, Start::Prompt), observer, poll_steering)
+    }
+
+    pub fn input_inbox(&self) -> InputInbox {
+        self.inbox.clone()
+    }
+
+    pub fn next_inbox_prompt(&self) -> Result<Option<usize>, String> {
+        let checkpoint = self.checkpoint()?;
+        if checkpoint.run > 0 && checkpoint.final_text.is_none() {
+            return Ok(None);
+        }
+        Ok(self.inbox.lock()?.entries.iter()
+            .find(|entry| entry.steer_run.is_none() && !checkpoint.claimed_inputs.contains(&entry.id))
+            .map(|entry| entry.id))
+    }
+
+    pub fn has_inbox_steering(&self) -> Result<bool, String> {
+        let checkpoint = self.checkpoint()?;
+        Ok(checkpoint.run > 0 && checkpoint.final_text.is_none()
+            && self.inbox.lock()?.entries.iter().any(|entry| {
+                entry.steer_run == Some(checkpoint.run) && !checkpoint.claimed_inputs.contains(&entry.id)
+            }))
+    }
+
+    pub fn run_inbox_prompt(
+        &mut self,
+        client: &ResponsesClient,
+        id: usize,
+        observer: &mut dyn RunObserver,
+    ) -> Result<String, String> {
+        self.run_with_start(client, Start::InboxPrompt(id), observer, &mut || None)
     }
 
     pub fn continue_pending(
@@ -244,12 +304,27 @@ impl Session {
             profile["validation_inputs"] = json!(validation_inputs);
         }
         let mut checkpoint = self.checkpoint()?;
+        let continuation = match start {
+            Start::Continue(correction) => Some(self.continuation(&checkpoint, &profile, correction)?),
+            _ => None,
+        };
+        let inbox = self.inbox.clone();
+        let mut gate = inbox.lock()?;
         let entry = match start {
-            Start::Prompt(prompt) => {
+            Start::Prompt(_) | Start::InboxPrompt(_) => {
                 if checkpoint.run > 0 && checkpoint.final_text.is_none() {
                     return Err("A run is pending. Use --resume or --continue before starting a new request.".to_owned());
                 }
-                Some(json!({"text":prompt,"profile":profile}))
+                Some(match start {
+                    Start::Prompt(prompt) => json!({"text":prompt,"profile":profile}),
+                    Start::InboxPrompt(id) => {
+                        let entry = gate.entries.iter().find(|entry|
+                            entry.id == id && entry.steer_run.is_none() && !checkpoint.claimed_inputs.contains(&id)
+                        ).ok_or("Session inbox message is unavailable")?;
+                        json!({"text":entry.text,"profile":profile,"inbox_id":id,"received_ms":entry.received_ms})
+                    }
+                    _ => unreachable!(),
+                })
             }
             Start::Resume => {
                 if checkpoint.run == 0 {
@@ -263,7 +338,10 @@ impl Session {
                 }
                 None
             }
-            Start::Continue(correction) => Some(self.continuation(&checkpoint, &profile, correction)?),
+            Start::Continue(_) => {
+                self.claim_inbox_steering(&mut checkpoint, &gate)?;
+                continuation
+            }
         };
         if let Some(data) = entry {
             let run = self.journal.events.len() + 1;
@@ -271,6 +349,8 @@ impl Session {
             self.apply_user(&mut checkpoint, run, &data)?;
         }
         let run = checkpoint.run;
+        gate.active_run = Some(run);
+        drop(gate);
         let mut turn = None::<(TurnMetrics, Instant)>;
         for step in 0..=client.config().max_turns {
             while let Some(call) = checkpoint.pending.pop_front() {
@@ -324,10 +404,10 @@ impl Session {
             let output = self.journal.store_json(&json!(response.output_items))?;
             let raw_response = self.journal.store_json(&response.response)?;
             checkpoint.round = round;
-            self.collect_steering(&mut checkpoint, poll_steering)?;
             let calls = match calls_from(&response.output_items, run, round) {
                 Ok(calls) => calls,
                 Err(error) => {
+                    self.collect_steering(&mut checkpoint, poll_steering)?;
                     self.journal.append(
                         run,
                         "model_rejected",
@@ -338,12 +418,19 @@ impl Session {
                     return Err(error);
                 }
             };
+            self.collect_offered_steering(&mut checkpoint, poll_steering)?;
+            let mut gate = inbox.lock()?;
+            self.claim_inbox_steering(&mut checkpoint, &gate)?;
             let final_text = (calls.is_empty() && checkpoint.queued_steering.is_empty())
                 .then(|| extract_final_text(&response.output_items));
             let usage = response.usage_reported.then_some(response.usage);
             self.journal.append(run,"model_response",json!({"request":request,"round":round,"output":output,
                 "raw_response":raw_response,"response_id":response.response_id,"usage":usage,"elapsed_ms":elapsed_ms,
                 "final_text":final_text}))?;
+            if final_text.is_some() {
+                gate.active_run = None;
+            }
+            drop(gate);
             let metrics = TurnMetrics {
                 turn: round,
                 reasoning_item_count: response.output_items.iter().filter(|item| item["type"] == "reasoning").count(),
@@ -384,8 +471,9 @@ impl Session {
                 "model":client.config().model,"tools_revision":checkpoint.profile["tools_revision"],"effort":client.config().reasoning_effort,
                 "history_auxiliary":history_auxiliary});
             if !checkpoint.attached_steering.is_empty() {
-                data["steer_events"] = json!(checkpoint.attached_steering);
-                data["steer_input_start"] = json!(checkpoint.input.len() - checkpoint.attached_steering.len());
+                data["steer_events"] = json!(checkpoint.steer_events());
+                data["steer_input_start"] = json!(checkpoint.attached_steering[0].1);
+                data["steer_input_indices"] = json!(checkpoint.steer_input_indices());
             }
             let request = self.journal.append(run, "model_request", data)?;
             let started = Instant::now();
@@ -411,6 +499,30 @@ impl Session {
         checkpoint: &mut Checkpoint,
         poll: &mut dyn FnMut() -> Option<SteeringInput>,
     ) -> Result<(), String> {
+        let inbox = self.inbox.clone();
+        let state = inbox.lock()?;
+        self.claim_inbox_steering(checkpoint, &state)?;
+        drop(state);
+        self.collect_offered_steering(checkpoint, poll)
+    }
+
+    fn claim_inbox_steering(&mut self, checkpoint: &mut Checkpoint, inbox: &inbox::State) -> Result<(), String> {
+        for entry in &inbox.entries {
+            if entry.steer_run != Some(checkpoint.run) || checkpoint.claimed_inputs.contains(&entry.id) {
+                continue;
+            }
+            let data = json!({"text":entry.text,"received_ms":entry.received_ms,
+                "after_round":checkpoint.round,"inbox_id":entry.id});
+            let event = self.journal.append(checkpoint.run, "steer", data.clone())?;
+            checkpoint.claim_input(&data)?;
+            checkpoint.queued_steering.push((event, data["text"].clone()));
+        }
+        Ok(())
+    }
+
+    fn collect_offered_steering(
+        &mut self, checkpoint: &mut Checkpoint, poll: &mut dyn FnMut() -> Option<SteeringInput>,
+    ) -> Result<(), String> {
         while let Some(input) = poll() {
             let data = json!({"text":input.text,"received_ms":input.received_ms,"after_round":checkpoint.round});
             let event = self.journal.append(checkpoint.run, "steer", data.clone())?;
@@ -424,13 +536,21 @@ impl Session {
         for event in &self.journal.events {
             match event.kind.as_str() {
                 "user" => self.apply_user(&mut checkpoint, event.run, &event.data)?,
-                "steer" => checkpoint.queued_steering.push((event.seq, event.data["text"].clone())),
+                "steer" => {
+                    checkpoint.claim_input(&event.data)?;
+                    checkpoint.queued_steering.push((event.seq, event.data["text"].clone()));
+                }
                 "model_request" => {
                     checkpoint.attach_steering();
                     if !checkpoint.attached_steering.is_empty()
-                        && event.data["steer_events"] != json!(checkpoint.attached_steering)
+                        && event.data["steer_events"] != json!(checkpoint.steer_events())
                     {
                         return Err("Model request does not match the recorded corrections".to_owned());
+                    }
+                    if event.data.get("steer_input_indices").is_some()
+                        && event.data["steer_input_indices"] != json!(checkpoint.steer_input_indices())
+                    {
+                        return Err("Model request positions do not match the recorded corrections".to_owned());
                     }
                 }
                 "model_response" => {
@@ -466,7 +586,10 @@ impl Session {
     }
 
     fn apply_user(&self, checkpoint: &mut Checkpoint, run: usize, data: &Value) -> Result<(), String> {
-        checkpoint.attached_steering.clear();
+        checkpoint.claim_input(data)?;
+        if data["continuation"]["carry_steering"] != true {
+            checkpoint.attached_steering.clear();
+        }
         if let Some(link) = data.get("continuation") {
             let output = self.journal.load_json(&link["outputs"])?;
             let outputs = output.as_array().ok_or("Continuation has no output array")?;
@@ -509,7 +632,7 @@ impl Session {
             text.push_str(correction);
         }
         Ok(json!({"text":text,"profile":profile,"continuation":{
-            "run":checkpoint.run,"round":checkpoint.round,"outputs":outputs,"correction":correction
+            "run":checkpoint.run,"round":checkpoint.round,"outputs":outputs,"correction":correction,"carry_steering":true
         }}))
     }
 
@@ -590,7 +713,7 @@ impl Session {
                 json!({"status":"error","code":"INVALID_ARGUMENT","reason":err.to_string()})
             }
             ("read", Ok(args)) => tools::read(&self.ctx, &mut self.journal, run, &args)?,
-            ("research", Ok(args)) => tools::research(&self.ctx, &mut self.journal, run, &args)?,
+            ("research", Ok(args)) => tools::research(&self.ctx, &mut self.journal, run, Some(attempt), &args)?,
             ("search_result", Ok(args)) => tools::search_result(&self.journal, &args)?,
             ("edit" | "write", Ok(args)) => tools::modify(
                 &self.ctx,

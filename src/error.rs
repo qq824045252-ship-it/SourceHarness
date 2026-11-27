@@ -25,6 +25,17 @@ pub struct ErrorPayload {
     pub field: Option<String>,
     pub reason: &'static str,
     pub same_input_retry: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capture_group_bounds: Option<CaptureGroupBounds>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hint: Option<&'static str>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CaptureGroupBounds {
+    pub requested: usize,
+    pub min: usize,
+    pub max: usize,
 }
 
 impl ErrorPayload {
@@ -36,6 +47,8 @@ impl ErrorPayload {
             field: field.map(ToOwned::to_owned),
             reason,
             same_input_retry: false,
+            capture_group_bounds: None,
+            hint: None,
         }
     }
 

@@ -27,6 +27,6 @@ DeepSeek low completed three tasks twice in each mode. Each matched block used t
 | Summary plus diff | 6/6 | 48,406 | 4 |
 | Versioned receipt plus diff and references | 6/6 | 50,378 | 4 |
 
-The runner verified the actual outgoing tool payloads. It also preserved full original receipts for each mode. These counts describe six observations per arm. The archive retains cost ranges, cache telemetry, failed checks, interrupted calls, and tool rejects. The runs held the placement of instructions constant.
+The runner verified the direct tool payloads and preserved each full original receipt. Automatic history was enabled for all modes. A later audit found that history also delivered fields omitted from the direct payload in all six summary runs and all six diff runs. The table compares the direct payloads with automatic history enabled. The archive retains cache telemetry, failed checks, interrupted calls, and rejected tool calls.
 
 [Summary and source hashes](results.json) · [Fixtures, requests, journals, and checksums](fixtures-and-traces.zip)

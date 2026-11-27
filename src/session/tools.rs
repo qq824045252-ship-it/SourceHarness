@@ -45,23 +45,25 @@ pub fn definitions(mode: EditMode) -> Vec<Value> {
             json!({"path":path,"expected_revision":version,"patch":{"type":"string"}}), &["path","expected_revision","patch"]),
     };
     let mut indexed_search = crate::registry::search_result_schema();
-    indexed_search["description"] = json!("Search lines in a saved session result for exact counts, matching lines, or regex capture groups. Use a result_ref from this session. Omit line bounds for one full scan. Use matching_lines for a line count and total_occurrences for a match count. Once those counts answer the task, respond without another search.");
+    indexed_search["description"] = json!("Search lines in an immutable session result for exact counts, sample lines, or regex groups. Omit line bounds to scan the whole snapshot. Attribute counts to their query and scanned_lines. Sample limits affect only displayed lines. Use research with scope=result for a cross-line literal.");
     indexed_search["parameters"]["properties"]["result_ref"]["description"] =
         json!("Copy the immutable result_ref from a prior session tool result.");
     vec![
-        definition("research", "Find literal evidence in the workspace, a saved result, or session history. Pass next back to research to enumerate the saved match set. Read the hit's result_ref for the original bytes. Historical calls can include arguments_ref for read.",
-            json!({"scope":{"type":"string","enum":["workspace","result","history","page"]},
+        definition("research", "Find literal evidence in the workspace, a saved result, or session history. Pass next to enumerate saved hits or retry to run the suggested query. Read a hit's result_ref for original bytes. Historical calls can include arguments_ref for read.",
+            json!({"scope":{"type":"string","enum":["workspace","result","history","page","retry"]},
                 "path":{"type":"string","description":"Workspace scope only. Omit to search the whole workspace."},
-                "result_ref":{"type":"string","description":"Result or page scope only. Copy a saved result_ref."},
+                "result_ref":{"type":"string","description":"Result, page or retry scope only. Copy the corresponding result_ref."},
                 "query":{"type":"string","description":"Case-sensitive literal, including exact line endings for multiline text. Omit to list workspace paths or recent history."},
                 "offset":{"type":"integer","minimum":0,"description":"Copy the offset from next when scope is page."},
-                "limit":{"type":"integer","minimum":1,"maximum":20,"default":8,"description":"Hits per page, up to 20. Follow next for more."}}), &["scope"]),
-        definition("read", "Read exact original text by file path or an immutable result_ref. A path supplied with a reference must match its source. Use 1-based source lines or UTF-8 byte offsets. Follow next exactly to keep the same snapshot and requested range.",
+                "limit":{"type":"integer","minimum":1,"default":8,"description":"Requested hits per page. Each page returns at most 20 hits. Follow next for more."}}), &["scope"]),
+        definition("read", "Read exact original text by file path or an immutable result_ref. A path supplied with a reference must match its source. Use inclusive 1-based line bounds, a starting line and line_count, or UTF-8 byte offsets. Follow next exactly to keep the same snapshot and requested range.",
             json!({"path":path,"result_ref":reference,"start_line":{"type":"integer","minimum":1},
-                "line_count":{"type":"integer","minimum":1},"start_byte":{"type":"integer","minimum":0},"end_byte":{"type":"integer","minimum":0}}), &[]),
+                "end_line":{"type":"integer","minimum":1,"description":"Inclusive source line. Use with start_line instead of line_count."},
+                "line_count":{"type":"integer","minimum":1,"description":"Number of source lines. Omit when using end_line."},
+                "start_byte":{"type":"integer","minimum":0},"end_byte":{"type":"integer","minimum":0}}), &[]),
         edit,
         definition("write", "Create a UTF-8 file and any missing workspace parent directories with mode=create. For create, omit expected_revision. For a full replacement, use mode=replace and pass the observed revision of that same file. Returns a verified revision and diff.",
-            json!({"path":path,"content":{"type":"string"},"mode":{"type":"string","enum":["create","replace"]},
+            json!({"path":path,"content":{"type":"string","description":"Exact complete UTF-8 file text. Include all required line endings, including the final newline."},"mode":{"type":"string","enum":["create","replace"]},
                 "expected_revision":{"type":"string","description":"Use the observed file revision for mode=replace. Omit this parameter for mode=create."}}), &["path","content","mode"]),
         indexed_search,
     ]
@@ -73,6 +75,7 @@ struct ReadArgs {
     path: Option<String>,
     result_ref: Option<String>,
     start_line: Option<usize>,
+    end_line: Option<usize>,
     line_count: Option<usize>,
     start_byte: Option<usize>,
     end_byte: Option<usize>,
@@ -369,16 +372,19 @@ fn read_page(raw: &[u8], artifact: &Artifact, args: &ReadArgs) -> Reply {
     let count = lines.len() - 1;
     let user = match (
         args.start_line,
+        args.end_line,
         args.line_count,
         args.start_byte,
         args.end_byte,
     ) {
-        (None, None, start, end) => Some((start.unwrap_or(0), end.unwrap_or(text.len()))),
-        (start, page, None, None) => {
+        (None, None, None, start, end) => Some((start.unwrap_or(0), end.unwrap_or(text.len()))),
+        (start, end, page, None, None) if end.is_none() || page.is_none() => {
             let start = start.unwrap_or(1);
-            let end = page.map_or(count, |n| {
-                start.saturating_sub(1).saturating_add(n).min(count)
-            });
+            let end = end
+                .unwrap_or_else(|| {
+                    page.map_or(count, |n| start.saturating_sub(1).saturating_add(n))
+                })
+                .min(count);
             if start > 0 && end >= start {
                 lines
                     .get(start - 1)
@@ -395,7 +401,11 @@ fn read_page(raw: &[u8], artifact: &Artifact, args: &ReadArgs) -> Reply {
     else {
         let mut error = rejected(
             "INVALID_RANGE",
-            "Use one coordinate system and valid source boundaries.",
+            if args.end_byte.is_some_and(|byte| byte > text.len()) {
+                "end_byte is beyond the file. Use total_bytes or omit end_byte to read to the end."
+            } else {
+                "Use valid source bounds. Choose end_line or line_count for line reads, or use byte offsets."
+            },
         );
         error["result_ref"] = json!(artifact.result_ref);
         error["revision"] = json!(artifact.revision);
@@ -477,24 +487,19 @@ pub fn read(ctx: &WorkspaceContext, journal: &mut Journal, run: usize, args: &Va
         }
     };
     match artifact_content(&artifact, |hash| journal.get(hash))? {
-        ArtifactContent::Full { bytes, revision } => {
-            read_page(&bytes, &Artifact { revision, ..artifact }, &args)
-        }
+        ArtifactContent::Full { bytes, revision } => read_page(
+            &bytes,
+            &Artifact {
+                revision,
+                ..artifact
+            },
+            &args,
+        ),
         ArtifactContent::Paged(reply) => Ok(reply),
     }
 }
 
 pub fn search_result(journal: &Journal, args: &Value) -> Reply {
-    if args["query"]
-        .as_str()
-        .is_some_and(|query| query.contains('\n'))
-        && args["match_mode"].as_str().unwrap_or("literal") == "literal"
-    {
-        return Ok(rejected(
-            "INVALID_ARGUMENT",
-            "search_result matches within lines. Use research on this result for a multiline literal.",
-        ));
-    }
     let mut metadata = json!({});
     let mut paged = None;
     let outcome = crate::search::execute_snapshot(&args.to_string(), |reference| {
@@ -509,7 +514,8 @@ pub fn search_result(journal: &Journal, args: &Value) -> Reply {
             }
         };
         let raw = String::from_utf8(bytes).map_err(|err| err.to_string())?;
-        metadata = json!({"source":artifact.source,"revision":revision,"result_ref":artifact.result_ref});
+        metadata =
+            json!({"source":artifact.source,"revision":revision,"result_ref":artifact.result_ref});
         Ok(Some(Snapshot::new(artifact.result_ref, raw)))
     })?;
     if let Some(reply) = paged {
@@ -517,7 +523,12 @@ pub fn search_result(journal: &Journal, args: &Value) -> Reply {
     }
     let mut envelope = match outcome {
         Ok(envelope) => envelope,
-        Err(error) => return serde_json::to_value(error).map_err(|err| err.to_string()),
+        Err(mut error) => {
+            if error.reason == crate::search::MULTILINE_LITERAL_UNSUPPORTED {
+                error.hint = Some("Use research with scope=result, the same result_ref, and the exact cross-line literal query.");
+            }
+            return serde_json::to_value(error).map_err(|err| err.to_string());
+        }
     };
     let available = MAX_RESPONSE_BYTES.saturating_sub(json_byte_len(&metadata) - 1);
     crate::search::enforce_response_budget(&mut envelope, available);
@@ -655,7 +666,7 @@ impl ResearchReport {
             let mut value = json!({"status":"ok","source":{"kind":"research","scope":artifact.source["scope"]},
                 "revision":artifact.revision,"result_ref":artifact.result_ref,"result_kind":"research_report",
                 "coverage":self.coverage,"presentation":{"matching_items":self.count,"retained":self.count,
-                    "offset":offset,"shown":shown,"complete":offset==0 && shown==self.count},"hits":hits});
+                    "offset":offset,"shown":shown,"page_limit":limit,"complete":offset==0 && shown==self.count},"hits":hits});
             if let Some(preview) = artifact.source.get("preview_ref") {
                 value["preview_ref"] = preview.clone();
             }
@@ -781,21 +792,102 @@ fn match_lines(
     Ok(())
 }
 
-pub fn research(ctx: &WorkspaceContext, journal: &mut Journal, run: usize, args: &Value) -> Reply {
-    let mut args: ResearchArgs = match parse(args) {
+fn decoded_json_contains(value: &Value, query: &str) -> bool {
+    match value {
+        Value::String(text) => text.contains(query),
+        Value::Array(items) => items.iter().any(|item| decoded_json_contains(item, query)),
+        Value::Object(fields) => fields
+            .values()
+            .any(|field| decoded_json_contains(field, query)),
+        _ => false,
+    }
+}
+
+fn unescape_query_line_breaks(mut rest: &str) -> Option<String> {
+    let mut decoded = String::with_capacity(rest.len());
+    let mut has_line_break = false;
+    while let Some(character) = rest.chars().next() {
+        if let Some(tail) = rest.strip_prefix("\\r\\n") {
+            decoded.push_str("\r\n");
+            has_line_break = true;
+            rest = tail;
+        } else if let Some(tail) = rest.strip_prefix("\\n") {
+            decoded.push('\n');
+            has_line_break = true;
+            rest = tail;
+        } else if let Some(tail) = rest.strip_prefix("\\\\") {
+            decoded.push('\\');
+            rest = tail;
+        } else {
+            decoded.push(character);
+            rest = &rest[character.len_utf8()..];
+        }
+    }
+    has_line_break.then_some(decoded)
+}
+
+pub fn research(
+    ctx: &WorkspaceContext,
+    journal: &mut Journal,
+    run: usize,
+    history_before: Option<usize>,
+    input: &Value,
+) -> Reply {
+    let mut args: ResearchArgs = match parse(input) {
         Ok(v) => v,
         Err(e) => return Ok(e),
+    };
+    let saved_query: Value;
+    let input = if args.scope == "retry" {
+        if args.path.is_some()
+            || args.query.is_some()
+            || args.offset.is_some()
+            || args.limit.is_some()
+        {
+            return Ok(rejected(
+                "INVALID_ARGUMENT",
+                "Pass the retry arguments from research unchanged.",
+            ));
+        }
+        let Some(artifact) = args
+            .result_ref
+            .as_deref()
+            .and_then(|r| journal.resolve(r))
+            .filter(|artifact| artifact.source["kind"] == "research_retry")
+        else {
+            return Ok(rejected(
+                "RESULT_NOT_FOUND",
+                "Use the result_ref from the suggested research retry.",
+            ));
+        };
+        saved_query = serde_json::from_slice(&journal.get(&artifact.revision)?)
+            .map_err(|err| err.to_string())?;
+        args = serde_json::from_value(saved_query.clone()).map_err(|err| err.to_string())?;
+        &saved_query
+    } else {
+        input
     };
     args.path = args.path.filter(|value| !value.is_empty());
     args.result_ref = args.result_ref.filter(|value| !value.is_empty());
     args.query = args.query.filter(|value| !value.is_empty());
     let query = args.query.as_deref().unwrap_or("");
-    let limit = args.limit.unwrap_or(8);
-    if !(1..=20).contains(&limit) || query.len() > 512 {
-        return Ok(rejected(
+    let requested_limit = args.limit.unwrap_or(8);
+    if requested_limit == 0 {
+        let mut error = rejected(
             "INVALID_ARGUMENT",
-            "Use a query of at most 512 bytes and limit 1 to 20.",
-        ));
+            "Set limit to a positive number and use next for further hits.",
+        );
+        error["field"] = json!("limit");
+        return Ok(error);
+    }
+    let limit = requested_limit.min(20);
+    if query.len() > 512 {
+        let mut error = rejected(
+            "INVALID_ARGUMENT",
+            "Use a query of at most 512 UTF-8 bytes.",
+        );
+        error["field"] = json!("query");
+        return Ok(error);
     }
     if args.scope == "page" {
         if args.path.is_some() || args.query.is_some() || args.offset.is_none() {
@@ -901,7 +993,10 @@ pub fn research(ctx: &WorkspaceContext, journal: &mut Journal, run: usize, args:
                 journal,
                 std::str::from_utf8(&raw).map_err(|e| e.to_string())?,
                 query,
-                &Artifact { revision, ..artifact },
+                &Artifact {
+                    revision,
+                    ..artifact
+                },
                 &mut hits,
             )?;
             inspected = 1;
@@ -911,6 +1006,7 @@ pub fn research(ctx: &WorkspaceContext, journal: &mut Journal, run: usize, args:
                 .events
                 .iter()
                 .rev()
+                .filter(|event| history_before.is_none_or(|before| event.seq < before))
                 .filter(|e| {
                     matches!(
                         e.kind.as_str(),
@@ -932,6 +1028,7 @@ pub fn research(ctx: &WorkspaceContext, journal: &mut Journal, run: usize, args:
                                     | "history_arguments"
                                     | "history_result"
                                     | "research"
+                                    | "research_retry"
                                     | "research_hit"
                                     | "research_preview"
                             )
@@ -945,19 +1042,23 @@ pub fn research(ctx: &WorkspaceContext, journal: &mut Journal, run: usize, args:
                     json!({"seq":event.seq,"run":event.run,"kind":event.kind,"data":event.data});
                 let kind = event.kind.as_str();
                 let has_output = matches!(kind, "tool_result" | "tool_skipped" | "tool_reconciled");
-                let has_arguments = matches!(kind, "tool_attempt" | "tool_skipped" | "tool_reconciled");
-                let mut found = record.to_string().contains(query);
+                let has_arguments =
+                    matches!(kind, "tool_attempt" | "tool_skipped" | "tool_reconciled");
+                let mut found =
+                    decoded_json_contains(&record, query) || record.to_string().contains(query);
                 if !found && has_output {
-                    found = journal
-                        .load_json(&event.data["output"])?
-                        .to_string()
-                        .contains(query);
+                    let output = journal.load_json(&event.data["output"])?;
+                    found =
+                        decoded_json_contains(&output, query) || output.to_string().contains(query);
                 }
                 if !found && has_arguments {
                     let hash = event.data["arguments"]
                         .as_str()
                         .ok_or("Missing recorded arguments")?;
-                    found = String::from_utf8_lossy(&journal.get(hash)?).contains(query);
+                    let raw = journal.get(hash)?;
+                    found = String::from_utf8_lossy(&raw).contains(query)
+                        || serde_json::from_slice(&raw)
+                            .is_ok_and(|json| decoded_json_contains(&json, query));
                 }
                 if found {
                     let source = json!({"kind":"history","event":event.seq});
@@ -1035,7 +1136,26 @@ pub fn research(ctx: &WorkspaceContext, journal: &mut Journal, run: usize, args:
         }
     }
     let artifact = journal.artifact(run, source, &manifest)?;
-    report.page(journal, run, &artifact, 0, limit)
+    let mut reply = report.page(journal, run, &artifact, 0, limit)?;
+    if report.count == 0 {
+        let alternative = unescape_query_line_breaks(query)
+            .map(|decoded| (decoded, "The literal query had no matches. If you intended escaped line breaks, pass retry unchanged to run the decoded query."))
+            .or_else(|| {
+                (query.contains('\n') && !query.contains('\r')).then(|| (
+                    query.replace('\n', "\r\n"),
+                    "The literal LF query had no matches. If the source may use CRLF, pass retry unchanged to run the CRLF query.",
+                ))
+            });
+        if let Some((query, hint)) = alternative {
+            let mut retry = input.clone();
+            retry["query"] = json!(query);
+            let args = serde_json::to_vec(&retry).map_err(|err| err.to_string())?;
+            let saved = journal.artifact(run, json!({"kind":"research_retry"}), &args)?;
+            reply["query_hint"] = json!(hint);
+            reply["retry"] = json!({"scope":"retry","result_ref":saved.result_ref});
+        }
+    }
+    Ok(reply)
 }
 
 fn conflict(
@@ -1061,6 +1181,7 @@ fn conflict(
         error["preview"] = json!(truncate_utf8_bytes(content, 512).0);
     } else {
         error["current_revision"] = Value::Null;
+        error["reason"] = json!("The file is absent. If the task calls for creating it, use write with mode=create and omit expected_revision.");
     }
     Ok(error)
 }
@@ -1209,6 +1330,17 @@ pub fn modify(
             }
         }
     } else {
+        let revision_missing =
+            input["expected_revision"].is_null() || input["expected_revision"] == "";
+        if let (true, Some(path)) = (revision_missing, input["path"].as_str()) {
+            let mut error = rejected(
+                "INVALID_ARGUMENT",
+                "Edit requires expected_revision. Read the target file and use its returned revision and exact source range.",
+            );
+            error["field"] = json!("expected_revision");
+            error["read"] = json!({"path":path});
+            return Ok(error);
+        }
         let (path, rev, edit) = match mode {
             EditMode::Text => {
                 let args: EditArgs<TextChange> = match parse(input) {

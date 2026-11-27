@@ -13,14 +13,54 @@ fn research_accepts_empty_defaults_for_optional_fields() {
     fs::write(root.path().join("service.cfg"), "timeout=30\n").unwrap();
     let ctx = WorkspaceContext::new(WorkspaceConfig::with_root(root.path())).unwrap();
     let mut journal = Journal::open(&root.path().join(".sourceharness")).unwrap();
-    let list = research(&ctx, &mut journal, 1, &json!({
-        "scope":"workspace","path":"","query":"","result_ref":"","offset":0,"limit":20
-    })).unwrap();
+    let list = research(
+        &ctx,
+        &mut journal,
+        1,
+        None,
+        &json!({
+            "scope":"workspace","path":"","query":"","result_ref":"","offset":0,"limit":20
+        }),
+    )
+    .unwrap();
     assert_eq!(list["status"], "ok");
     assert_eq!(list["presentation"]["matching_items"], 1);
     assert_eq!(list["hits"][0]["source"]["path"], "service.cfg");
-    let invalid = research(&ctx, &mut journal, 1, &json!({"scope":"workspace","offset":1})).unwrap();
+    let invalid = research(
+        &ctx,
+        &mut journal,
+        1,
+        None,
+        &json!({"scope":"workspace","offset":1}),
+    )
+    .unwrap();
     assert_eq!(invalid["code"], "INVALID_ARGUMENT");
+}
+
+#[test]
+fn research_paginates_a_requested_limit_above_the_page_capacity() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("report.txt"), "item\n".repeat(23)).unwrap();
+    let ctx = WorkspaceContext::new(WorkspaceConfig::with_root(root.path())).unwrap();
+    let mut journal = Journal::open(&root.path().join(".sourceharness")).unwrap();
+    let first = research(
+        &ctx,
+        &mut journal,
+        1,
+        None,
+        &json!({
+            "scope":"workspace","query":"item","limit":50
+        }),
+    )
+    .unwrap();
+    assert_eq!(first["presentation"]["matching_items"], 23);
+    assert_eq!(first["presentation"]["page_limit"], 20);
+    assert_eq!(first["presentation"]["shown"], 20);
+    assert_eq!(first["next"]["offset"], 20);
+    let rest = research(&ctx, &mut journal, 1, None, &first["next"]).unwrap();
+    assert_eq!(rest["presentation"]["shown"], 3);
+    assert_eq!(rest["hits"][0]["range"]["start_line"], 21);
+    assert!(rest.get("next").is_none());
 }
 
 #[test]
@@ -36,6 +76,7 @@ fn literal_multiline_hits_report_exact_bytes_and_original_line_ranges() {
         &ctx,
         &mut journal,
         1,
+        None,
         &json!({"scope":"workspace","query":crlf}),
     )
     .unwrap();
@@ -53,6 +94,7 @@ fn literal_multiline_hits_report_exact_bytes_and_original_line_ranges() {
         &ctx,
         &mut journal,
         1,
+        None,
         &json!({"scope":"result","result_ref":hit["result_ref"],"query":lf}),
     )
     .unwrap();
@@ -76,6 +118,7 @@ fn all_result_hits_are_pageable_after_the_workspace_changes() {
         &ctx,
         &mut journal,
         1,
+        None,
         &json!({"scope":"workspace","query":"match","limit":20}),
     )
     .unwrap();
@@ -98,7 +141,7 @@ fn all_result_hits_are_pageable_after_the_workspace_changes() {
             break;
         }
         assert_eq!(page["next"]["offset"], expected_line - 1);
-        page = research(&ctx, &mut journal, 1, &page["next"]).unwrap();
+        page = research(&ctx, &mut journal, 1, None, &page["next"]).unwrap();
     }
     assert_eq!(expected_line, 3001);
 }
@@ -124,12 +167,15 @@ fn the_report_ref_exposes_matches_after_the_first_batch_to_each_content_tool() {
         &ctx,
         &mut journal,
         1,
+        None,
         &json!({"scope":"workspace","path":"many.txt","query":"label="}),
     )
     .unwrap();
     let reference = report["result_ref"].as_str().unwrap();
     let manifest = journal.resolve(reference).unwrap();
-    let preview = journal.resolve(report["preview_ref"].as_str().unwrap()).unwrap();
+    let preview = journal
+        .resolve(report["preview_ref"].as_str().unwrap())
+        .unwrap();
     assert_eq!(preview.source["kind"], "research_preview");
     assert_eq!(preview.source["presentation"]["shown"], RESEARCH_BATCH_SIZE);
     assert_eq!(preview.source["presentation"]["matching_items"], 300);
@@ -173,6 +219,7 @@ fn the_report_ref_exposes_matches_after_the_first_batch_to_each_content_tool() {
             &ctx,
             &mut journal,
             1,
+            None,
             &json!({"scope":"result","result_ref":reference,"query":"marker-bravo"}),
         )
         .unwrap();
@@ -221,13 +268,12 @@ fn oversized_reports_give_all_content_tools_a_real_cursor_and_scoped_preview() {
             &ctx,
             &mut journal,
             1,
+            None,
             &json!({"scope":"result","result_ref":reference,"query":"label="}),
         )
         .unwrap(),
-        serde_json::from_str(
-            &inspect_artifact_content(&report, |hash| journal.get(hash)).unwrap(),
-        )
-        .unwrap(),
+        serde_json::from_str(&inspect_artifact_content(&report, |hash| journal.get(hash)).unwrap())
+            .unwrap(),
     ];
     for reply in &replies {
         assert_eq!(reply["code"], "RESEARCH_PAGED");
@@ -235,7 +281,7 @@ fn oversized_reports_give_all_content_tools_a_real_cursor_and_scoped_preview() {
         assert_eq!(reply["preview_ref"], preview.result_ref);
         assert_eq!(reply["next"]["result_ref"], *reference);
     }
-    let page = research(&ctx, &mut journal, 1, &replies[0]["next"]).unwrap();
+    let page = research(&ctx, &mut journal, 1, None, &replies[0]["next"]).unwrap();
     assert_eq!(page["status"], "ok");
     assert_eq!(page["presentation"]["offset"], 0);
     assert_eq!(page["presentation"]["matching_items"], count);
@@ -271,6 +317,7 @@ fn archived_history_pages_keep_exact_argument_references_past_128_hits() {
         &ctx,
         &mut journal,
         1,
+        None,
         &json!({"scope":"history","query":"old argument","limit":20}),
     )
     .unwrap();
@@ -299,7 +346,7 @@ fn archived_history_pages_keep_exact_argument_references_past_128_hits() {
         if page.get("next").is_none() {
             break;
         }
-        page = research(&ctx, &mut journal, 1, &page["next"]).unwrap();
+        page = research(&ctx, &mut journal, 1, None, &page["next"]).unwrap();
     }
     assert_eq!(next_index, 0);
 }
@@ -314,7 +361,11 @@ fn history_exposes_the_arguments_and_outcomes_of_redirected_calls() {
     for (kind, status) in [("tool_skipped", "skipped"), ("tool_reconciled", "ok")] {
         let output = journal.store_json(&json!({"status":status})).unwrap();
         journal
-            .append(1, kind, json!({"name":"write","arguments":arguments,"output":output}))
+            .append(
+                1,
+                kind,
+                json!({"name":"write","arguments":arguments,"output":output}),
+            )
             .unwrap();
     }
     journal
@@ -324,6 +375,7 @@ fn history_exposes_the_arguments_and_outcomes_of_redirected_calls() {
         &ctx,
         &mut journal,
         1,
+        None,
         &json!({"scope":"history","query":"steer-marker"}),
     )
     .unwrap();
@@ -349,6 +401,156 @@ fn history_exposes_the_arguments_and_outcomes_of_redirected_calls() {
         let output: Value = serde_json::from_str(output["content"].as_str().unwrap()).unwrap();
         assert_eq!(output["status"], status);
     }
+}
+
+#[test]
+fn history_search_matches_decoded_argument_and_result_text_without_losing_originals() {
+    let root = tempfile::tempdir().unwrap();
+    let ctx = WorkspaceContext::new(WorkspaceConfig::with_root(root.path())).unwrap();
+    let mut journal = Journal::open(&root.path().join(".sourceharness")).unwrap();
+    let text = "policy=\"approved\"\r\npath=dir\\report.txt";
+    let raw = format!("  {}\r\n", json!({"query":text}));
+    let arguments = journal.put(raw.as_bytes()).unwrap();
+    let attempt = journal
+        .append(
+            1,
+            "tool_attempt",
+            json!({"name":"research","arguments":arguments}),
+        )
+        .unwrap();
+    let output = journal
+        .store_json(&json!({"status":"ok","content":text}))
+        .unwrap();
+    journal
+        .append(
+            1,
+            "tool_result",
+            json!({"name":"research","attempt":attempt,"output":output}),
+        )
+        .unwrap();
+    let current_attempt = journal
+        .append(
+            2,
+            "tool_attempt",
+            json!({"name":"research","arguments":arguments}),
+        )
+        .unwrap();
+
+    let result = research(
+        &ctx,
+        &mut journal,
+        2,
+        Some(current_attempt),
+        &json!({"scope":"history","query":text}),
+    )
+    .unwrap();
+    assert_eq!(result["presentation"]["matching_items"], 2);
+    assert_eq!(result["coverage"]["items_scanned"], 2);
+    let before = read(
+        &ctx,
+        &mut journal,
+        2,
+        &json!({"result_ref":result["hits"][1]["arguments_ref"]}),
+    )
+    .unwrap();
+    assert_eq!(before["content"], raw);
+    let after = read(
+        &ctx,
+        &mut journal,
+        2,
+        &json!({"result_ref":result["hits"][0]["output_ref"]}),
+    )
+    .unwrap();
+    let after: Value = serde_json::from_str(after["content"].as_str().unwrap()).unwrap();
+    assert_eq!(after["content"], text);
+    let escaped = text.replace("\r\n", "\\r\\n");
+    let missed = research(
+        &ctx,
+        &mut journal,
+        2,
+        Some(current_attempt),
+        &json!({"scope":"history","query":escaped}),
+    )
+    .unwrap();
+    assert_eq!(missed["presentation"]["matching_items"], 0);
+    assert_eq!(missed["retry"]["scope"], "retry");
+    let retried = research(
+        &ctx,
+        &mut journal,
+        2,
+        Some(current_attempt),
+        &missed["retry"],
+    )
+    .unwrap();
+    assert_eq!(retried["presentation"]["matching_items"], 2);
+    assert_eq!(retried["hits"][1]["seq"], attempt);
+    assert_eq!(
+        research(
+            &ctx,
+            &mut journal,
+            2,
+            Some(current_attempt),
+            &json!({"scope":"retry","result_ref":result["result_ref"]})
+        )
+        .unwrap()["code"],
+        "RESULT_NOT_FOUND"
+    );
+    assert_eq!(
+        super::unescape_query_line_breaks(r#"新\r\npath=dir\\report.txt"#).as_deref(),
+        Some("新\r\npath=dir\\report.txt")
+    );
+    assert_eq!(super::unescape_query_line_breaks(r"\\n"), None);
+    let normalized = text.replace("\r\n", "\n");
+    let missed = research(
+        &ctx,
+        &mut journal,
+        2,
+        Some(current_attempt),
+        &json!({"scope":"history","query":normalized}),
+    )
+    .unwrap();
+    assert_eq!(missed["presentation"]["matching_items"], 0);
+    let retried = research(
+        &ctx,
+        &mut journal,
+        2,
+        Some(current_attempt),
+        &missed["retry"],
+    )
+    .unwrap();
+    assert_eq!(retried["presentation"]["matching_items"], 2);
+    assert_eq!(retried["hits"][1]["seq"], attempt);
+}
+
+#[test]
+fn read_accepts_the_inclusive_line_bounds_returned_by_research() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(
+        root.path().join("report.txt"),
+        "line 1\r\nline 2\r\nline 3\r\nline 4\r\n",
+    )
+    .unwrap();
+    let ctx = WorkspaceContext::new(WorkspaceConfig::with_root(root.path())).unwrap();
+    let mut journal = Journal::open(&root.path().join(".sourceharness")).unwrap();
+    let found = research(
+        &ctx,
+        &mut journal,
+        1,
+        None,
+        &json!({"scope":"workspace","query":"line 2\r\nline 3"}),
+    )
+    .unwrap();
+    let hit = &found["hits"][0];
+    let span = json!({"result_ref":hit["result_ref"],"start_line":hit["range"]["start_line"],"end_line":hit["range"]["end_line"]});
+    let original = read(&ctx, &mut journal, 1, &span).unwrap();
+    assert_eq!(original["content"], "line 2\r\nline 3\r\n");
+    assert_eq!(original["revision"], hit["revision"]);
+    let mut ambiguous = span;
+    ambiguous["line_count"] = json!(1);
+    assert_eq!(
+        read(&ctx, &mut journal, 1, &ambiguous).unwrap()["code"],
+        "INVALID_RANGE"
+    );
 }
 
 #[test]

@@ -14,8 +14,9 @@ import sys
 import time
 
 from session_eval_cases import (
-    BASE_A, BASE_B, BASELINE_PROMPT, HOLDOUT, Case, build_case, grade, policy_case, sha,
+    BASE_A, BASE_B, BASELINE_PROMPT, HOLDOUT, Case, Policy, build_case, grade, policy_case, sha,
 )
+from session_wire_audit import feedback_audit, request_context
 
 MAINTAINER_NOTE = b"\n# Maintainer note, preserve it.\n"
 PROVENANCE_PROMPT = (
@@ -40,6 +41,7 @@ class Trial:
     history: str = "events"
     freshness: str = "on"
     projection: str = "on"
+    notices: str | None = None
     recovery: str = ""
     provenance: bool = False
     validation_drift: bool = False
@@ -54,6 +56,8 @@ class Trial:
         ]
         if self.receipt != "versioned":
             flags.extend(["--receipt-mode", self.receipt])
+        if self.notices is not None:
+            flags.extend(["--workspace-change-notices", self.notices])
         return flags
 
 
@@ -118,7 +122,7 @@ def request_cache(root, events):
     }
 
 
-def execute(args, checks, root, trial, prompt, interrupt=False, continuation=False, executable=None):
+def execute(args, checks, root, trial, prompt, interrupt=False, continuation=False, executable=None, label=None):
     env = os.environ.copy()
     env.pop("SOURCE_HARNESS_TEST_INTERRUPT", None)
     if interrupt:
@@ -141,7 +145,7 @@ def execute(args, checks, root, trial, prompt, interrupt=False, continuation=Fal
         exit_code = None
         stdout = (error.stdout or b"").decode("utf-8", "replace")
         stderr = "Evaluation process exceeded 240 seconds"
-    suffix = "continue" if continuation else "resume" if prompt is None else "start"
+    suffix = label or ("continue" if continuation else "resume" if prompt is None else "start")
     (root.parent / f"{root.name}-{suffix}.stdout.txt").write_text(stdout, encoding="utf-8")
     (root.parent / f"{root.name}-{suffix}.stderr.txt").write_text(stderr, encoding="utf-8")
     return {"exit": exit_code, "seconds": round(time.monotonic() - start, 2), "final": stdout.strip(), "error": stderr.strip()}
@@ -178,59 +182,8 @@ def summarize(root, case, events, executions):
             e["data"]["history_auxiliary"]
             for e in events if e["kind"] == "model_request" and "history_auxiliary" in e["data"]
         ],
+        "request_context": request_context(root, events),
         "executions": executions,
-    }
-
-
-def feedback_audit(root, events, mode):
-    blobs = root / ".sourceharness/sessions/work/blobs"
-    sent = {}
-    first_request_tools = None
-    mutations = []
-    modified = set()
-    rereads = 0
-    for e in events:
-        data = e["data"]
-        if e["kind"] == "model_request":
-            body = json.loads((blobs / data["input"]).read_bytes())
-            if first_request_tools is None:
-                first_request_tools = sha(json.dumps(body["tools"], sort_keys=True).encode())
-            for item in body["input"]:
-                if item.get("type") == "function_call_output":
-                    sent.setdefault(item["call_id"], item["output"])
-        if e["kind"] != "tool_result" or data["status"] != "ok":
-            continue
-        path = data.get("source", {}).get("path") if isinstance(data.get("source"), dict) else None
-        if data["name"] in ("edit", "write"):
-            mutations.append(data)
-            modified.add(path)
-        elif data["name"] == "read" and path in modified:
-            rereads += 1
-
-    receipts = []
-    for mutation in mutations:
-        raw = json.loads((blobs / mutation["output"]).read_bytes())
-        wire = sent.get(mutation["call_id"])
-        visible = json.loads(wire) if wire is not None else None
-        if mode == "versioned":
-            expected = raw
-        else:
-            expected = {key: raw[key] for key in ("status", "source", "outcome")}
-            if mode == "diff":
-                expected["diff"] = raw["diff"]
-        receipts.append({
-            "operation": mutation["operation"],
-            "path": raw["source"]["path"],
-            "sent": visible is not None,
-            "matches_mode": visible == expected,
-            "visible_bytes": len(wire.encode()) if wire is not None else None,
-        })
-    return {
-        "tools_sha256": first_request_tools,
-        "made_mutations": len(mutations),
-        "post_mutation_reads": rereads,
-        "verified_delivery": bool(receipts) and all(row["matches_mode"] for row in receipts),
-        "receipts": receipts,
     }
 
 
@@ -397,13 +350,16 @@ def run_trial(args, group, trial):
             executions[-1]["exit"] == 0 and report["independent"]["passed"] and drift and fresh_failure
             and answers == {"INPUTS": "changed", "CHECK": "failed"}
         )
-    if args.profile == "feedback":
+    if args.profile in ("feedback", "feedback-isolated"):
         report["feedback"] = feedback_audit(root, events, trial.receipt)
+        report["task_passed"] = report["passed"]
         report["passed"] &= report["feedback"]["verified_delivery"]
+        if args.profile == "feedback-isolated":
+            report["passed"] &= report["feedback"]["isolated_receipt_exposure"]
     row = {
         "name": trial.name, "group": trial.group, "repeat": trial.repeat,
         "edit": trial.edit, "history": trial.history, "freshness": trial.freshness,
-        "projection": trial.projection, "receipt": trial.receipt,
+        "projection": trial.projection, "notices": trial.notices, "receipt": trial.receipt,
         "initial_revision": initial_revision, "prompt_sha256": sha(prompt.encode()),
         "expected": case.grader_config(), "recovery": recovery, **report,
     }
@@ -426,11 +382,12 @@ def trials_for(profile, repeats):
         Trial("changed-tools-same-workspace", policy_case(BASE_A), "provenance", edit="range", provenance=True),
     ]
     history = [
-        Trial("history-conversation", standard, "history", history="conversation", freshness="off", projection="off"),
-        Trial("history-events", standard, "history", freshness="off", projection="off"),
-        Trial("history-facts", standard, "history", history="facts", freshness="off", projection="off"),
-        Trial("history-instructions", standard, "history", projection="off"),
-        Trial("history-projection", standard, "history", freshness="off"),
+        Trial("history-conversation", standard, "history", history="conversation", freshness="off", projection="off", notices="off"),
+        Trial("history-events", standard, "history", freshness="off", projection="off", notices="off"),
+        Trial("history-facts", standard, "history", history="facts", freshness="off", projection="off", notices="off"),
+        Trial("history-instructions", standard, "history", projection="off", notices="off"),
+        Trial("history-projection", standard, "history", freshness="off", notices="off"),
+        Trial("history-notices", standard, "history", freshness="off", projection="off", notices="on"),
     ]
     edits = [
         Trial("edit-text", standard, "edit"),
@@ -453,6 +410,9 @@ def trials_for(profile, repeats):
             Trial("changed-validation-input-same-command", policy_case(BASE_A), "validation-inputs", validation_drift=True)
         ],
         "feedback": feedback,
+        "feedback-isolated": [
+            replace(trial, history="conversation", freshness="off", projection="off", notices="off") for trial in feedback
+        ],
         "continuation": [Trial("resume-after-upgrade-with-correction", standard, "continuation", recovery="upgrade")],
     }
     return [
@@ -468,7 +428,7 @@ def history_balance(rows):
         arms = {
             row["history"]: row
             for row in rows if row["group"] == "history" and row["repeat"] == repeat
-            and row["freshness"] == row["projection"] == "off"
+            and row["freshness"] == row["projection"] == row["notices"] == "off"
         }
         events, facts = (arms[name] for name in ("events", "facts"))
         first_events = next(iter(events["history_auxiliary"]), {})
@@ -492,13 +452,76 @@ def feedback_balance(rows):
             for field in ("initial_revision", "prompt_sha256")
         )
         tools = {row["feedback"]["tools_sha256"] for row in block}
+        requests = {row["feedback"]["first_request_sha256"] for row in block}
         modes = {row["receipt"] for row in block}
         checks.append({
             "group": group, "repeat": repeat,
             "same_initial_revision_prompt_and_tools": same and len(tools) == 1 and None not in tools
             and modes == {"summary", "diff", "versioned"},
+            "same_first_request": len(requests) == 1 and None not in requests,
         })
     return checks
+
+
+def run_context(args):
+    """Measure context growth over a multi-request session with an old-evidence check."""
+    policies = [BASE_A, BASE_B, HOLDOUT, Policy("POL-096", 75, 4)]
+    cases = [policy_case(policy, large=True) for policy in policies]
+    expected_recap = [f"{policy.identifier} {policy.timeout} {policy.retries}" for policy in policies]
+    checks = write_checks(args.out, cases)
+    observations = []
+    for repeat in range(1, args.repeats + 1):
+        for projection in ("off", "on"):
+            root = args.out / f"projection-{projection}-{repeat}"
+            cases[0].seed(root)
+            trial = Trial(root.name, cases[0], "context", history="facts", notices="on", projection=projection)
+            phases = []
+            checkpoint = 0
+            for index, case in enumerate(cases):
+                if index:
+                    (root / "policy.md").write_bytes(case.inputs["policy.md"])
+                prompt = case.prompt if index else BASELINE_PROMPT
+                execution = execute(args, checks, root, trial, prompt, label=f"policy-{index + 1}")
+                events = read_events(root)
+                result = summarize(root, case, events[checkpoint:], [execution])
+                phases.append({"policy": policies[index].identifier, **result})
+                checkpoint = len(events)
+                if not result["passed"]:
+                    break
+
+            recap = {}
+            if len(phases) == len(cases) and phases[-1]["passed"]:
+                before = cases[-1].workspace_revision(root)
+                prompt = (
+                    "Without modifying the workspace, report each policy whose delivery you validated in "
+                    "this session, including the initial policy and the current one. List them in validation "
+                    "order. Output exactly four lines, each in the form: policy-ID timeout retries, "
+                    "with single spaces and no Markdown."
+                )
+                execution = execute(args, checks, root, trial, prompt, label="recap")
+                recap = {
+                    "execution": execution,
+                    "passed": execution["exit"] == 0 and execution["final"].splitlines() == expected_recap
+                    and cases[-1].workspace_revision(root) == before,
+                }
+            events = read_events(root)
+            observation = {
+                "name": trial.name, "projection": projection, "repeat": repeat,
+                "passed": bool(recap.get("passed")) and all(phase["passed"] for phase in phases),
+                "initial_files": {name: sha(raw) for name, raw in cases[0].inputs.items()},
+                "phases": phases, "recap": recap, "expected_recap": expected_recap,
+                "request_context": request_context(root, events),
+                "cost": request_cost(events), "cache": request_cache(root, events),
+            }
+            observations.append(observation)
+            print(trial.name, observation["passed"], observation["cost"], flush=True)
+    report = {
+        "model_route": args.model, "effort": args.effort, "profile": args.profile,
+        "exe_sha256": sha(args.exe.read_bytes()), "observations": observations,
+        "pass": sum(row["passed"] for row in observations),
+    }
+    (args.out / "summary.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+    return int(report["pass"] != len(observations))
 
 
 def main():
@@ -509,7 +532,10 @@ def main():
     parser.add_argument("--workers", type=int, default=3)
     parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument(
-        "--profile", choices=["all", "recovery", "selected", "edit", "history", "provenance", "continuation", "feedback"],
+        "--profile", choices=[
+            "all", "recovery", "selected", "edit", "history", "provenance", "continuation",
+            "feedback", "feedback-isolated", "context",
+        ],
         default="selected",
     )
     parser.add_argument("--model", default=os.environ.get("OPENAI_MODEL", "auto/deepseek-v4.1-flash-1017"))
@@ -521,6 +547,8 @@ def main():
     if args.initial_exe is not None:
         args.initial_exe = args.initial_exe.resolve()
     args.out.mkdir(parents=True)
+    if args.profile == "context":
+        return run_context(args)
     trials = trials_for(args.profile, args.repeats)
     grouped = {}
     for trial in trials:
@@ -533,7 +561,7 @@ def main():
         groups = {group: result.result() for group, result in preparations.items()}
         observations = list(pool.map(lambda trial: run_trial(args, groups[trial.group], trial), trials))
     balance = history_balance(observations)
-    feedback_checks = feedback_balance(observations) if args.profile == "feedback" else []
+    feedback_checks = feedback_balance(observations) if args.profile in ("feedback", "feedback-isolated") else []
     report = {
         "model_route": args.model, "effort": args.effort, "profile": args.profile,
         "repeat_count": args.repeats, "exe_sha256": sha(args.exe.read_bytes()),
@@ -548,6 +576,7 @@ def main():
         report["pass"] != len(observations)
         or any(not check["same_first_request_facts"] for check in balance)
         or any(not check["same_initial_revision_prompt_and_tools"] for check in feedback_checks)
+        or (args.profile == "feedback-isolated" and any(not check["same_first_request"] for check in feedback_checks))
     )
 
 

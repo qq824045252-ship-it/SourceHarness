@@ -1,0 +1,33 @@
+{
+  "source": "The user's review of SourceHarness-vivion-four-arm-smoke.md",
+  "source_traces_available": false,
+  "observations": 16,
+  "finding": "All 16 requested totals were correct. The review established at least two failures under broader criteria.",
+  "call_accounting": {
+    "executed_after_first_reported_evidence": 78,
+    "issued_in_a_later_round": 68,
+    "already_issued_in_the_evidence_batch": 10
+  },
+  "cases": {
+    "23365": {
+      "C": {"calls": 11, "first_count_call": 1, "calls_after_count": 10},
+      "D": {"calls": 12, "first_count_call": 3, "calls_after_count": 9}
+    },
+    "23375": {
+      "A": {"first_full_original_call": 2, "first_reported_count_call": 3, "forbidden_ids_in_answer": true},
+      "C": {"first_full_original_call": 1, "first_reported_count_call": 2},
+      "D": {"first_full_original_call": 2, "first_reported_count_call": 3}
+    },
+    "23395": {
+      "B": {
+        "main_total": 45,
+        "incorrect_additional_claims": [
+          {"label": "Release Review", "range": [421, 560], "claimed": 10, "expected": 11},
+          {"label": "Setup Notes", "range": [561, 700], "claimed": 1, "expected": 6},
+          {"label": "Legacy Archive", "range": [701, 1825], "claimed": 14, "expected": 8},
+          {"label": "Excluding Legacy Archive", "claimed": 31, "expected": 37}
+        ]
+      }
+    }
+  }
+}

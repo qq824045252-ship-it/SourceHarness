@@ -3,7 +3,7 @@ use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
-use std::process::{Command, Output, Stdio};
+use std::process::{Child, Command, Output, Stdio};
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -35,6 +35,224 @@ fn respond(mut stream: TcpStream, item: Value) {
 
 fn call(id: &str, name: &str, args: Value) -> Value {
     json!({"type":"function_call","call_id":id,"name":name,"arguments":args.to_string()})
+}
+
+fn answer(text: &str) -> Value {
+    json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":text}]})
+}
+
+fn start_chat(root: &Path, gateway: &str) -> Child {
+    Command::new(env!("CARGO_BIN_EXE_source_harness"))
+        .args(["chat", "--root", root.to_str().unwrap(), "--session", "acceptance"])
+        .env("OPENAI_BASE_URL", gateway).env("OPENAI_MODEL", "fixture")
+        .env_remove("SOURCE_HARNESS_TEST_INTERRUPT")
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
+        .spawn().unwrap()
+}
+
+fn chat_logs(child: &mut Child) -> mpsc::Receiver<String> {
+    let (sender, lines) = mpsc::channel();
+    let stderr = child.stderr.take().unwrap();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stderr).lines() {
+            if sender.send(line.unwrap()).is_err() { break; }
+        }
+    });
+    lines
+}
+
+fn await_log(logs: &mpsc::Receiver<String>, match_text: &str) {
+    while !logs.recv_timeout(Duration::from_secs(10)).unwrap().contains(match_text) {}
+}
+
+fn session_events(root: &Path) -> Vec<Value> {
+    let raw = fs::read_to_string(root.join(".sourceharness/sessions/acceptance/events.jsonl")).unwrap();
+    raw.lines().map(|line| serde_json::from_str(line).unwrap()).collect()
+}
+
+fn user_texts(input: &Value) -> Vec<&str> {
+    input.as_array().unwrap().iter()
+        .filter(|row| row["role"] == "user")
+        .map(|row| row["content"].as_str().unwrap())
+        .collect()
+}
+
+#[test]
+fn acknowledged_prompt_and_steer_survive_a_stop_during_the_model_request() {
+    let root = tempfile::tempdir().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let gateway = format!("http://{}/v1", listener.local_addr().unwrap());
+    let (upstream, blocked) = mpsc::channel();
+    let (terminated, was_terminated) = mpsc::channel();
+    let server = std::thread::spawn(move || {
+        let (mut initial, _) = listener.accept().unwrap();
+        assert_eq!(user_texts(&request(&mut initial)["input"]), ["Task A"]);
+        upstream.send(()).unwrap();
+        was_terminated.recv_timeout(Duration::from_secs(10)).unwrap();
+        drop(initial);
+
+        let (mut resumed, _) = listener.accept().unwrap();
+        assert_eq!(user_texts(&request(&mut resumed)["input"]), ["Task A", "Correct A"]);
+        respond(resumed, answer("A corrected."));
+        let (mut followup, _) = listener.accept().unwrap();
+        assert_eq!(user_texts(&request(&mut followup)["input"]), ["Task A", "Correct A", "Task B"]);
+        respond(followup, answer("B done."));
+    });
+
+    let mut child = start_chat(root.path(), &gateway);
+    let logs = chat_logs(&mut child);
+    let mut stdin = child.stdin.take().unwrap();
+    writeln!(stdin, "Task A").unwrap();
+    await_log(&logs, "Message received.");
+    blocked.recv_timeout(Duration::from_secs(10)).unwrap();
+    writeln!(stdin, "Task B").unwrap();
+    await_log(&logs, "Message received.");
+    writeln!(stdin, ":steer Correct A").unwrap();
+    await_log(&logs, "Correction received.");
+    child.kill().unwrap();
+    child.wait().unwrap();
+    drop(stdin);
+    terminated.send(()).unwrap();
+
+    let events = session_events(root.path());
+    assert_eq!(events.iter().filter(|e| e["kind"] == "user").count(), 1);
+    assert!(!events.iter().any(|e| e["kind"] == "steer"));
+    let resumed = invoke(root.path(), &gateway, false, &["agent", "--resume"]);
+    assert!(resumed.status.success(), "{}", String::from_utf8_lossy(&resumed.stderr));
+    assert_eq!(String::from_utf8_lossy(&resumed.stdout).trim(), "A corrected.");
+    let mut reopened = start_chat(root.path(), &gateway);
+    drop(reopened.stdin.take());
+    let result = reopened.wait_with_output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(String::from_utf8_lossy(&result.stdout).trim(), "B done.");
+    server.join().unwrap();
+    let events = session_events(root.path());
+    let users: Vec<_> = events.iter().filter(|e| e["kind"] == "user").collect();
+    let steers: Vec<_> = events.iter().filter(|e| e["kind"] == "steer").collect();
+    assert_eq!(users.len(), 2);
+    assert_eq!(users[1]["data"]["inbox_id"], 2);
+    assert_eq!(steers.len(), 1);
+    assert_eq!(steers[0]["data"]["inbox_id"], 3);
+    assert_eq!(steers[0]["run"], users[0]["run"]);
+}
+
+#[test]
+fn a_followup_waits_until_a_paused_run_resumes_and_finishes() {
+    let root = tempfile::tempdir().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let gateway = format!("http://{}/v1", listener.local_addr().unwrap());
+    let (upstream, started) = mpsc::channel();
+    let (release, accepted) = mpsc::channel();
+    let server = std::thread::spawn(move || {
+        let (mut initial, _) = listener.accept().unwrap();
+        assert_eq!(user_texts(&request(&mut initial)["input"]), ["Task A"]);
+        upstream.send(()).unwrap();
+        accepted.recv_timeout(Duration::from_secs(10)).unwrap();
+        respond(initial, call("count_1", "research", json!({"scope":"workspace"})));
+        let limit = source_harness::transport::GatewayConfig::default().max_turns;
+        for turn in 2..=limit {
+            let (mut pending, _) = listener.accept().unwrap();
+            assert_eq!(user_texts(&request(&mut pending)["input"]), ["Task A"]);
+            respond(pending, call(&format!("count_{turn}"), "research", json!({"scope":"workspace"})));
+        }
+
+        let (mut resumed, _) = listener.accept().unwrap();
+        let request_body = request(&mut resumed);
+        assert_eq!(user_texts(&request_body["input"]), ["Task A"]);
+        assert_eq!(request_body["input"][2]["call_id"], "count_1");
+        respond(resumed, answer("A done."));
+
+        let (mut followup, _) = listener.accept().unwrap();
+        assert_eq!(user_texts(&request(&mut followup)["input"]), ["Task A", "Task B"]);
+        respond(followup, answer("B done."));
+    });
+
+    let mut child = start_chat(root.path(), &gateway);
+    let logs = chat_logs(&mut child);
+    let mut stdin = child.stdin.take().unwrap();
+    writeln!(stdin, "Task A").unwrap();
+    await_log(&logs, "Message received.");
+    started.recv_timeout(Duration::from_secs(10)).unwrap();
+    writeln!(stdin, "Task B").unwrap();
+    await_log(&logs, "Message received.");
+    release.send(()).unwrap();
+    await_log(&logs, "Model turn limit reached");
+    let pending = session_events(root.path());
+    assert_eq!(pending.iter().filter(|e| e["kind"] == "user").count(), 1);
+    writeln!(stdin, ":resume").unwrap();
+    drop(stdin);
+    let result = child.wait_with_output().unwrap();
+    assert!(result.status.success());
+    assert_eq!(String::from_utf8_lossy(&result.stdout).lines().collect::<Vec<_>>(), ["A done.", "B done."]);
+    server.join().unwrap();
+    let events = session_events(root.path());
+    let finish = events.iter().find(|e| e["kind"] == "model_response" && e["data"]["final_text"] == "A done.").unwrap();
+    let next = events.iter().find(|e| e["kind"] == "user" && e["data"]["text"] == "Task B").unwrap();
+    assert!(finish["seq"].as_u64().unwrap() < next["seq"].as_u64().unwrap());
+    assert_eq!(next["data"]["inbox_id"], 2);
+}
+
+#[test]
+fn continuation_preserves_sent_and_queued_steer_positions() {
+    let root = tempfile::tempdir().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let gateway = format!("http://{}/v1", listener.local_addr().unwrap());
+    let (upstream, started) = mpsc::channel();
+    let (release, first_accepted) = mpsc::channel();
+    let (terminated, was_terminated) = mpsc::channel();
+    let server = std::thread::spawn(move || {
+        let (mut initial, _) = listener.accept().unwrap();
+        assert_eq!(user_texts(&request(&mut initial)["input"]), ["Task A"]);
+        upstream.send(1).unwrap();
+        first_accepted.recv_timeout(Duration::from_secs(10)).unwrap();
+        respond(initial, answer("Interim response"));
+
+        let (mut second, _) = listener.accept().unwrap();
+        assert_eq!(user_texts(&request(&mut second)["input"]), ["Task A", "First correction"]);
+        upstream.send(2).unwrap();
+        was_terminated.recv_timeout(Duration::from_secs(10)).unwrap();
+        drop(second);
+
+        let (mut linked, _) = listener.accept().unwrap();
+        let body = request(&mut linked);
+        let input = &body["input"];
+        assert_eq!(input[2], json!({"role":"user","content":"First correction"}));
+        assert_eq!(input[3], json!({"role":"user","content":"Second correction"}));
+        assert!(input[4]["content"].as_str().unwrap().contains("Clarify the continuation"));
+        assert_eq!(input.as_array().unwrap().len(), 5);
+        respond(linked, answer("Continued."));
+    });
+    let mut child = start_chat(root.path(), &gateway);
+    let logs = chat_logs(&mut child);
+    let mut stdin = child.stdin.take().unwrap();
+    writeln!(stdin, "Task A").unwrap();
+    assert_eq!(started.recv_timeout(Duration::from_secs(10)).unwrap(), 1);
+    writeln!(stdin, ":steer First correction").unwrap();
+    await_log(&logs, "Correction received.");
+    release.send(()).unwrap();
+    assert_eq!(started.recv_timeout(Duration::from_secs(10)).unwrap(), 2);
+    writeln!(stdin, ":steer Second correction").unwrap();
+    await_log(&logs, "Correction received.");
+    child.kill().unwrap();
+    child.wait().unwrap();
+    drop(stdin);
+    terminated.send(()).unwrap();
+
+    let continued = invoke(root.path(), &gateway, false, &["agent", "--continue", "--prompt", "Clarify the continuation"]);
+    assert!(continued.status.success(), "{}", String::from_utf8_lossy(&continued.stderr));
+    assert_eq!(String::from_utf8_lossy(&continued.stdout).trim(), "Continued.");
+    server.join().unwrap();
+    let events = session_events(root.path());
+    let steers: Vec<_> = events.iter().filter(|e| e["kind"] == "steer").collect();
+    assert_eq!(steers.len(), 2);
+    assert_eq!(steers[0]["run"], steers[1]["run"]);
+    let last_model = events.iter().rev().find(|e| e["kind"] == "model_request").unwrap();
+    assert_eq!(last_model["data"]["steer_events"], json!([steers[0]["seq"], steers[1]["seq"]]));
+    assert_eq!(last_model["data"]["steer_input_indices"], json!([2, 3]));
+    assert_eq!(last_model["data"]["steer_input_start"], 2);
+    let reloaded = invoke(root.path(), &gateway, false, &["agent", "--resume"]);
+    assert!(reloaded.status.success(), "{}", String::from_utf8_lossy(&reloaded.stderr));
+    assert_eq!(String::from_utf8_lossy(&reloaded.stdout).trim(), "Continued.");
 }
 
 #[test]

@@ -10,7 +10,7 @@ pub const MIN_BUDGET: usize = 1024;
 pub const MAX_BUDGET: usize = 64 * 1024;
 
 const FRESHNESS_INSTRUCTIONS: &str = "Use fresh workspace evidence for requirements that can change. When workspace_changes identifies an earlier read as stale, inspect the current source before relying on that earlier content. Earlier validations and snapshots remain available as historical evidence.";
-const HISTORY_HEADER: &str = "\nRelated recorded evidence. Compare conditions from previous_runs separately from checks in current_run. A validation receipt establishes the workspace and conditions it actually tested.\n";
+const HISTORY_HEADER: &str = "\nRelated recorded evidence. For changes since an earlier check, use validation_provenance with scope=previous_runs. For what this run tested, use scope=current_run. A validation receipt establishes the workspace and conditions it actually tested.\n";
 
 pub struct Auxiliary {
     pub suffix: String,

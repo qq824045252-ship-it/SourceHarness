@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::budget::{json_byte_len, to_json_string, truncate_utf8_bytes, MAX_HIT_TEXT_BYTES, MAX_RESPONSE_BYTES};
-use crate::error::{ErrorCode, ErrorPayload, OkEnvelope};
+use crate::error::{CaptureGroupBounds, ErrorCode, ErrorPayload, OkEnvelope};
 use crate::store::{FoldStore, Snapshot};
 
 pub const MAX_QUERY_BYTES: usize = 128;
@@ -18,6 +18,7 @@ pub const REGEX_SIZE_LIMIT: usize = 512 * 1024;
 pub const REGEX_DFA_SIZE_LIMIT: usize = 1024 * 1024;
 pub const MAX_LINE_BYTES: usize = 64 * 1024;
 pub const MAX_MATCHES_PER_LINE: usize = 256;
+pub(crate) const MULTILINE_LITERAL_UNSUPPORTED: &str = "MULTILINE_LITERAL_UNSUPPORTED";
 
 pub const ALLOWED_FIELDS: &[&str] = &[
     "result_ref",
@@ -290,6 +291,15 @@ fn parse_and_validate_args(raw_args: &str) -> Result<ParsedArgs, ErrorPayload> {
             ));
         }
     };
+    if match_mode == MatchMode::Literal && query.contains('\n') {
+        let mut error = ErrorPayload::new(
+            ErrorCode::InvalidArgument,
+            Some("query"),
+            MULTILINE_LITERAL_UNSUPPORTED,
+        );
+        error.hint = Some("Search matches within each line. Read the requested range to inspect a cross-line literal.");
+        return Err(error);
+    }
 
     let case_sensitive = optional_bool(obj, "case_sensitive")?.unwrap_or(true);
 
@@ -427,6 +437,19 @@ enum CompiledMatcher<'a> {
     Regex(Regex),
 }
 
+fn regex_compile_error(error: regex::Error) -> ErrorPayload {
+    let mut payload = ErrorPayload::new(ErrorCode::InvalidRegex, Some("query"), "REGEX_COMPILE_ERROR");
+    if let regex::Error::Syntax(message) = error {
+        let diagnostic = message.lines().last().unwrap_or_default();
+        if diagnostic.contains("look-around") {
+            payload.hint = Some("Rust regex does not support lookaround. Use an anchored positive pattern or inspect the matching range.");
+        } else if diagnostic.contains("backreferences are not supported") {
+            payload.hint = Some("Rust regex does not support backreferences. Capture values for grouping or read the relevant text to compare strings.");
+        }
+    }
+    payload
+}
+
 fn build_matcher<'a>(args: &'a ParsedArgs) -> Result<CompiledMatcher<'a>, ErrorPayload> {
     match (args.match_mode, args.case_sensitive) {
         (MatchMode::Literal, true) => Ok(CompiledMatcher::LiteralSensitive(&args.query)),
@@ -437,9 +460,7 @@ fn build_matcher<'a>(args: &'a ParsedArgs) -> Result<CompiledMatcher<'a>, ErrorP
                 .size_limit(REGEX_SIZE_LIMIT)
                 .dfa_size_limit(REGEX_DFA_SIZE_LIMIT)
                 .build()
-                .map_err(|_| {
-                    ErrorPayload::new(ErrorCode::InvalidRegex, Some("query"), "REGEX_COMPILE_ERROR")
-                })?;
+                .map_err(regex_compile_error)?;
             Ok(CompiledMatcher::Regex(re))
         }
         (MatchMode::Regex, cs) => {
@@ -448,16 +469,20 @@ fn build_matcher<'a>(args: &'a ParsedArgs) -> Result<CompiledMatcher<'a>, ErrorP
                 .size_limit(REGEX_SIZE_LIMIT)
                 .dfa_size_limit(REGEX_DFA_SIZE_LIMIT)
                 .build()
-                .map_err(|_| {
-                    ErrorPayload::new(ErrorCode::InvalidRegex, Some("query"), "REGEX_COMPILE_ERROR")
-                })?;
+                .map_err(regex_compile_error)?;
             if let Some(group_idx) = args.group_by_capture {
                 if group_idx >= re.captures_len() {
-                    return Err(ErrorPayload::new(
+                    let mut error = ErrorPayload::new(
                         ErrorCode::InvalidGroupByCapture,
                         Some("group_by_capture"),
                         "CAPTURE_GROUP_OUT_OF_RANGE",
-                    ));
+                    );
+                    error.capture_group_bounds = Some(CaptureGroupBounds {
+                        requested: group_idx,
+                        min: 0,
+                        max: re.captures_len() - 1,
+                    });
+                    return Err(error);
                 }
             }
             Ok(CompiledMatcher::Regex(re))

@@ -1,17 +1,15 @@
-use std::collections::VecDeque;
 use std::fs;
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::process;
-use std::sync::mpsc::{self, Receiver};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::mpsc;
 
 use serde_json::{json, Value};
 use source_harness::bench;
 use source_harness::eval;
 use source_harness::registry;
 use source_harness::session::{
-    self, Commands, EditMode, HistoryMode, Options, ReceiptMode, Session, SteeringInput,
+    self, Commands, EditMode, HistoryMode, Options, ReceiptMode, Session,
     DEFAULT_HISTORY_BUDGET,
 };
 use source_harness::store::{FoldStore, IngestOutcome};
@@ -221,53 +219,64 @@ fn session_options(args: &[String]) -> Result<Options, String> {
 
 fn run_session_chat(mut session: Session, client: ResponsesClient) -> Result<(), String> {
     let (sender, input) = mpsc::channel();
+    let inbox = session.input_inbox();
     std::thread::spawn(move || {
         for line in io::stdin().lock().lines() {
-            let line = line.map(|text| ChatLine {
-                text,
-                received_ms: SystemTime::now().duration_since(UNIX_EPOCH)
-                    .unwrap_or_default().as_millis() as u64,
-            }).map_err(|err| err.to_string());
-            let correction = line.as_ref().is_ok_and(|line| steer_text(line.text.trim()).is_some());
-            if sender.send(line).is_err() {
+            let line = match line {
+                Ok(line) => line,
+                Err(err) => { let _ = sender.send(Err(err.to_string())); break; }
+            };
+            let text = line.trim();
+            let signal = match text {
+                "" => continue,
+                ":quit" | ":exit" => { let _ = sender.send(Ok(ChatSignal::Exit)); break; }
+                ":resume" => ChatSignal::Resume,
+                ":steer" => { eprintln!("Supply the instruction after :steer."); continue; }
+                _ => {
+                    let correction = steer_text(text);
+                    if let Err(err) = inbox.accept(correction.unwrap_or(text).to_owned(), correction.is_some()) {
+                        let _ = sender.send(Err(err));
+                        break;
+                    }
+                    if correction.is_some() {
+                        eprintln!("Correction received.");
+                        ChatSignal::Correction
+                    } else {
+                        eprintln!("Message received.");
+                        ChatSignal::Prompt
+                    }
+                }
+            };
+            if sender.send(Ok(signal)).is_err() {
                 break;
-            }
-            if correction {
-                eprintln!("Correction received.");
             }
         }
     });
-    let mut queued = VecDeque::new();
     eprintln!("Use :steer <instruction> to redirect an active run, :resume to resume, or :quit to exit.");
     if session.is_pending()? {
-        run_chat_turn(&mut session, &client, None, None, &input, &mut queued);
+        run_chat_turn(&mut session, &client, None);
     }
-    while let Some(line) = queued.pop_front().or_else(|| input.recv().ok()) {
-        let line = line?;
-        let text = line.text.trim();
-        match text {
-            "" => continue,
-            ":quit" | ":exit" => break,
-            ":resume" => run_chat_turn(&mut session, &client, None, None, &input, &mut queued),
-            ":steer" => eprintln!("Supply the instruction after :steer."),
-            prompt => match steer_text(prompt) {
-                Some(steer) if session.is_pending()? => run_chat_turn(
-                    &mut session, &client, None,
-                    Some(SteeringInput { text: steer.to_owned(), received_ms: line.received_ms }),
-                    &input, &mut queued,
-                ),
-                text => run_chat_turn(
-                    &mut session, &client, Some(text.unwrap_or(prompt)), None, &input, &mut queued
-                ),
-            },
+    loop {
+        if let Some(id) = session.next_inbox_prompt()? {
+            run_chat_turn(&mut session, &client, Some(id));
+            continue;
+        }
+        let Ok(signal) = input.recv() else { break };
+        match signal? {
+            ChatSignal::Exit => break,
+            ChatSignal::Resume => run_chat_turn(&mut session, &client, None),
+            ChatSignal::Correction if session.has_inbox_steering()? => run_chat_turn(&mut session, &client, None),
+            ChatSignal::Prompt | ChatSignal::Correction => {}
         }
     }
     Ok(())
 }
 
-struct ChatLine {
-    text: String,
-    received_ms: u64,
+enum ChatSignal {
+    Prompt,
+    Correction,
+    Resume,
+    Exit,
 }
 
 fn steer_text(text: &str) -> Option<&str> {
@@ -279,26 +288,13 @@ fn steer_text(text: &str) -> Option<&str> {
 fn run_chat_turn(
     session: &mut Session,
     client: &ResponsesClient,
-    prompt: Option<&str>,
-    mut initial_steering: Option<SteeringInput>,
-    input: &Receiver<Result<ChatLine, String>>,
-    queued: &mut VecDeque<Result<ChatLine, String>>,
+    prompt: Option<usize>,
 ) {
     let mut observer = StreamingTerminalObserver::new();
-    let response = session.run_observed(client, prompt, &mut observer, &mut || {
-        if let Some(first) = initial_steering.take() {
-            return Some(first);
-        }
-        while let Ok(line) = input.try_recv() {
-            if let Ok(line) = &line {
-                if let Some(text) = steer_text(line.text.trim()) {
-                    return Some(SteeringInput { text: text.to_owned(), received_ms: line.received_ms });
-                }
-            }
-            queued.push_back(line);
-        }
-        None
-    });
+    let response = match prompt {
+        Some(id) => session.run_inbox_prompt(client, id, &mut observer),
+        None => session.run_observed(client, None, &mut observer, &mut || None),
+    };
     match response {
         Ok(text) if !observer.streamed_text_this_turn => println!("{text}"),
         Ok(_) => {}

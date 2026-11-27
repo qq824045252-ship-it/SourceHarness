@@ -122,8 +122,30 @@ class SessionGradingTests(unittest.TestCase):
             ]
             result = feedback_audit(root, events, "diff")
             self.assertTrue(result["verified_delivery"])
+            self.assertTrue(result["isolated_receipt_exposure"])
             self.assertEqual(result["post_mutation_reads"], 1)
             self.assertFalse(feedback_audit(root, events, "versioned")["verified_delivery"])
+            converted = json.loads((blobs / "request").read_bytes())
+            converted["instructions"] = "Related facts\n" + json.dumps(
+                {"edit_receipt": [{"data": {"operation": "op", **raw}}]}
+            )
+            converted["input"].append({
+                "type": "function_call_output", "call_id": "history",
+                "output": json.dumps({"content": json.dumps({"operation": "op", **raw})}),
+            })
+            converted["input"].append({
+                "type": "function_call_output", "call_id": "reread",
+                "output": json.dumps({"source": source, "revision": "r2", "content": "new"}),
+            })
+            (blobs / "request").write_text(json.dumps(converted), encoding="utf8")
+            contaminated = feedback_audit(root, events, "diff")
+            self.assertTrue(contaminated["verified_delivery"])
+            self.assertFalse(contaminated["isolated_receipt_exposure"])
+            self.assertEqual(contaminated["side_channels"], [
+                {"request": 2, "channel": channel, "operation": "op", "fields": ["diff", "revision"],
+                 "outside_direct_mode": ["revision"]}
+                for channel in ("instructions", "other_tool_output")
+            ])
 
 
 if __name__ == "__main__":

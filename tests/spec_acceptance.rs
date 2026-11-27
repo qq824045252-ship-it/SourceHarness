@@ -184,8 +184,12 @@ fn eight_kib_budget_trimming_preserves_scalar_truths() {
 
     let expected_matching_lines = truth["data"]["matching_lines"].as_u64().unwrap();
     let expected_total_occurrences = truth["data"]["total_occurrences"].as_u64().unwrap();
-    let expected_distinct = truth["data"]["aggregation"]["distinct_values"].as_u64().unwrap();
-    let expected_captured = truth["data"]["aggregation"]["total_captured"].as_u64().unwrap();
+    let expected_distinct = truth["data"]["aggregation"]["distinct_values"]
+        .as_u64()
+        .unwrap();
+    let expected_captured = truth["data"]["aggregation"]["total_captured"]
+        .as_u64()
+        .unwrap();
     assert_eq!(expected_matching_lines, 65);
     assert_eq!(expected_total_occurrences, 65);
     assert_eq!(expected_distinct, 60);
@@ -213,20 +217,34 @@ fn eight_kib_budget_trimming_preserves_scalar_truths() {
     let trimmed = parse_json(&trimmed_raw);
     assert_eq!(trimmed["status"], "ok");
     assert_eq!(trimmed["data"]["hits_truncated"], true);
-    assert_eq!(trimmed["data"]["aggregation"]["value_counts_truncated"], true);
+    assert_eq!(
+        trimmed["data"]["aggregation"]["value_counts_truncated"],
+        true
+    );
 
     // Hits are trimmed before value_counts; with 50 long value_counts + overhead, hits empty out and value_counts trim too.
     assert!(trimmed["data"]["hits"].as_array().unwrap().is_empty());
-    assert!(trimmed["data"]["aggregation"]["value_counts"].as_array().unwrap().len() < 50);
+    assert!(
+        trimmed["data"]["aggregation"]["value_counts"]
+            .as_array()
+            .unwrap()
+            .len()
+            < 50
+    );
 
     // Deterministic ordering: count DESC, value ASC.
-    let vc = trimmed["data"]["aggregation"]["value_counts"].as_array().unwrap();
+    let vc = trimmed["data"]["aggregation"]["value_counts"]
+        .as_array()
+        .unwrap();
     assert!(vc[0]["count"].as_u64().unwrap() >= vc[1]["count"].as_u64().unwrap());
     assert!(vc[0]["value"].as_str().unwrap().starts_with("CAT_00_"));
 
     // All scalar truth fields remain 100% conserved.
     assert_eq!(trimmed["data"]["matching_lines"], expected_matching_lines);
-    assert_eq!(trimmed["data"]["total_occurrences"], expected_total_occurrences);
+    assert_eq!(
+        trimmed["data"]["total_occurrences"],
+        expected_total_occurrences
+    );
     assert_eq!(trimmed["data"]["total_lines"], 65);
     assert_eq!(trimmed["data"]["scanned_lines"], json!([1, 65]));
     assert_eq!(trimmed["data"]["complete"], true);
@@ -360,7 +378,11 @@ fn full_error_matrix_and_validation_recovery() {
         json!({ "result_ref": env3.result_ref, "start_line": 1, "line_count": 1, "offset": 0 }),
         json!({ "result_ref": env3.result_ref, "start_line": 1, "line_count": 1, "end_line": 1 }),
     ] {
-        let r = parse_json(&registry::dispatch("read_result", &args.to_string(), &store));
+        let r = parse_json(&registry::dispatch(
+            "read_result",
+            &args.to_string(),
+            &store,
+        ));
         assert_eq!(r["code"], "INVALID_ARGUMENT");
         assert_eq!(r["reason"], "UNSUPPORTED_FIELD");
         assert_eq!(r["same_input_retry"], false);
@@ -437,7 +459,11 @@ fn full_error_matrix_and_validation_recovery() {
         json!({ "result_ref": env3.result_ref, "query": "t", "start_line": 99 }),
         json!({ "result_ref": env3.result_ref, "query": "t", "start_line": 1, "end_line": 0 }),
     ] {
-        let r = parse_json(&registry::dispatch("search_result", &args.to_string(), &store));
+        let r = parse_json(&registry::dispatch(
+            "search_result",
+            &args.to_string(),
+            &store,
+        ));
         assert_eq!(r["code"], "INVALID_LINE_RANGE");
         assert_eq!(r["reason"], "OUT_OF_BOUNDS");
     }
@@ -456,6 +482,11 @@ fn full_error_matrix_and_validation_recovery() {
         ));
         assert_eq!(r["code"], "INVALID_REGEX");
         assert_eq!(r["reason"], "REGEX_COMPILE_ERROR");
+        if bad_re == "(?=lookahead)" {
+            assert!(r["hint"].as_str().unwrap().contains("lookaround"));
+        } else if bad_re == "(a)\\1" {
+            assert!(r["hint"].as_str().unwrap().contains("backreferences"));
+        }
     }
 
     // 9. group_by_capture rules
@@ -485,6 +516,10 @@ fn full_error_matrix_and_validation_recovery() {
     ));
     assert_eq!(r_gbc_oob["code"], "INVALID_GROUP_BY_CAPTURE");
     assert_eq!(r_gbc_oob["reason"], "CAPTURE_GROUP_OUT_OF_RANGE");
+    assert_eq!(
+        r_gbc_oob["capture_group_bounds"],
+        json!({"requested": 2, "min": 0, "max": 1})
+    );
 
     // 10. top_k bounds
     for bad_k in [0, 51] {
@@ -571,6 +606,20 @@ fn full_error_matrix_and_validation_recovery() {
 }
 
 #[test]
+fn search_reports_unsupported_cross_line_literals_instead_of_zero() {
+    let store = FoldStore::new();
+    let source = store.insert("port=12\r\nnext=34\r\n");
+    let response = parse_json(&registry::dispatch(
+        "search_result",
+        &json!({"result_ref":source.result_ref,"query":"port=12\r\nnext=34"}).to_string(),
+        &store,
+    ));
+    assert_eq!(response["status"], "error");
+    assert_eq!(response["field"], "query");
+    assert_eq!(response["reason"], "MULTILINE_LITERAL_UNSUPPORTED");
+}
+
+#[test]
 fn schema_zero_drift_against_rust_constants() {
     let defs = registry::tool_definitions();
     assert_eq!(defs.len(), 2);
@@ -594,7 +643,7 @@ fn schema_zero_drift_against_rust_constants() {
     assert_eq!(sprops["max_hits"]["maximum"], search::MAX_HITS_LIMIT);
     assert_eq!(sprops["top_k"]["minimum"], search::MIN_TOP_K);
     assert_eq!(sprops["top_k"]["maximum"], search::MAX_TOP_K);
-    assert_eq!(sprops["top_k"]["default"], search::DEFAULT_TOP_K);
+    assert!(sprops["top_k"].get("default").is_none());
     let top_k_desc = sprops["top_k"]["description"].as_str().unwrap();
     assert!(top_k_desc.contains("group_by_capture"));
     assert!(top_k_desc.contains("aggregation.value_counts"));

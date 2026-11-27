@@ -28,7 +28,7 @@ pub(crate) fn search_result_schema() -> Value {
     json!({
         "type": "function",
         "name": SEARCH_RESULT_NAME,
-        "description": "Search a folded result for exact counts, matching lines, or regex groups. Omit line bounds for one full-snapshot scan. Use matching_lines for a line count and total_occurrences for a match count. Once the query and scanned_lines cover the request, answer from those counts. Omitted or truncated samples do not affect the counts. Request more evidence only when needed to answer the user.",
+        "description": "Search a folded result for exact counts, sample lines, or regex groups. Omit line bounds to scan the whole snapshot. Use matching_lines for a line count and total_occurrences for a match count. Attribute each count to its query and scanned_lines. Sample limits affect only the displayed lines. When the counts cover the user's request, answer from those counts.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -41,7 +41,7 @@ pub(crate) fn search_result_schema() -> Value {
                     "type": "string",
                     "minLength": 1,
                     "maxLength": search::MAX_QUERY_BYTES,
-                    "description": "Use an exact literal substring when possible. Regex mode uses Rust regex without lookaround or backreferences. Up to 128 UTF-8 bytes."
+                    "description": "Search within each line. Prefer an exact literal substring. Regex mode uses Rust regex without lookaround or backreferences. Up to 128 UTF-8 bytes."
                 },
                 "start_line": {
                     "type": "integer",
@@ -59,7 +59,7 @@ pub(crate) fn search_result_schema() -> Value {
                     "minimum": 0,
                     "maximum": search::MAX_HITS_LIMIT,
                     "default": search::DEFAULT_MAX_HITS,
-                    "description": "Sample lines to return when examples are needed. Omit or use 0 for counts only."
+                    "description": format!("Maximum matching-line samples to display (0-{}). Default 0 for counts only. The full requested range is scanned at every setting.", search::MAX_HITS_LIMIT)
                 },
                 "match_mode": {
                     "type": "string",
@@ -75,14 +75,13 @@ pub(crate) fn search_result_schema() -> Value {
                 "group_by_capture": {
                     "type": "integer",
                     "minimum": 0,
-                    "description": "Set only to group regex matches. Requires match_mode=regex. Use 0 for whole matches or 1+ for a capture group in query."
+                    "description": "Group regex matches. Requires match_mode=regex. Use 0 for the whole match or the index of an existing capture group in query."
                 },
                 "top_k": {
                     "type": "integer",
                     "minimum": search::MIN_TOP_K,
                     "maximum": search::MAX_TOP_K,
-                    "default": search::DEFAULT_TOP_K,
-                    "description": "Max entries in aggregation.value_counts. Omit unless group_by_capture is set."
+                    "description": format!("Maximum groups in aggregation.value_counts ({}-{}). Use only with group_by_capture, which defaults to returning {} groups.", search::MIN_TOP_K, search::MAX_TOP_K, search::DEFAULT_TOP_K)
                 }
             },
             "required": search::REQUIRED_FIELDS,

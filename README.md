@@ -56,7 +56,7 @@ cargo run --locked -- chat --root . --session config-review
 cargo run --locked -- history --root . --session config-review
 ```
 
-Session chat streams model text and tool progress. Enter `:steer <instruction>` to send a correction during an active run. The session finishes any tool call already in progress, records skipped calls that had yet to start, and includes the correction in the next model request. Plain input typed during a run queues a follow-up task.
+Session chat streams model text and tool progress. Enter `:steer <instruction>` to send a correction during an active run. The session finishes any tool call already in progress, records skipped calls that had yet to start, and includes the correction in the next model request. Chat saves a message or correction to the session inbox before confirming receipt. Reopen the session to recover accepted input after a process stop. Plain input typed during a run queues a follow-up task until that run finishes.
 
 Use `history --event <n>` to inspect a request or receipt and `history --ref <ref>` to open its original text. A `result_ref` belongs to its session and retains the old content when a live file changes. A validation receipt includes `workspace_revision`. Use `fork --revision <hash> --to <new-directory>` with the same `--root` and `--session` to open that tested file snapshot in a fresh workspace.
 
@@ -94,6 +94,10 @@ python -B -m unittest discover -s scripts -p "test_*.py"
 python -B scripts/eval_session.py --exe target/release/source_harness.exe --out target/session-eval
 python -B scripts/eval_session.py --exe target/release/source_harness.exe --out target/session-history --profile history --repeats 2
 python -B scripts/eval_session.py --exe target/release/source_harness.exe --out target/session-feedback --profile feedback --repeats 2
+python -B scripts/eval_session.py --exe target/release/source_harness.exe --out target/session-feedback-isolated --profile feedback-isolated --repeats 2
+python -B scripts/eval_session.py --exe target/release/source_harness.exe --out target/session-context --profile context
 ```
 
 The runner scores the final workspace against fixtures and expected values held outside the model workspace. A passing run also needs a successful model-initiated validation of the delivered revision. The report keeps known token and latency totals and counts requests with missing usage separately.
+
+`feedback` compares direct tool receipts with automatic history enabled. `feedback-isolated` disables automatic history for all three modes and checks each archived request for receipt fields delivered through other channels. `context` runs four policy validations and a recap in one session per setting. It records actual request sizes and shared input items as the conversation grows. Provider usage records supply the token and cache counts.
