@@ -13,7 +13,7 @@ mod validation;
 
 pub use branch::{branch_session, read_branch_info, BranchInfo};
 pub use inbox::InputInbox;
-pub use merge::{merge_worker, spawn_worker, FailedCheck, MergeReport, WorkerInfo};
+pub use merge::{merge_worker, rebase_worker, spawn_worker, FailedCheck, MergeReport, RebaseReport, WorkerInfo};
 pub use validation::Commands;
 
 use crate::budget::{json_byte_len, truncate_utf8_bytes};

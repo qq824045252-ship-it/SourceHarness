@@ -109,7 +109,20 @@ fn run_cli() -> Result<(), String> {
                 }
                 Ok(())
             }
-            _ => Err("Use `source_harness worker spawn ...` or `source_harness worker merge ...`.".to_owned()),
+            Some("rebase") => {
+                let root = PathBuf::from(parse_flag(&args[2..], "--root")?.unwrap_or_else(|| ".".to_owned()));
+                let worker = match parse_flag(&args[2..], "--worker")? {
+                    Some(w) => w,
+                    None => parse_flag(&args[2..], "--from")?.ok_or("Missing --worker <worker-dir>")?,
+                };
+                let report = session::rebase_worker(&root, &PathBuf::from(&worker))?;
+                println!("{}", serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?);
+                if report.status != "ok" {
+                    return Err(format!("Rebase rejected ({}): {:?}", report.status, report.code));
+                }
+                Ok(())
+            }
+            _ => Err("Use `source_harness worker spawn ...`, `source_harness worker rebase ...`, or `source_harness worker merge ...`.".to_owned()),
         },
         "-h" | "--help" | "help" => {
             print_usage();
@@ -267,6 +280,7 @@ fn print_usage() {
          source_harness fork --root <dir> --session <name> --revision <workspace_revision> --to <new-directory>\n  \
          source_harness branch --root <dir> --from <session> --to <new-session> --event <seq> [--lesson <text>] [--no-restore]\n  \
          source_harness worker spawn --root <main-dir> --name <worker> --to <worker-dir>\n  \
+         source_harness worker rebase --root <main-dir> --worker <worker-dir>\n  \
          source_harness worker merge --root <main-dir> --from <worker-dir> [--checks <file>] [--session <main-session>]"
     );
 }

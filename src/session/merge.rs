@@ -43,6 +43,27 @@ pub struct MergeReport {
     pub failed_checks: Vec<FailedCheck>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RebaseReport {
+    pub status: String,
+    pub code: Option<String>,
+    pub base_revision: String,
+    pub head_revision: String,
+    pub new_base_revision: Option<String>,
+    pub head_changed_paths: Vec<String>,
+    pub worker_changed_paths: Vec<String>,
+    pub updated_paths: Vec<String>,
+    pub conflicts: Vec<String>,
+}
+
+struct ThreeWayOutcome {
+    all_paths: BTreeSet<String>,
+    head_changed_paths: Vec<String>,
+    worker_changed_paths: Vec<String>,
+    merged_manifest: Manifest,
+    conflicts: Vec<String>,
+}
+
 fn capture_manifest(ctx: &WorkspaceContext, blobs_dir: &Path) -> Result<(Manifest, String), String> {
     let (files, all) = tools::walk(ctx.root(), ctx.config().max_list_entries)?;
     if !all { return Err("Workspace exceeds manifest file limit".to_owned()); }
@@ -159,52 +180,13 @@ pub fn merge_worker(
     let (head_manifest, head_revision) = capture_manifest(&main_ctx, &main_blobs)?;
     let (worker_manifest, _worker_rev) = capture_manifest(&worker_ctx, &main_blobs)?;
 
-    let all_paths: BTreeSet<String> = base_manifest.keys()
-        .chain(head_manifest.keys())
-        .chain(worker_manifest.keys())
-        .cloned()
-        .collect();
-
-    let mut head_changed_paths = Vec::new();
-    let mut worker_changed_paths = Vec::new();
-    let mut merged_manifest: Manifest = BTreeMap::new();
-    let mut conflicts = Vec::new();
-
-    for path in &all_paths {
-        let (b, h, w) = (base_manifest.get(path), head_manifest.get(path), worker_manifest.get(path));
-        if h != b { head_changed_paths.push(path.clone()); }
-        if w != b { worker_changed_paths.push(path.clone()); }
-
-        if w == b {
-            if let Some(hh) = h { merged_manifest.insert(path.clone(), hh.clone()); }
-        } else if h == b {
-            if let Some(wh) = w { merged_manifest.insert(path.clone(), wh.clone()); }
-        } else if h == w {
-            if let Some(hh) = h { merged_manifest.insert(path.clone(), hh.clone()); }
-        } else {
-            match (h, w) {
-                (Some(hh), Some(wh)) => {
-                    let b_bytes = match b {
-                        Some(bh) => read_blob_from(&main_blobs, Some(&worker_blobs), bh)?,
-                        None => Vec::new(),
-                    };
-                    let h_bytes = read_blob_from(&main_blobs, None, hh)?;
-                    let w_bytes = read_blob_from(&main_blobs, Some(&worker_blobs), wh)?;
-                    match (std::str::from_utf8(&b_bytes), std::str::from_utf8(&h_bytes), std::str::from_utf8(&w_bytes)) {
-                        (Ok(bs), Ok(hs), Ok(ws)) => match diffy::merge(bs, hs, ws) {
-                            Ok(merged) => {
-                                let mh = put_blob(&main_blobs, merged.as_bytes())?;
-                                merged_manifest.insert(path.clone(), mh);
-                            }
-                            Err(_) => conflicts.push(path.clone()),
-                        },
-                        _ => conflicts.push(path.clone()),
-                    }
-                }
-                _ => conflicts.push(path.clone()),
-            }
-        }
-    }
+    let ThreeWayOutcome {
+        all_paths,
+        head_changed_paths,
+        worker_changed_paths,
+        merged_manifest,
+        conflicts,
+    } = three_way_merge(&base_manifest, &head_manifest, &worker_manifest, &main_blobs, Some(&worker_blobs))?;
 
     if !conflicts.is_empty() {
         return Ok(MergeReport {
@@ -263,32 +245,14 @@ pub fn merge_worker(
         }
     }
 
-    let mut changed_paths = Vec::new();
-    for path in &all_paths {
-        let (h, m) = (head_manifest.get(path), merged_manifest.get(path));
-        if h == m { continue; }
-        if !tools::permitted(Path::new(path)) {
-            return Err(format!("Unsafe merge path: {path}"));
-        }
-        let target = main_ctx.root().join(path);
-        match m {
-            Some(mh) => {
-                let parent = target.parent().ok_or("Missing merge target parent")?;
-                fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-                let bytes = read_blob_from(&main_blobs, Some(&worker_blobs), mh)?;
-                let mut temp = tempfile::Builder::new().prefix(".sourceharness-write-").tempfile_in(parent).map_err(|e| e.to_string())?;
-                temp.write_all(&bytes).map_err(|e| e.to_string())?;
-                temp.as_file().sync_all().map_err(|e| e.to_string())?;
-                temp.persist(&target).map_err(|e| e.error.to_string())?;
-            }
-            None => {
-                if target.is_file() {
-                    fs::remove_file(&target).map_err(|e| e.to_string())?;
-                }
-            }
-        }
-        changed_paths.push(path.clone());
-    }
+    let changed_paths = apply_manifest_diff(
+        main_ctx.root(),
+        &all_paths,
+        &head_manifest,
+        &merged_manifest,
+        &main_blobs,
+        Some(&worker_blobs),
+    )?;
 
     let merged_revision = put_blob(&main_blobs, &serde_json::to_vec(&merged_manifest).map_err(|e| e.to_string())?)?;
     if let Some(sess_name) = main_session {
@@ -320,5 +284,178 @@ pub fn merge_worker(
         conflicts: Vec::new(),
         validated_checks,
         failed_checks: Vec::new(),
+    })
+}
+
+fn three_way_merge(
+    base_manifest: &Manifest,
+    head_manifest: &Manifest,
+    worker_manifest: &Manifest,
+    primary_blobs: &Path,
+    fallback_blobs: Option<&Path>,
+) -> Result<ThreeWayOutcome, String> {
+    let all_paths: BTreeSet<String> = base_manifest.keys()
+        .chain(head_manifest.keys())
+        .chain(worker_manifest.keys())
+        .cloned()
+        .collect();
+
+    let mut head_changed_paths = Vec::new();
+    let mut worker_changed_paths = Vec::new();
+    let mut merged_manifest: Manifest = BTreeMap::new();
+    let mut conflicts = Vec::new();
+
+    for path in &all_paths {
+        let (b, h, w) = (base_manifest.get(path), head_manifest.get(path), worker_manifest.get(path));
+        if h != b { head_changed_paths.push(path.clone()); }
+        if w != b { worker_changed_paths.push(path.clone()); }
+
+        if w == b {
+            if let Some(hh) = h { merged_manifest.insert(path.clone(), hh.clone()); }
+        } else if h == b {
+            if let Some(wh) = w { merged_manifest.insert(path.clone(), wh.clone()); }
+        } else if h == w {
+            if let Some(hh) = h { merged_manifest.insert(path.clone(), hh.clone()); }
+        } else {
+            match (h, w) {
+                (Some(hh), Some(wh)) => {
+                    let b_bytes = match b {
+                        Some(bh) => read_blob_from(primary_blobs, fallback_blobs, bh)?,
+                        None => Vec::new(),
+                    };
+                    let h_bytes = read_blob_from(primary_blobs, fallback_blobs, hh)?;
+                    let w_bytes = read_blob_from(primary_blobs, fallback_blobs, wh)?;
+                    match (std::str::from_utf8(&b_bytes), std::str::from_utf8(&h_bytes), std::str::from_utf8(&w_bytes)) {
+                        (Ok(bs), Ok(hs), Ok(ws)) => match diffy::merge(bs, hs, ws) {
+                            Ok(merged) => {
+                                let mh = put_blob(primary_blobs, merged.as_bytes())?;
+                                merged_manifest.insert(path.clone(), mh);
+                            }
+                            Err(_) => conflicts.push(path.clone()),
+                        },
+                        _ => conflicts.push(path.clone()),
+                    }
+                }
+                _ => conflicts.push(path.clone()),
+            }
+        }
+    }
+
+    Ok(ThreeWayOutcome {
+        all_paths,
+        head_changed_paths,
+        worker_changed_paths,
+        merged_manifest,
+        conflicts,
+    })
+}
+
+fn apply_manifest_diff(
+    dest_root: &Path,
+    all_paths: &BTreeSet<String>,
+    current_manifest: &Manifest,
+    target_manifest: &Manifest,
+    primary_blobs: &Path,
+    fallback_blobs: Option<&Path>,
+) -> Result<Vec<String>, String> {
+    let mut changed_paths = Vec::new();
+    for path in all_paths {
+        let (cur, next) = (current_manifest.get(path), target_manifest.get(path));
+        if cur == next { continue; }
+        if !tools::permitted(Path::new(path)) {
+            return Err(format!("Unsafe merge path: {path}"));
+        }
+        let target = dest_root.join(path);
+        match next {
+            Some(nh) => {
+                let parent = target.parent().ok_or("Missing merge target parent")?;
+                fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+                let bytes = read_blob_from(primary_blobs, fallback_blobs, nh)?;
+                let mut temp = tempfile::Builder::new().prefix(".sourceharness-write-").tempfile_in(parent).map_err(|e| e.to_string())?;
+                temp.write_all(&bytes).map_err(|e| e.to_string())?;
+                temp.as_file().sync_all().map_err(|e| e.to_string())?;
+                temp.persist(&target).map_err(|e| e.error.to_string())?;
+            }
+            None => {
+                if target.is_file() {
+                    fs::remove_file(&target).map_err(|e| e.to_string())?;
+                }
+            }
+        }
+        changed_paths.push(path.clone());
+    }
+    Ok(changed_paths)
+}
+
+pub fn rebase_worker(main_root: &Path, worker_dir: &Path) -> Result<RebaseReport, String> {
+    let main_ctx = WorkspaceContext::new(WorkspaceConfig::with_root(main_root))?;
+    let worker_ctx = WorkspaceContext::new(WorkspaceConfig::with_root(worker_dir))?;
+    let worker_meta_path = worker_ctx.root().join(".sourceharness/worker.json");
+    let mut worker_meta: WorkerInfo = serde_json::from_slice(
+        &fs::read(&worker_meta_path).map_err(|e| format!("Missing worker metadata: {e}"))?
+    ).map_err(|e| e.to_string())?;
+
+    fs::create_dir_all(worker_ctx.root().join(".sourceharness")).map_err(|e| e.to_string())?;
+    let ws_lock = OpenOptions::new().create(true).truncate(false).read(true).write(true)
+        .open(worker_ctx.root().join(".sourceharness/workspace.lock")).map_err(|e| e.to_string())?;
+    ws_lock.try_lock().map_err(|e| format!("Worker workspace is locked by an active session: {e}"))?;
+
+    let main_blobs = main_ctx.root().join(".sourceharness/blobs");
+    let worker_blobs = worker_ctx.root().join(".sourceharness/blobs");
+    let base_manifest: Manifest = serde_json::from_slice(
+        &read_blob_from(&worker_blobs, Some(&main_blobs), &worker_meta.base_revision)?
+    ).map_err(|e| e.to_string())?;
+    let (head_manifest, head_revision) = capture_manifest(&main_ctx, &worker_blobs)?;
+    let (worker_manifest, _worker_rev) = capture_manifest(&worker_ctx, &worker_blobs)?;
+
+    let outcome = three_way_merge(
+        &base_manifest,
+        &head_manifest,
+        &worker_manifest,
+        &worker_blobs,
+        Some(&main_blobs),
+    )?;
+
+    if !outcome.conflicts.is_empty() {
+        return Ok(RebaseReport {
+            status: "conflict".to_owned(),
+            code: Some("REBASE_CONFLICT".to_owned()),
+            base_revision: worker_meta.base_revision,
+            head_revision,
+            new_base_revision: None,
+            head_changed_paths: outcome.head_changed_paths,
+            worker_changed_paths: outcome.worker_changed_paths,
+            updated_paths: Vec::new(),
+            conflicts: outcome.conflicts,
+        });
+    }
+
+    let updated_paths = apply_manifest_diff(
+        worker_ctx.root(),
+        &outcome.all_paths,
+        &worker_manifest,
+        &outcome.merged_manifest,
+        &worker_blobs,
+        Some(&main_blobs),
+    )?;
+
+    let old_base = worker_meta.base_revision.clone();
+    worker_meta.base_revision = head_revision.clone();
+    let meta_parent = worker_meta_path.parent().ok_or("Missing worker metadata parent")?;
+    let mut temp = tempfile::Builder::new().prefix(".sourceharness-worker-").tempfile_in(meta_parent).map_err(|e| e.to_string())?;
+    temp.write_all(&serde_json::to_vec_pretty(&worker_meta).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    temp.as_file().sync_all().map_err(|e| e.to_string())?;
+    temp.persist(&worker_meta_path).map_err(|e| e.error.to_string())?;
+
+    Ok(RebaseReport {
+        status: "ok".to_owned(),
+        code: None,
+        base_revision: old_base,
+        head_revision: head_revision.clone(),
+        new_base_revision: Some(head_revision),
+        head_changed_paths: outcome.head_changed_paths,
+        worker_changed_paths: outcome.worker_changed_paths,
+        updated_paths,
+        conflicts: Vec::new(),
     })
 }

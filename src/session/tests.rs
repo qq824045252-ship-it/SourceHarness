@@ -357,3 +357,49 @@ fn multi_worker_concurrent_merge_write_skew_and_text_conflict() {
     assert_eq!(m3.conflicts, vec!["api.txt"]);
     assert_eq!(fs::read_to_string(main_root.join("api.txt")).unwrap(), "sig=v2\n");
 }
+
+#[test]
+fn worker_rebase_pulls_mainline_and_blocks_conflicts() {
+    let main_tmp = tempfile::tempdir().unwrap();
+    let main_root = main_tmp.path();
+    fs::write(main_root.join("api.txt"), "sig=v1\n").unwrap();
+    fs::write(main_root.join("service_a.txt"), "a_uses=v1\n").unwrap();
+    fs::write(main_root.join("service_b.txt"), "b_uses=v1\n").unwrap();
+
+    let work_tmp = tempfile::tempdir().unwrap();
+    let w2 = work_tmp.path().join("w2");
+    let w3 = work_tmp.path().join("w3");
+    super::spawn_worker(main_root, "w2", &w2).unwrap();
+    super::spawn_worker(main_root, "w3", &w3).unwrap();
+
+    // Mainline advances api.txt and service_a.txt.
+    fs::write(main_root.join("api.txt"), "sig=v2\n").unwrap();
+    fs::write(main_root.join("service_a.txt"), "a_uses=v2\n").unwrap();
+
+    // Worker w2 edits disjoint service_b.txt, then rebases to pull mainline's new api.txt.
+    fs::write(w2.join("service_b.txt"), "b_uses=v1_pending\n").unwrap();
+    let rb = super::rebase_worker(main_root, &w2).unwrap();
+    assert_eq!(rb.status, "ok", "{rb:?}");
+    assert_eq!(rb.head_changed_paths, vec!["api.txt", "service_a.txt"]);
+    assert_eq!(rb.updated_paths, vec!["api.txt", "service_a.txt"]);
+    assert_eq!(fs::read_to_string(w2.join("api.txt")).unwrap(), "sig=v2\n");
+    assert_eq!(fs::read_to_string(w2.join("service_a.txt")).unwrap(), "a_uses=v2\n");
+    assert_eq!(fs::read_to_string(w2.join("service_b.txt")).unwrap(), "b_uses=v1_pending\n");
+
+    let info: super::WorkerInfo = serde_json::from_slice(&fs::read(w2.join(".sourceharness/worker.json")).unwrap()).unwrap();
+    assert_eq!(Some(info.base_revision), rb.new_base_revision);
+
+    // Worker w2 adapts service_b.txt and merges cleanly against the updated base_revision.
+    fs::write(w2.join("service_b.txt"), "b_uses=v2\n").unwrap();
+    let m2 = super::merge_worker(main_root, &w2, &super::Commands::default(), None).unwrap();
+    assert_eq!(m2.status, "ok", "{m2:?}");
+    assert_eq!(fs::read_to_string(main_root.join("service_b.txt")).unwrap(), "b_uses=v2\n");
+
+    // Worker w3 edits api.txt incompatibly -> rebase rejects with REBASE_CONFLICT and leaves w3 untouched.
+    fs::write(w3.join("api.txt"), "sig=v3\n").unwrap();
+    let rb_conflict = super::rebase_worker(main_root, &w3).unwrap();
+    assert_eq!(rb_conflict.status, "conflict", "{rb_conflict:?}");
+    assert_eq!(rb_conflict.code.as_deref(), Some("REBASE_CONFLICT"));
+    assert_eq!(rb_conflict.conflicts, vec!["api.txt"]);
+    assert_eq!(fs::read_to_string(w3.join("api.txt")).unwrap(), "sig=v3\n");
+}
