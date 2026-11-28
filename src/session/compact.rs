@@ -1,6 +1,6 @@
 use super::exec;
 use super::journal::Journal;
-use super::tools::{self, definition, parse, rejected, Edit, Reply, ResolvePath, TextChange};
+use super::tools::{self, definition, parse, rejected, ChangesetItem, Edit, Reply, ResolvePath, TextChange};
 use crate::budget::{truncate_utf8_bytes, MAX_RESPONSE_BYTES};
 use crate::workspace::WorkspaceContext;
 use serde::Deserialize;
@@ -30,8 +30,12 @@ pub(super) fn definitions() -> Vec<Value> {
         definition("read", "Read numbered text from a live file, list a directory (e.g. path=\".\"), search text with pattern (optional regex=true) in a file, directory, or result_ref, batch up to 8 files via paths, read a saved result_ref, or pass history=true to view the session causal timeline (or a file's historical snapshots incl. run-start).",
             json!({"path":text,"paths":{"type":"array","items":text,"minItems":1,"maxItems":MAX_READ_PATHS},
                 "result_ref":text,"pattern":text,"regex":{"type":"boolean"},"history":{"type":"boolean"},"start_line":line,"end_line":line,"start_byte":byte,"end_byte":byte}), &[]),
-        definition("edit", "Apply exact, non-overlapping replacements to an existing workspace file. Prefer edit over write for modifying existing files. Each old_text must appear once.",
-            json!({"path":text,"changes":{"type":"array","items":{"type":"object","properties":{"old_text":text,"new_text":text},"required":["old_text","new_text"]}}}), &["path","changes"]),
+        definition("edit", "Apply exact, non-overlapping replacements to an existing workspace file (path + changes), or atomically update multiple files together via files=[{path, changes|content}] (all-or-nothing preflight). Prefer edit over write for modifying existing files. Each old_text must appear once.",
+            json!({"path":text,
+                "changes":{"type":"array","items":{"type":"object","properties":{"old_text":text,"new_text":text},"required":["old_text","new_text"]}},
+                "files":{"type":"array","minItems":1,"items":{"type":"object","properties":{"path":text,
+                    "changes":{"type":"array","items":{"type":"object","properties":{"old_text":text,"new_text":text},"required":["old_text","new_text"]}},
+                    "content":text},"required":["path"]}}}), &[]),
         definition("write", "Create a new workspace UTF-8 file or replace a file completely. Prefer edit for targeted updates to existing files.",
             json!({"path":text,"content":text}), &["path","content"]),
         definition("validate", "Run a configured external check against the current workspace snapshot (only when checks are configured). Omit check when only one is configured.",
@@ -98,6 +102,15 @@ pub(super) fn batch_observations(files: &[Value]) -> Vec<Value> {
     }).collect()
 }
 
+pub(super) fn resolve_check_name<'a>(commands: &'a super::Commands, args: &'a Value) -> Option<&'a str> {
+    if commands.0.is_empty() { return None; }
+    match args.get("check") {
+        None | Some(Value::Null) if commands.0.len() == 1 => commands.0.keys().next().map(String::as_str),
+        Some(Value::String(s)) if commands.0.contains_key(s) => Some(s.as_str()),
+        _ => None,
+    }
+}
+
 pub(super) fn validate(ctx: &WorkspaceContext, journal: &mut Journal, run: usize, operation: &str, commands: &super::Commands, args: &Value) -> Reply {
     if commands.0.is_empty() {
         return Ok(rejected("NO_CHECKS", "No external checks were configured. Use exec for workspace-local tests."));
@@ -123,10 +136,36 @@ pub(super) fn validate(ctx: &WorkspaceContext, journal: &mut Journal, run: usize
 #[derive(Deserialize)]
 struct EditArgs { path: String, changes: Vec<TextChange> }
 #[derive(Deserialize)]
+struct FileEditArg { path: String, changes: Option<Vec<TextChange>>, content: Option<String> }
+#[derive(Deserialize)]
+struct MultiEditArgs { files: Vec<FileEditArg> }
+#[derive(Deserialize)]
 struct WriteArgs { path: String, content: String }
 
 pub(super) fn modify(ctx: &WorkspaceContext, journal: &mut Journal, run: usize, operation: &str, tool: &str, args: &Value) -> Reply {
     if let Some(result) = tools::resume_edit(ctx, journal, run, operation) { return result; }
+    if tool == "edit" && !args["files"].is_null() {
+        if !args["path"].is_null() || !args["changes"].is_null() {
+            return Ok(rejected("INVALID_ARGUMENT", "Use either files=[...] or path+changes, not both."));
+        }
+        let multi: MultiEditArgs = match parse(args) { Ok(a) => a, Err(e) => return Ok(e) };
+        let mut items = Vec::with_capacity(multi.files.len());
+        for entry in multi.files {
+            let edit = match (entry.changes, entry.content) {
+                (Some(changes), None) => Edit::Text(changes),
+                (None, Some(content)) => Edit::Write(content),
+                _ => return Ok(rejected("INVALID_ARGUMENT", "Each file entry in files must specify exactly one of changes or content.")),
+            };
+            let (target, rel) = match tools::workspace_path(ctx, &entry.path, ResolvePath::MissingParents) { Ok(v) => v, Err(e) => return Ok(e) };
+            let expected = observed_revision(journal, &rel).map(|rev| rev.map(str::to_owned));
+            items.push(ChangesetItem { target, path: rel, expected, edit });
+        }
+        let mut result = tools::apply_changeset(ctx, journal, run, operation, items)?;
+        if result["code"] == "REVISION_CONFLICT" && result["planned_to_current"].is_null() {
+            tools::add_conflict_diff(journal, run, &mut result)?;
+        }
+        return Ok(result);
+    }
     let (path, edit) = if tool == "edit" {
         let a: EditArgs = match parse(args) { Ok(a) => a, Err(e) => return Ok(e) };
         (a.path, Edit::Text(a.changes))
@@ -198,6 +237,23 @@ fn result_text(tool: &str, result: &Value, budget: usize) -> String {
     let preview = result["preview"].as_str().unwrap_or("");
     let text = match (tool, status) {
         ("read", "ok") if result["content"].is_string() => numbered_text(result, budget),
+        ("edit", "ok") if result["files"].is_array() => {
+            let files = result["files"].as_array().unwrap();
+            let tx = result["tx_id"].as_str().unwrap_or("");
+            let mut parts = Vec::with_capacity(files.len());
+            let mut dropped_any = false;
+            for f in files {
+                let p = f["source"]["path"].as_str().unwrap_or("file");
+                let lines = f["lines"].as_u64().unwrap_or(0);
+                let bytes = f["bytes"].as_u64().unwrap_or(0);
+                let eol = f["eol"].as_str().unwrap_or("lf");
+                let no_nl = if bytes > 0 && f["trailing_newline"] == false { ", no-trailing-newline" } else { "" };
+                if f["dropped_trailing_newline"] == true { dropped_any = true; }
+                parts.push(format!("{p} ({lines} lines, {bytes}B, {eol}{no_nl})"));
+            }
+            let warn = if dropped_any { " WARNING: dropped existing trailing newline." } else { "" };
+            format!("Edited {} files (tx {tx}): {}.{warn}", files.len(), parts.join(", "))
+        }
         ("edit" | "write", "ok") => {
             let verb = if tool == "edit" { "Edited" } else { "Wrote" };
             let target = path.unwrap_or("file");

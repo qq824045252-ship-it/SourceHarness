@@ -167,42 +167,36 @@ fn changes_since_start(journal: &Journal, run: usize, tested_revision: &str) -> 
     Some(json!({"from_revision": baseline, "files": files, "total": total, "complete": files.len() == total}))
 }
 
-pub fn run(ctx: &WorkspaceContext, journal: &mut Journal, run: usize, operation: &str, commands: &Commands, args: &Value) -> Result<Value, String> {
-    let Some(check) = args.get("check").and_then(Value::as_str).filter(|_| args.as_object().is_some_and(|o| o.len() == 1)) else {
-        return Ok(json!({"status": "error", "code": "INVALID_ARGUMENT", "reason": "Supply one configured check name."}));
-    };
-    let Some(config) = commands.0.get(check) else {
-        return Ok(json!({"status": "error", "code": "UNKNOWN_CHECK", "reason": "Use a configured validation check."}));
-    };
-    if let Some(receipt) = journal.events.iter().find(|e| e.kind == "validation_receipt" && e.data["operation"] == operation) {
-        return Ok(receipt.data.clone());
-    }
-    if journal.events.iter().any(|e| e.kind == "validation_intent" && e.data["operation"] == operation) {
-        return Ok(json!({
-            "status": "error", "code": "VALIDATION_INTERRUPTED", "operation": operation,
-            "reason": "No completed receipt exists. Start a new validation if a fresh result is needed."
-        }));
-    }
+pub(super) struct PreparedValidation {
+    check: String,
+    operation: String,
+    config: Validation,
+    snapshot: tempfile::TempDir,
+    before: String,
+    program_revision: String,
+    input_revisions: Option<InputRevisions>,
+}
 
-    let snapshot = tempfile::Builder::new().prefix("check-").tempdir_in(ctx.root().join(".sourceharness")).map_err(|e| e.to_string())?;
-    let before = copy_workspace(ctx, journal, snapshot.path())?;
-    let program_revision = revision(&fs::read(&config.program).map_err(|e| e.to_string())?);
-    let input_revisions = match config.input_revisions() {
-        Ok(rev) => rev,
-        Err(reason) => return Ok(json!({"status": "error", "code": "VALIDATION_INPUT_UNAVAILABLE", "check": check, "reason": reason})),
-    };
-    let mut intent = json!({"check": check, "workspace_revision": before, "program_revision": program_revision, "config": config, "operation": operation});
-    if let Some(rev) = &input_revisions { intent["input_revisions"] = json!(rev); }
-    journal.append(run, "validation_intent", intent)?;
+pub(super) struct ExecutedValidation {
+    prep: PreparedValidation,
+    status: Option<i32>,
+    timed_out: bool,
+    launch_error: Option<String>,
+    input_revisions_after: Result<Option<InputRevisions>, String>,
+    stdout_bytes: Vec<u8>,
+    stderr_bytes: Vec<u8>,
+    output_complete: bool,
+    artifact_files: BTreeMap<PathBuf, Vec<u8>>,
+    elapsed_ms: u128,
+}
 
+pub(super) fn run_check_in_dir(dir: &Path, config: &Validation) -> Result<(bool, Option<i32>, bool, String), String> {
     let (mut stdout, mut stderr) = (tempfile::tempfile().map_err(|e| e.to_string())?, tempfile::tempfile().map_err(|e| e.to_string())?);
     let mut cmd = Command::new(&config.program);
-    cmd.args(&config.args).current_dir(snapshot.path()).stdin(Stdio::null()).env_remove("OPENAI_API_KEY")
+    cmd.args(&config.args).current_dir(dir).stdin(Stdio::null()).env_remove("OPENAI_API_KEY")
         .stdout(stdout.try_clone().map_err(|e| e.to_string())?).stderr(stderr.try_clone().map_err(|e| e.to_string())?);
     super::exec::configure_process_group(&mut cmd);
-    let launched = cmd.spawn();
-
-    let (status, timed_out, launch_error) = match launched {
+    let (status, timed_out, launch_error) = match cmd.spawn() {
         Ok(mut child) => {
             let deadline = Instant::now() + Duration::from_secs(config.timeout_seconds.unwrap_or(120));
             loop {
@@ -217,32 +211,119 @@ pub fn run(ctx: &WorkspaceContext, journal: &mut Journal, run: usize, operation:
         }
         Err(err) => (None, false, Some(err.to_string())),
     };
-
-    let input_revisions_after = config.input_revisions();
-    let input_revisions_stable = matches!(&input_revisions_after, Ok(after) if *after == input_revisions);
-
-    let (mut bytes, mut streams, mut output_complete) = (Vec::new(), BTreeMap::new(), true);
-    for (name, file) in [("stdout", &mut stdout), ("stderr", &mut stderr)] {
+    let mut out = Vec::new();
+    for file in [&mut stdout, &mut stderr] {
         file.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
-        let start = bytes.len();
-        file.take(8 * 1024 * 1024 + 1).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
-        if bytes.len() > start + 8 * 1024 * 1024 {
-            bytes.truncate(start + 8 * 1024 * 1024);
+        file.take(64 * 1024).read_to_end(&mut out).map_err(|e| e.to_string())?;
+    }
+    let mut text = String::from_utf8_lossy(&out).into_owned();
+    if let Some(err) = launch_error {
+        if !text.is_empty() { text.push('\n'); }
+        text.push_str(&err);
+    }
+    let (preview, _) = truncate_utf8_bytes(&text, 2048);
+    Ok((status == Some(0), status, timed_out, preview.to_owned()))
+}
+
+pub(super) fn prepare_detached(
+    ctx: &WorkspaceContext, journal: &Journal, operation: &str, commands: &Commands, check: &str,
+) -> Result<Result<PreparedValidation, Value>, String> {
+    let Some(config) = commands.0.get(check).cloned() else {
+        return Ok(Err(json!({"status": "error", "code": "UNKNOWN_CHECK", "reason": "Use a configured validation check."})));
+    };
+    if let Some(receipt) = journal.events.iter().find(|e| e.kind == "validation_receipt" && e.data["operation"] == operation) {
+        return Ok(Err(receipt.data.clone()));
+    }
+    if journal.events.iter().any(|e| e.kind == "validation_intent" && e.data["operation"] == operation) {
+        return Ok(Err(json!({
+            "status": "error", "code": "VALIDATION_INTERRUPTED", "operation": operation,
+            "reason": "No completed receipt exists. Start a new validation if a fresh result is needed."
+        })));
+    }
+    let snapshot = tempfile::Builder::new().prefix("check-").tempdir_in(ctx.root().join(".sourceharness")).map_err(|e| e.to_string())?;
+    let before = copy_workspace(ctx, journal, snapshot.path())?;
+    let program_revision = revision(&fs::read(&config.program).map_err(|e| e.to_string())?);
+    let input_revisions = match config.input_revisions() {
+        Ok(rev) => rev,
+        Err(reason) => return Ok(Err(json!({"status": "error", "code": "VALIDATION_INPUT_UNAVAILABLE", "check": check, "reason": reason}))),
+    };
+    Ok(Ok(PreparedValidation {
+        check: check.to_owned(), operation: operation.to_owned(), config, snapshot, before, program_revision, input_revisions,
+    }))
+}
+
+pub(super) fn execute_prepared(prep: PreparedValidation) -> Result<ExecutedValidation, String> {
+    let started = Instant::now();
+    let (mut stdout, mut stderr) = (tempfile::tempfile().map_err(|e| e.to_string())?, tempfile::tempfile().map_err(|e| e.to_string())?);
+    let mut cmd = Command::new(&prep.config.program);
+    cmd.args(&prep.config.args).current_dir(prep.snapshot.path()).stdin(Stdio::null()).env_remove("OPENAI_API_KEY")
+        .stdout(stdout.try_clone().map_err(|e| e.to_string())?).stderr(stderr.try_clone().map_err(|e| e.to_string())?);
+    super::exec::configure_process_group(&mut cmd);
+    let (status, timed_out, launch_error) = match cmd.spawn() {
+        Ok(mut child) => {
+            let deadline = Instant::now() + Duration::from_secs(prep.config.timeout_seconds.unwrap_or(120));
+            loop {
+                if let Some(exit) = child.try_wait().map_err(|e| e.to_string())? { break (exit.code(), false, None); }
+                if Instant::now() >= deadline {
+                    super::exec::kill_process_tree(&mut child);
+                    child.wait().map_err(|e| e.to_string())?;
+                    break (None, true, None);
+                }
+                std::thread::sleep(Duration::from_millis(40));
+            }
+        }
+        Err(err) => (None, false, Some(err.to_string())),
+    };
+    let input_revisions_after = prep.config.input_revisions();
+    let mut output_complete = true;
+    let mut read_stream = |file: &mut fs::File| -> Result<Vec<u8>, String> {
+        file.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
+        let mut buf = Vec::new();
+        file.take(8 * 1024 * 1024 + 1).read_to_end(&mut buf).map_err(|e| e.to_string())?;
+        if buf.len() > 8 * 1024 * 1024 {
+            buf.truncate(8 * 1024 * 1024);
             output_complete = false;
         }
-        streams.insert(name, journal.put(&bytes[start..])?);
+        Ok(buf)
+    };
+    let stdout_bytes = read_stream(&mut stdout)?;
+    let stderr_bytes = read_stream(&mut stderr)?;
+    let mut artifact_files = BTreeMap::new();
+    for rel in &prep.config.artifacts {
+        if let Ok(path) = prep.snapshot.path().join(rel).canonicalize() {
+            if path.starts_with(prep.snapshot.path()) && path.is_file() {
+                artifact_files.insert(rel.clone(), fs::read(path).map_err(|e| e.to_string())?);
+            }
+        }
     }
+    Ok(ExecutedValidation {
+        prep, status, timed_out, launch_error, input_revisions_after, stdout_bytes, stderr_bytes, output_complete, artifact_files,
+        elapsed_ms: started.elapsed().as_millis(),
+    })
+}
+
+pub(super) fn finalize_executed(ctx: &WorkspaceContext, journal: &mut Journal, run: usize, exec: ExecutedValidation, record_intent: bool) -> Result<(Value, u128), String> {
+    let ExecutedValidation { prep, status, timed_out, launch_error, input_revisions_after, stdout_bytes, stderr_bytes, output_complete, artifact_files, elapsed_ms } = exec;
+    let PreparedValidation { check, operation, config, snapshot: _snapshot, before, program_revision, input_revisions } = prep;
+    if record_intent {
+        let mut intent = json!({"check": check, "workspace_revision": before, "program_revision": program_revision, "config": config, "operation": operation});
+        if let Some(rev) = &input_revisions { intent["input_revisions"] = json!(rev); }
+        journal.append(run, "validation_intent", intent)?;
+    }
+    let input_revisions_stable = matches!(&input_revisions_after, Ok(after) if *after == input_revisions);
+    let mut bytes = Vec::with_capacity(stdout_bytes.len() + stderr_bytes.len());
+    bytes.extend_from_slice(&stdout_bytes);
+    bytes.extend_from_slice(&stderr_bytes);
+    let mut streams = BTreeMap::new();
+    streams.insert("stdout", journal.put(&stdout_bytes)?);
+    streams.insert("stderr", journal.put(&stderr_bytes)?);
 
     let output = String::from_utf8_lossy(&bytes);
     let report = journal.artifact(run, json!({"kind": "validation", "check": check, "workspace_revision": before, "operation": operation}), output.as_bytes())?;
     let after = workspace_version(ctx, journal)?;
     let mut artifacts = BTreeMap::new();
-    for rel in &config.artifacts {
-        if let Ok(path) = snapshot.path().join(rel).canonicalize() {
-            if path.starts_with(snapshot.path()) && path.is_file() {
-                artifacts.insert(rel, journal.put(&fs::read(path).map_err(|e| e.to_string())?)?);
-            }
-        }
+    for (rel, data) in artifact_files {
+        artifacts.insert(rel, journal.put(&data)?);
     }
 
     let (preview, preview_clipped) = truncate_utf8_bytes(&output, 2048);
@@ -276,7 +357,22 @@ pub fn run(ctx: &WorkspaceContext, journal: &mut Journal, run: usize, operation:
         result["changed_since_checkpoint"] = json!(changed);
     }
     journal.append(run, "validation_receipt", result.clone())?;
-    Ok(result)
+    Ok((result, elapsed_ms))
+}
+
+pub fn run(ctx: &WorkspaceContext, journal: &mut Journal, run: usize, operation: &str, commands: &Commands, args: &Value) -> Result<Value, String> {
+    let Some(check) = args.get("check").and_then(Value::as_str).filter(|_| args.as_object().is_some_and(|o| o.len() == 1)) else {
+        return Ok(json!({"status": "error", "code": "INVALID_ARGUMENT", "reason": "Supply one configured check name."}));
+    };
+    let prep = match prepare_detached(ctx, journal, operation, commands, check)? {
+        Ok(p) => p,
+        Err(early) => return Ok(early),
+    };
+    let mut intent = json!({"check": prep.check, "workspace_revision": prep.before, "program_revision": prep.program_revision, "config": prep.config, "operation": prep.operation});
+    if let Some(rev) = &prep.input_revisions { intent["input_revisions"] = json!(rev); }
+    journal.append(run, "validation_intent", intent)?;
+    let executed = execute_prepared(prep)?;
+    Ok(finalize_executed(ctx, journal, run, executed, false)?.0)
 }
 
 #[cfg(test)]

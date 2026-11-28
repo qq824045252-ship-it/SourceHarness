@@ -53,6 +53,8 @@ impl Journal {
         Ok(Self { dir: dir.to_path_buf(), file, events, _lock: lock, stat_cache: RefCell::new(HashMap::new()) })
     }
 
+    pub fn dir(&self) -> &Path { &self.dir }
+
     pub fn append(&mut self, run: usize, kind: &str, data: Value) -> Result<usize, String> {
         let seq = self.events.len() + 1;
         let ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
@@ -66,16 +68,7 @@ impl Journal {
     }
 
     pub fn put(&self, bytes: &[u8]) -> Result<String, String> {
-        let hash = revision(bytes);
-        let folder = self.dir.join("blobs");
-        let path = folder.join(&hash);
-        if !path.exists() {
-            let mut temp = tempfile::NamedTempFile::new_in(folder).map_err(io_error)?;
-            temp.write_all(bytes).map_err(io_error)?;
-            temp.as_file().sync_all().map_err(io_error)?;
-            temp.persist_noclobber(path).map_err(|e| io_error(e.error))?;
-        }
-        Ok(hash)
+        put_blob(&self.dir.join("blobs"), bytes)
     }
 
     pub fn get(&self, hash: &str) -> Result<Vec<u8>, String> {
@@ -148,11 +141,49 @@ pub fn read_events(dir: &Path) -> Result<(Vec<Event>, u64), String> {
     Ok((events, len as u64))
 }
 
+pub fn shared_blobs_dir(dir: &Path) -> PathBuf {
+    if let Some(parent) = dir.parent() {
+        if parent.file_name().and_then(|s| s.to_str()) == Some("sessions") {
+            if let Some(sh) = parent.parent() {
+                if sh.file_name().and_then(|s| s.to_str()) == Some(".sourceharness") {
+                    return sh.join("blobs");
+                }
+            }
+        }
+    }
+    dir.join("blobs")
+}
+
+pub fn put_blob(folder: &Path, bytes: &[u8]) -> Result<String, String> {
+    let hash = revision(bytes);
+    fs::create_dir_all(folder).map_err(io_error)?;
+    let path = folder.join(&hash);
+    if !path.exists() {
+        let mut temp = tempfile::NamedTempFile::new_in(folder).map_err(io_error)?;
+        temp.write_all(bytes).map_err(io_error)?;
+        temp.as_file().sync_all().map_err(io_error)?;
+        if let Err(err) = temp.persist_noclobber(path) {
+            if err.error.kind() != io::ErrorKind::AlreadyExists {
+                return Err(io_error(err.error));
+            }
+        }
+    }
+    Ok(hash)
+}
+
 pub fn get_blob(dir: &Path, hash: &str) -> Result<Vec<u8>, String> {
     if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err("Invalid content hash".to_owned());
     }
-    let bytes = fs::read(dir.join("blobs").join(hash)).map_err(io_error)?;
+    let primary = dir.join("blobs").join(hash);
+    let bytes = match fs::read(&primary) {
+        Ok(b) => b,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            let shared = shared_blobs_dir(dir).join(hash);
+            if shared != primary { fs::read(shared).map_err(io_error)? } else { return Err(io_error(err)); }
+        }
+        Err(err) => return Err(io_error(err)),
+    };
     if revision(&bytes) != hash {
         return Err(format!("Content hash mismatch: {hash}"));
     }

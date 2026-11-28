@@ -1,4 +1,4 @@
-use super::journal::{Event, Journal};
+use super::journal::{get_blob, Event, Journal};
 use super::tools::{parse, rejected, restore_file, workspace_path, Reply, ResolvePath};
 use super::validation::workspace_version;
 use crate::budget::truncate_utf8_bytes;
@@ -6,14 +6,19 @@ use crate::workspace::WorkspaceContext;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
-type Manifest = BTreeMap<String, String>;
+pub(super) type Manifest = BTreeMap<String, String>;
 
 #[derive(Deserialize)]
 struct Args { paths: Option<Vec<String>>, to_event: Option<usize>, dry_run: Option<bool> }
 
 fn load_manifest(journal: &Journal, hash: &str) -> Result<Manifest, String> {
     serde_json::from_slice(&journal.get(hash)?).map_err(|err| err.to_string())
+}
+
+fn load_manifest_from(dir: &Path, hash: &str) -> Result<Manifest, String> {
+    serde_json::from_slice(&get_blob(dir, hash)?).map_err(|err| err.to_string())
 }
 
 fn checkpoint(event: &Event) -> Option<&str> {
@@ -26,13 +31,89 @@ fn checkpoint(event: &Event) -> Option<&str> {
     }
 }
 
-fn event_checkpoint(event: &Event) -> Option<&str> {
-    match event.kind.as_str() {
-        "user" => event.data["workspace_revision_at_start"].as_str(),
-        "validation_receipt" => event.data["workspace_revision"].as_str(),
-        "exec_receipt" => event.data["before_workspace_revision"].as_str(),
-        _ => None,
+fn is_state_event(kind: &str) -> bool {
+    matches!(kind, "user" | "validation_receipt" | "exec_receipt" | "edit_receipt" | "changeset_receipt" | "rollback_receipt")
+}
+
+pub(super) fn reconstruct_manifest_at(
+    events: &[Event], dir: &Path, upto_seq: usize, before_event: bool,
+) -> Result<(usize, Manifest), String> {
+    if upto_seq == 0 || upto_seq > events.len() {
+        return Err(format!("Unknown event {upto_seq}"));
     }
+    let target_ev = &events[upto_seq - 1];
+    let (effective_seq, stop_exclusive) = if before_event {
+        if matches!(target_ev.kind.as_str(), "edit_receipt" | "changeset_receipt") {
+            if let Some(tx) = target_ev.data["tx_id"].as_str() {
+                let first = events.iter()
+                    .find(|e| e.run == target_ev.run && e.kind == "edit_receipt" && e.data["tx_id"].as_str() == Some(tx))
+                    .map(|e| e.seq)
+                    .unwrap_or(upto_seq);
+                (first, first)
+            } else {
+                (upto_seq, upto_seq)
+            }
+        } else {
+            (upto_seq, upto_seq)
+        }
+    } else {
+        (upto_seq, upto_seq + 1)
+    };
+
+    let direct_hash = match target_ev.kind.as_str() {
+        "user" => target_ev.data["workspace_revision_at_start"].as_str(),
+        "validation_receipt" => target_ev.data["workspace_revision"].as_str(),
+        "exec_receipt" => if before_event { target_ev.data["before_workspace_revision"].as_str() } else { target_ev.data["workspace_revision"].as_str() },
+        "changeset_receipt" => if before_event { target_ev.data["before_workspace_revision"].as_str() } else { target_ev.data["workspace_revision"].as_str() },
+        "rollback_receipt" if !before_event && target_ev.data["paths"].is_null() => target_ev.data["target"].as_str(),
+        _ => None,
+    };
+    if let Some(h) = direct_hash {
+        return Ok((effective_seq, load_manifest_from(dir, h)?));
+    }
+
+    let base = events[..stop_exclusive.saturating_sub(1)].iter().rev().find_map(|e| {
+        let hash = match e.kind.as_str() {
+            "user" => e.data["workspace_revision_at_start"].as_str(),
+            "exec_receipt" | "changeset_receipt" | "merge_receipt" => e.data["workspace_revision"].as_str(),
+            "validation_receipt" if e.data["workspace_changed_during_check"] == false => e.data["workspace_revision"].as_str(),
+            _ => None,
+        }?;
+        Some((e.seq, hash))
+    }).ok_or("No recorded workspace checkpoint precedes the requested event.")?;
+
+    let mut manifest = load_manifest_from(dir, base.1)?;
+    for event in &events[base.0..stop_exclusive.saturating_sub(1)] {
+        match event.kind.as_str() {
+            "edit_receipt" if event.data["status"] == "ok" => {
+                if let (Some(p), Some(r)) = (event.data["source"]["path"].as_str(), event.data["revision"].as_str()) {
+                    manifest.insert(p.to_owned(), r.to_owned());
+                }
+            }
+            "exec_receipt" | "changeset_receipt" | "merge_receipt" => {
+                if let Some(ah) = event.data["workspace_revision"].as_str() {
+                    manifest = load_manifest_from(dir, ah)?;
+                }
+            }
+            "rollback_receipt" => {
+                if let Some(th) = event.data["target"].as_str() {
+                    let restored = load_manifest_from(dir, th)?;
+                    if let Some(paths) = event.data["paths"].as_array() {
+                        for p in paths.iter().filter_map(Value::as_str) {
+                            match restored.get(p) {
+                                Some(r) => { manifest.insert(p.to_owned(), r.clone()); }
+                                None => { manifest.remove(p); }
+                            }
+                        }
+                    } else {
+                        manifest = restored;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok((effective_seq, manifest))
 }
 
 pub(super) fn run(ctx: &WorkspaceContext, journal: &mut Journal, run: usize, operation: &str, raw_args: &Value) -> Reply {
@@ -62,17 +143,26 @@ pub(super) fn run(ctx: &WorkspaceContext, journal: &mut Journal, run: usize, ope
     let existing_intent = if args.dry_run == Some(true) { None }
         else { journal.events.iter().find(|e| e.kind == "rollback_intent" && e.data["operation"] == operation).map(|e| e.data.clone()) };
     let plan = if let Some(saved) = existing_intent { saved } else {
-        let entry = match args.to_event {
-            Some(seq) => journal.events.iter().find(|e| e.run == run && e.seq == seq).and_then(|e| event_checkpoint(e).map(|h| (e, h)))
-                .ok_or_else(|| rejected("INVALID_ARGUMENT", "to_event must reference a user, exec_receipt, or validation_receipt event in the current run.")),
-            None => journal.events.iter().rev().filter(|e| e.run == run).find_map(|e| checkpoint(e).map(|h| (e, h)))
-                .ok_or_else(|| rejected("NO_CHECKPOINT", "This run has no recorded workspace checkpoint.")),
+        let (entry_seq, target, original, scan_start) = match args.to_event {
+            Some(seq) => {
+                let Some(ev) = journal.events.iter().find(|e| e.run == run && e.seq == seq && is_state_event(&e.kind)) else {
+                    return Ok(rejected("INVALID_ARGUMENT", "to_event must reference a user, edit_receipt, changeset_receipt, exec_receipt, validation_receipt, or rollback_receipt event in the current run."));
+                };
+                let before_event = matches!(ev.kind.as_str(), "exec_receipt" | "edit_receipt" | "changeset_receipt");
+                let (eff_seq, manifest) = reconstruct_manifest_at(&journal.events, journal.dir(), seq, before_event)?;
+                let hash = journal.put(&serde_json::to_vec(&manifest).map_err(|e| e.to_string())?)?;
+                let start = if before_event { eff_seq - 1 } else { eff_seq };
+                (eff_seq, hash, manifest, start)
+            }
+            None => {
+                let Some((seq, hash)) = journal.events.iter().rev().filter(|e| e.run == run).find_map(|e| checkpoint(e).map(|h| (e.seq, h.to_owned()))) else {
+                    return Ok(rejected("NO_CHECKPOINT", "This run has no recorded workspace checkpoint."));
+                };
+                let manifest = load_manifest(journal, &hash)?;
+                (seq, hash, manifest, seq)
+            }
         };
-        let entry = match entry { Ok(v) => v, Err(err) => return Ok(err) };
-        let (entry_seq, target) = (entry.0.seq, entry.1.to_owned());
-        let original = load_manifest(journal, &target)?;
         let (mut expected, mut touched) = (original.clone(), BTreeSet::new());
-        let scan_start = if entry.0.kind == "exec_receipt" { entry_seq - 1 } else { entry_seq };
         for event in &journal.events[scan_start..] {
             match event.kind.as_str() {
                 "edit_receipt" if event.data["status"] == "ok" => {

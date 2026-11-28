@@ -36,9 +36,22 @@ struct ReadArgs {
 pub(super) struct TextChange { old_text: String, new_text: String }
 
 #[derive(Serialize, Deserialize)]
-struct Intent { operation: String, path: String, before: Option<String>, after: String }
+struct Intent {
+    operation: String,
+    path: String,
+    before: Option<String>,
+    after: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tx_id: Option<String>,
+}
 
 pub(super) enum Edit { Write(String), Text(Vec<TextChange>) }
+pub(super) struct ChangesetItem {
+    pub target: PathBuf,
+    pub path: String,
+    pub expected: Option<Option<String>>,
+    pub edit: Edit,
+}
 pub(super) type Reply = Result<Value, String>;
 
 pub(super) fn rejected(code: &str, message: &str) -> Value {
@@ -404,7 +417,13 @@ pub(super) fn read_history(ctx: &WorkspaceContext, journal: &mut Journal, run: u
                 "edit_receipt" if e.data["status"] == "ok" => {
                     let (p, rev) = (e.data["source"]["path"].as_str().unwrap_or(""), e.data["revision"].as_str().unwrap_or(""));
                     let extra = e.data["diff_ref"].as_str().map(|d| format!(" diff_ref={d:?}")).unwrap_or_default();
-                    Some(format!("run {} event {} edit path={p:?} rev={}{extra}", e.run, e.seq, &rev[..rev.len().min(12)]))
+                    let tx = e.data["tx_id"].as_str().map(|t| format!(" tx={t:?}")).unwrap_or_default();
+                    Some(format!("run {} event {} edit path={p:?} rev={}{tx}{extra}", e.run, e.seq, &rev[..rev.len().min(12)]))
+                }
+                "changeset_receipt" if e.data["status"] == "ok" => {
+                    let files: Vec<&str> = e.data["files"].as_array().into_iter().flatten()
+                        .filter_map(|f| f["source"]["path"].as_str()).collect();
+                    Some(format!("run {} event {} changeset tx={:?} files={files:?}", e.run, e.seq, e.data["tx_id"].as_str().unwrap_or("")))
                 }
                 "exec_receipt" => {
                     let ch = match (e.data["before_workspace_revision"].as_str(), e.data["workspace_revision"].as_str()) {
@@ -594,9 +613,116 @@ pub(super) fn apply_edit(
         error["result_ref"] = json!(artifact.result_ref);
         return Ok(error);
     }
-    let intent = Intent { operation: operation.to_owned(), path, before, after };
+    let intent = Intent { operation: operation.to_owned(), path, before, after, tx_id: None };
     journal.append(run, "edit_intent", json!(intent))?;
     commit(ctx, journal, run, &intent, false)
+}
+
+pub(super) fn apply_changeset(
+    ctx: &WorkspaceContext, journal: &mut Journal, run: usize, operation: &str, items: Vec<ChangesetItem>,
+) -> Reply {
+    if let Some(saved) = journal.events.iter().find(|e| e.kind == "changeset_receipt" && e.data["operation"] == operation) {
+        return Ok(saved.data.clone());
+    }
+    if items.is_empty() {
+        return Ok(rejected("INVALID_ARGUMENT", "files must contain at least one file edit."));
+    }
+    let mut seen = HashSet::new();
+    let mut planned = Vec::with_capacity(items.len());
+    for (idx, item) in items.into_iter().enumerate() {
+        if !seen.insert(item.path.clone()) {
+            let mut err = rejected("INVALID_ARGUMENT", "Duplicate path in atomic edit files list.");
+            err["path"] = json!(item.path);
+            err["failed_path"] = json!(item.path);
+            err["failed_index"] = json!(idx);
+            return Ok(err);
+        }
+        let origin = match file_bytes(&item.target, ctx.config().max_file_bytes) {
+            Ok(b) => b,
+            Err(mut err) => {
+                err["failed_path"] = json!(item.path);
+                err["failed_index"] = json!(idx);
+                return Ok(err);
+            }
+        };
+        let before = origin.as_deref().map(revision);
+        if let Some(expected) = item.expected.filter(|exp| *exp != before) {
+            let mut err = conflict(journal, run, &item.path, &expected, origin.as_deref())?;
+            err["failed_path"] = json!(item.path);
+            err["failed_index"] = json!(idx);
+            return Ok(err);
+        }
+        if before.is_none() && !matches!(item.edit, Edit::Write(_)) {
+            let mut err = rejected("FILE_NOT_FOUND", "The file is absent. Use content to create it.");
+            err["path"] = json!(item.path);
+            err["failed_path"] = json!(item.path);
+            err["failed_index"] = json!(idx);
+            return Ok(err);
+        }
+        let old = std::str::from_utf8(origin.as_deref().unwrap_or_default()).map_err(|e| e.to_string())?;
+        let next = match match item.edit { Edit::Text(c) => edit_text(old, c), Edit::Write(c) => Ok(c) } {
+            Ok(next) => next,
+            Err(mut error) => {
+                let artifact = file_snapshot(journal, run, &item.path, old.as_bytes())?;
+                error["source"] = json!(artifact.source);
+                error["path"] = json!(item.path);
+                error["failed_path"] = json!(item.path);
+                error["failed_index"] = json!(idx);
+                error["result_ref"] = json!(artifact.result_ref);
+                error["current_revision"] = json!(artifact.revision);
+                if let Some(range) = error.get("candidate_range").cloned() {
+                    error["read"] = json!({"result_ref": artifact.result_ref, "start_line": range["start_line"], "end_line": range["end_line"]});
+                }
+                return Ok(error);
+            }
+        };
+        if next.len() > ctx.config().max_file_bytes {
+            let mut err = rejected("FILE_LIMIT", "Candidate content exceeds the workspace file size limit.");
+            err["path"] = json!(item.path);
+            err["failed_path"] = json!(item.path);
+            err["failed_index"] = json!(idx);
+            return Ok(err);
+        }
+        let after = revision(next.as_bytes());
+        if before.as_deref() == Some(after.as_str()) {
+            let artifact = file_snapshot(journal, run, &item.path, old.as_bytes())?;
+            let mut err = rejected("NO_OP_EDIT", "The requested change produces identical file bytes; nothing was written.");
+            err["source"] = json!(artifact.source);
+            err["path"] = json!(item.path);
+            err["failed_path"] = json!(item.path);
+            err["failed_index"] = json!(idx);
+            err["current_revision"] = json!(artifact.revision);
+            err["result_ref"] = json!(artifact.result_ref);
+            return Ok(err);
+        }
+        planned.push((item.path, origin, next, before, after));
+    }
+
+    let before_workspace_revision = super::validation::save_workspace(ctx, journal)?;
+    let mut receipts = Vec::with_capacity(planned.len());
+    for (idx, (path, origin, next, before, after)) in planned.into_iter().enumerate() {
+        if let Some(bytes) = &origin { journal.put(bytes)?; }
+        journal.put(next.as_bytes())?;
+        let sub_op = format!("{operation}.{}", idx + 1);
+        let intent = Intent { operation: sub_op, path: path.clone(), before, after, tx_id: Some(operation.to_owned()) };
+        journal.append(run, "edit_intent", json!(intent))?;
+        let rec = commit(ctx, journal, run, &intent, false)?;
+        if rec["status"] != "ok" {
+            return Ok(rec);
+        }
+        receipts.push(rec);
+    }
+    let workspace_revision = super::validation::save_workspace(ctx, journal)?;
+    let receipt = json!({
+        "status": "ok",
+        "operation": operation,
+        "tx_id": operation,
+        "before_workspace_revision": before_workspace_revision,
+        "workspace_revision": workspace_revision,
+        "files": receipts,
+    });
+    journal.append(run, "changeset_receipt", receipt.clone())?;
+    Ok(receipt)
 }
 
 pub(super) fn restore_file(
@@ -609,7 +735,7 @@ pub(super) fn restore_file(
             } else { rejected("REVISION_CONFLICT", "A restored file changed before rollback completed.") });
         }
         return commit(ctx, journal, run, &Intent {
-            operation: operation.to_owned(), path: path.to_owned(), before: before.map(str::to_owned), after: after.to_owned()
+            operation: operation.to_owned(), path: path.to_owned(), before: before.map(str::to_owned), after: after.to_owned(), tx_id: None
         }, true);
     }
     let (target, name) = match workspace_path(ctx, path, ResolvePath::MissingParents) { Ok(v) => v, Err(e) => return Ok(e) };
@@ -702,6 +828,7 @@ fn commit(ctx: &WorkspaceContext, journal: &mut Journal, run: usize, intent: &In
         "trailing_newline": next_str.ends_with('\n'), "diff": preview, "diff_complete": !clipped
     });
     if dropped_trailing_newline { receipt["dropped_trailing_newline"] = json!(true); }
+    if let Some(tx_id) = &intent.tx_id { receipt["tx_id"] = json!(tx_id); }
     if clipped { receipt["diff_ref"] = json!(diff.result_ref); }
     journal.append(run, "edit_receipt", receipt.clone())?;
     Ok(receipt)

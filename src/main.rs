@@ -71,6 +71,46 @@ fn run_cli() -> Result<(), String> {
             println!("Restored snapshot {manifest} to {dest}");
             Ok(())
         }
+        "branch" => {
+            let root = PathBuf::from(parse_flag(&args[1..], "--root")?.unwrap_or_else(|| ".".to_owned()));
+            let from = parse_flag(&args[1..], "--from")?.ok_or("Missing --from <session>")?;
+            let to = parse_flag(&args[1..], "--to")?.ok_or("Missing --to <new-session>")?;
+            let event: usize = parse_flag(&args[1..], "--event")?
+                .ok_or("Missing --event <seq>")?
+                .parse()
+                .map_err(|_| "Invalid --event number".to_owned())?;
+            let lesson = parse_flag(&args[1..], "--lesson")?;
+            let restore = !args[1..].iter().any(|a| a == "--no-restore");
+            let info = session::branch_session(&root, &from, &to, event, lesson.as_deref(), restore)?;
+            println!("{}", serde_json::to_string_pretty(&info).map_err(|e| e.to_string())?);
+            Ok(())
+        }
+        "worker" => match args.get(1).map(String::as_str) {
+            Some("spawn") => {
+                let root = PathBuf::from(parse_flag(&args[2..], "--root")?.unwrap_or_else(|| ".".to_owned()));
+                let name = parse_flag(&args[2..], "--name")?.ok_or("Missing --name <worker>")?;
+                let dest = parse_flag(&args[2..], "--to")?.ok_or("Missing --to <worker-dir>")?;
+                let info = session::spawn_worker(&root, &name, &PathBuf::from(&dest))?;
+                println!("{}", serde_json::to_string_pretty(&info).map_err(|e| e.to_string())?);
+                Ok(())
+            }
+            Some("merge") => {
+                let root = PathBuf::from(parse_flag(&args[2..], "--root")?.unwrap_or_else(|| ".".to_owned()));
+                let from = parse_flag(&args[2..], "--from")?.ok_or("Missing --from <worker-dir>")?;
+                let main_sess = parse_flag(&args[2..], "--session")?;
+                let commands = match parse_flag(&args[2..], "--checks")? {
+                    Some(path) => Commands::from_compact_file(Path::new(&path), &root)?,
+                    None => Commands::default(),
+                };
+                let report = session::merge_worker(&root, &PathBuf::from(&from), &commands, main_sess.as_deref())?;
+                println!("{}", serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?);
+                if report.status != "ok" {
+                    return Err(format!("Merge rejected ({}): {:?}", report.status, report.code));
+                }
+                Ok(())
+            }
+            _ => Err("Use `source_harness worker spawn ...` or `source_harness worker merge ...`.".to_owned()),
+        },
         "-h" | "--help" | "help" => {
             print_usage();
             Ok(())
@@ -224,6 +264,9 @@ fn print_usage() {
          source_harness agent --root <dir> [--session <name>] (--prompt <text> | --resume | --continue [--prompt <correction>]) [--checks <file>] [--model <m>] [--effort <e>] [--max-turns <n>]\n  \
          source_harness chat --root <dir> [--session <name>] [--checks <file>] [--model <m>] [--effort <e>] [--max-turns <n>]\n  \
          source_harness history --root <dir> --session <name> [--ref <result_ref> | --event <seq>]\n  \
-         source_harness fork --root <dir> --session <name> --revision <workspace_revision> --to <new-directory>"
+         source_harness fork --root <dir> --session <name> --revision <workspace_revision> --to <new-directory>\n  \
+         source_harness branch --root <dir> --from <session> --to <new-session> --event <seq> [--lesson <text>] [--no-restore]\n  \
+         source_harness worker spawn --root <main-dir> --name <worker> --to <worker-dir>\n  \
+         source_harness worker merge --root <main-dir> --from <worker-dir> [--checks <file>] [--session <main-session>]"
     );
 }

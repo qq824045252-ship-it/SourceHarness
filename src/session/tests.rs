@@ -202,3 +202,158 @@ fn exec_timeout_kills_descendant_process_tree() {
     assert_eq!(res["timed_out"], true, "{res}");
     assert!(started.elapsed().as_secs_f32() < 5.0, "elapsed={:?}", started.elapsed());
 }
+
+#[test]
+fn atomic_multi_file_edit_preflight_and_arbitrary_event_rollback() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("a.txt"), "a=1\n").unwrap();
+    fs::write(root.path().join("b.txt"), "b=1\n").unwrap();
+    let ctx = WorkspaceContext::new(WorkspaceConfig::with_root(root.path())).unwrap();
+    let mut journal = Journal::open(&root.path().join(".sourceharness/sessions/tx")).unwrap();
+    let start_rev = super::validation::save_workspace(&ctx, &journal).unwrap();
+    journal.append(1, "user", json!({"text":"tx","workspace_revision_at_start":start_rev})).unwrap();
+
+    // Preflight failure on second file must leave first file untouched on disk.
+    let fail = compact::modify(&ctx, &mut journal, 1, "1.1.1", "edit", &json!({
+        "files": [
+            {"path": "a.txt", "changes": [{"old_text": "a=1", "new_text": "a=2"}]},
+            {"path": "b.txt", "changes": [{"old_text": "missing", "new_text": "b=2"}]}
+        ]
+    })).unwrap();
+    assert_eq!(fail["code"], "TEXT_NOT_FOUND", "{fail}");
+    assert_eq!(fail["failed_path"], "b.txt");
+    assert_eq!(fail["failed_index"], 1);
+    assert_eq!(fs::read_to_string(root.path().join("a.txt")).unwrap(), "a=1\n");
+
+    // Atomic 3-file changeset succeeds and commits all files together.
+    let ok = compact::modify(&ctx, &mut journal, 1, "1.2.1", "edit", &json!({
+        "files": [
+            {"path": "a.txt", "changes": [{"old_text": "a=1", "new_text": "a=2"}]},
+            {"path": "b.txt", "changes": [{"old_text": "b=1", "new_text": "b=2"}]},
+            {"path": "c.txt", "content": "c=1\n"}
+        ]
+    })).unwrap();
+    assert_eq!(ok["status"], "ok", "{ok}");
+    let tx_seq = journal.events.iter().rev().find(|e| e.kind == "changeset_receipt").unwrap().seq;
+    let presented = compact::present("edit", &ok, None).as_str().unwrap().to_owned();
+    assert!(presented.starts_with("Edited 3 files (tx 1.2.1):"), "{presented}");
+    assert_eq!(fs::read_to_string(root.path().join("c.txt")).unwrap(), "c=1\n");
+
+    // Follow-up single edit on a.txt, then rollback specifically to before that edit_receipt.
+    let e2 = compact::modify(&ctx, &mut journal, 1, "1.3.1", "edit", &json!({
+        "path": "a.txt", "changes": [{"old_text": "a=2", "new_text": "a=3"}]
+    })).unwrap();
+    assert_eq!(e2["status"], "ok", "{e2}");
+    let edit_a3_seq = journal.events.iter().rev().find(|e| e.kind == "edit_receipt").unwrap().seq;
+    assert_eq!(fs::read_to_string(root.path().join("a.txt")).unwrap(), "a=3\n");
+
+    let rb_edit = super::rollback::run(&ctx, &mut journal, 1, "1.4.1", &json!({"to_event": edit_a3_seq})).unwrap();
+    assert_eq!(rb_edit["status"], "ok", "{rb_edit}");
+    assert_eq!(fs::read_to_string(root.path().join("a.txt")).unwrap(), "a=2\n");
+    assert_eq!(fs::read_to_string(root.path().join("b.txt")).unwrap(), "b=2\n");
+    assert!(root.path().join("c.txt").exists());
+
+    // Rollback to before the entire changeset_receipt atomically reverts all 3 files.
+    let rb_tx = super::rollback::run(&ctx, &mut journal, 1, "1.5.1", &json!({"to_event": tx_seq})).unwrap();
+    assert_eq!(rb_tx["status"], "ok", "{rb_tx}");
+    assert_eq!(fs::read_to_string(root.path().join("a.txt")).unwrap(), "a=1\n");
+    assert_eq!(fs::read_to_string(root.path().join("b.txt")).unwrap(), "b=1\n");
+    assert!(!root.path().join("c.txt").exists());
+}
+
+#[test]
+fn multi_worker_concurrent_merge_write_skew_and_text_conflict() {
+    let main_tmp = tempfile::tempdir().unwrap();
+    let main_root = main_tmp.path();
+    fs::write(main_root.join("api.txt"), "sig=v1\n").unwrap();
+    fs::write(main_root.join("service_a.txt"), "a_uses=v1\n").unwrap();
+
+    // External semantic checker outside workspace: every *_uses=vX file must match sig=vX in api.txt.
+    let ext = tempfile::tempdir().unwrap();
+    #[cfg(windows)]
+    let checks = {
+        let script = ext.path().join("check_sig.cmd");
+        fs::write(&script, concat!(
+            "@echo off\r\n",
+            "setlocal enabledelayedexpansion\r\n",
+            "for /f \"tokens=2 delims==\" %%v in (api.txt) do set SIG=%%v\r\n",
+            "for %%f in (service_*.txt) do (\r\n",
+            "  findstr /C:\"uses=!SIG!\" \"%%f\" >nul || (echo mismatch in %%f expected !SIG! 1>&2 & exit /b 1)\r\n",
+            ")\r\n",
+            "echo ok\r\n",
+        )).unwrap();
+        let mut map = std::collections::BTreeMap::new();
+        map.insert("sig".to_owned(), super::validation::Validation {
+            program: std::path::PathBuf::from(std::env::var("COMSPEC").unwrap_or_else(|_| "C:\\Windows\\System32\\cmd.exe".to_owned())),
+            args: vec!["/C".to_owned(), script.to_string_lossy().into_owned()],
+            description: "Signature consistency check".to_owned(),
+            artifacts: vec![], inputs: vec![], timeout_seconds: Some(15),
+        });
+        super::Commands(map)
+    };
+    #[cfg(not(windows))]
+    let checks = {
+        use std::os::unix::fs::PermissionsExt;
+        let script = ext.path().join("check_sig.sh");
+        fs::write(&script, concat!(
+            "#!/bin/sh\n",
+            "sig=$(cut -d= -f2 api.txt)\n",
+            "for f in service_*.txt; do\n",
+            "  grep -q \"uses=$sig\" \"$f\" || { echo \"mismatch in $f expected $sig\" >&2; exit 1; }\n",
+            "done\n",
+            "echo ok\n",
+        )).unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        let mut map = std::collections::BTreeMap::new();
+        map.insert("sig".to_owned(), super::validation::Validation {
+            program: script, args: vec![], description: "Signature consistency check".to_owned(),
+            artifacts: vec![], inputs: vec![], timeout_seconds: Some(15),
+        });
+        super::Commands(map)
+    };
+
+    let work_tmp = tempfile::tempdir().unwrap();
+    let w1 = work_tmp.path().join("w1");
+    let w2 = work_tmp.path().join("w2");
+    let w3 = work_tmp.path().join("w3");
+    super::spawn_worker(main_root, "w1", &w1).unwrap();
+    super::spawn_worker(main_root, "w2", &w2).unwrap();
+    super::spawn_worker(main_root, "w3", &w3).unwrap();
+
+    // Verify independent concurrent Sessions can be opened simultaneously across workers.
+    {
+        let _s1 = super::Session::open(&w1, "s1", super::Options::default()).unwrap();
+        let _s2 = super::Session::open(&w2, "s2", super::Options::default()).unwrap();
+    }
+
+    // Worker 1 upgrades api.txt + service_a.txt to v2 and merges cleanly.
+    fs::write(w1.join("api.txt"), "sig=v2\n").unwrap();
+    fs::write(w1.join("service_a.txt"), "a_uses=v2\n").unwrap();
+    let m1 = super::merge_worker(main_root, &w1, &checks, None).unwrap();
+    assert_eq!(m1.status, "ok", "{m1:?}");
+    assert_eq!(fs::read_to_string(main_root.join("api.txt")).unwrap(), "sig=v2\n");
+
+    // Worker 2 (from base v1) creates service_b.txt using OLD v1 signature:
+    // zero file overlap -> text merge has 0 conflicts, MUST be blocked by semantic validate gate!
+    fs::write(w2.join("service_b.txt"), "b_uses=v1\n").unwrap();
+    let m2_fail = super::merge_worker(main_root, &w2, &checks, None).unwrap();
+    assert_eq!(m2_fail.status, "validation_failed", "{m2_fail:?}");
+    assert_eq!(m2_fail.code.as_deref(), Some("MERGE_VALIDATION_FAILED"));
+    assert!(m2_fail.head_changed_paths.contains(&"api.txt".to_owned()));
+    assert!(m2_fail.worker_changed_paths.contains(&"service_b.txt".to_owned()));
+    assert!(!main_root.join("service_b.txt").exists(), "Mainline must stay untouched on failed merge");
+
+    // Worker 2 adapts to v2 and merges cleanly.
+    fs::write(w2.join("service_b.txt"), "b_uses=v2\n").unwrap();
+    let m2_ok = super::merge_worker(main_root, &w2, &checks, None).unwrap();
+    assert_eq!(m2_ok.status, "ok", "{m2_ok:?}");
+    assert_eq!(fs::read_to_string(main_root.join("service_b.txt")).unwrap(), "b_uses=v2\n");
+
+    // Worker 3 (from base v1) edits api.txt incompatibly -> MERGE_CONFLICT, mainline untouched.
+    fs::write(w3.join("api.txt"), "sig=v3\n").unwrap();
+    let m3 = super::merge_worker(main_root, &w3, &checks, None).unwrap();
+    assert_eq!(m3.status, "conflict", "{m3:?}");
+    assert_eq!(m3.code.as_deref(), Some("MERGE_CONFLICT"));
+    assert_eq!(m3.conflicts, vec!["api.txt"]);
+    assert_eq!(fs::read_to_string(main_root.join("api.txt")).unwrap(), "sig=v2\n");
+}

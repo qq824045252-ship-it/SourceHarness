@@ -1,15 +1,19 @@
+mod branch;
 mod compact;
 mod exec;
 mod guard;
 mod inbox;
 mod journal;
+mod merge;
 mod rollback;
 #[cfg(test)]
 mod tests;
 mod tools;
 mod validation;
 
+pub use branch::{branch_session, read_branch_info, BranchInfo};
 pub use inbox::InputInbox;
+pub use merge::{merge_worker, spawn_worker, FailedCheck, MergeReport, WorkerInfo};
 pub use validation::Commands;
 
 use crate::budget::{json_byte_len, truncate_utf8_bytes};
@@ -215,9 +219,19 @@ impl Session {
 
         for step in 0..=turn_budget {
             let mut new_pause = None;
-            while let Some(call) = cp.pending.pop_front() {
+            while !cp.pending.is_empty() {
                 self.collect_steering(&mut cp, poll_steering)?;
                 let guarded = cp.guard_pause.is_some() || new_pause.is_some();
+                if cp.queued_steering.is_empty() && !guarded {
+                    let batch_len = self.parallel_prefix_len(&cp.pending);
+                    if batch_len >= 2 {
+                        let batch: Vec<Call> = (0..batch_len).filter_map(|_| cp.pending.pop_front()).collect();
+                        let pause = self.execute_parallel_batch(run, cp.round, &batch, &mut cp, observer, poll_steering)?;
+                        if pause.is_some() { new_pause = pause; }
+                        continue;
+                    }
+                }
+                let call = cp.pending.pop_front().expect("non-empty pending");
                 let output = if cp.queued_steering.is_empty() && !guarded {
                     let (output, pause) = self.execute(run, cp.round, &call, observer)?;
                     new_pause = pause;
@@ -484,6 +498,85 @@ impl Session {
         Ok(function_output(call, &presented))
     }
 
+    fn parallel_prefix_len(&self, pending: &VecDeque<Call>) -> usize {
+        let mut count = 0;
+        let mut has_validate = false;
+        for call in pending {
+            if call.name == "validate" {
+                let parsed = serde_json::from_str::<Value>(&call.raw_args).ok();
+                if parsed.as_ref().and_then(|v| compact::resolve_check_name(&self.options.commands, v)).is_some() {
+                    has_validate = true;
+                    count += 1;
+                    continue;
+                }
+                break;
+            }
+            if call.name == "read" {
+                let parsed = serde_json::from_str::<Value>(&call.raw_args).ok();
+                if parsed.as_ref().is_some_and(|v| v["history"] != true) {
+                    count += 1;
+                    continue;
+                }
+                break;
+            }
+            break;
+        }
+        if has_validate && count >= 2 { count } else { 0 }
+    }
+
+    fn execute_parallel_batch(
+        &mut self, run: usize, round: usize, batch: &[Call], cp: &mut Checkpoint,
+        observer: &mut dyn RunObserver, poll_steering: &mut dyn FnMut() -> Option<SteeringInput>,
+    ) -> Result<Option<Value>, String> {
+        let mut prepared: Vec<Option<Result<validation::PreparedValidation, Value>>> = Vec::with_capacity(batch.len());
+        for call in batch {
+            if call.name == "validate" {
+                let args: Value = serde_json::from_str(&call.raw_args).map_err(|e| e.to_string())?;
+                let check = compact::resolve_check_name(&self.options.commands, &args).ok_or("Missing check")?.to_owned();
+                prepared.push(Some(validation::prepare_detached(&self.ctx, &self.journal, &call.operation, &self.options.commands, &check)?));
+            } else {
+                prepared.push(None);
+            }
+        }
+        let executed: Vec<Option<Result<Result<validation::ExecutedValidation, Value>, String>>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = prepared.into_iter().map(|slot| match slot {
+                Some(Ok(prep)) => Some(scope.spawn(move || validation::execute_prepared(prep).map(Ok))),
+                Some(Err(early)) => Some(scope.spawn(move || Ok(Err(early)))),
+                None => None,
+            }).collect();
+            handles.into_iter().map(|h| h.map(|t| t.join().unwrap_or_else(|_| Err("Validation worker panicked".to_owned())))).collect()
+        });
+
+        let mut new_pause = None;
+        for (call, slot) in batch.iter().zip(executed) {
+            self.collect_steering(cp, poll_steering)?;
+            let guarded = cp.guard_pause.is_some() || new_pause.is_some();
+            if !cp.queued_steering.is_empty() || guarded {
+                let out = self.close_pending_call(run, round, call, observer, guarded)?;
+                cp.input.push(out);
+                continue;
+            }
+            let (out, pause) = match slot {
+                None => self.execute(run, round, call, observer)?,
+                Some(outcome) => {
+                    let args: Value = serde_json::from_str(&call.raw_args).map_err(|e| e.to_string())?;
+                    let input = self.journal.put(call.raw_args.as_bytes())?;
+                    let attempt = self.journal.append(run, "tool_attempt", json!({
+                        "operation":call.operation,"round":round,"call_id":call.call_id,"name":call.name,"arguments":input
+                    }))?;
+                    let (result, elapsed) = match outcome? {
+                        Ok(done) => validation::finalize_executed(&self.ctx, &mut self.journal, run, done, true)?,
+                        Err(early) => (early, 0),
+                    };
+                    self.record_tool_result(run, round, call, attempt, Some(&args), result, elapsed, observer)?
+                }
+            };
+            if pause.is_some() { new_pause = pause; }
+            cp.input.push(out);
+        }
+        Ok(new_pause)
+    }
+
     fn execute(&mut self, run: usize, round: usize, call: &Call, observer: &mut dyn RunObserver) -> Result<(Value, Option<Value>), String> {
         let args: Result<Value, _> = serde_json::from_str(&call.raw_args);
         let action_args = args.as_ref().ok();
@@ -501,6 +594,14 @@ impl Session {
             ("validate", Ok(args)) => compact::validate(&self.ctx, &mut self.journal, run, &call.operation, &self.options.commands, args)?,
             _ => json!({"status":"error","code":"UNKNOWN_TOOL","reason":"Use an available tool."}),
         };
+        self.record_tool_result(run, round, call, attempt, action_args, result, started.elapsed().as_millis(), observer)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_tool_result(
+        &mut self, run: usize, round: usize, call: &Call, attempt: usize,
+        action_args: Option<&Value>, result: Value, elapsed: u128, observer: &mut dyn RunObserver,
+    ) -> Result<(Value, Option<Value>), String> {
         let raw_args = action_args.unwrap_or(&Value::Null);
         let signal = guard::compact_candidate(&call.name, raw_args, &result)
             .then(|| {
@@ -511,7 +612,6 @@ impl Session {
             .flatten();
         let delivered = compact::present(&call.name, &result, signal.as_ref().filter(|s| s["state"] != "observe"));
         let output = self.journal.store_json(&result)?;
-        let elapsed = started.elapsed().as_millis();
         let live_read = action_args.filter(|a| call.name == "read" && a["result_ref"].is_null()).and_then(|a| a["path"].as_str());
         let observed = result["status"] == "ok" && result["source"]["kind"] == "workspace"
             && (matches!(call.name.as_str(), "edit" | "write") || (call.name == "read" && live_read.is_some()));
@@ -596,7 +696,12 @@ pub fn inspect(root: &Path, name: &str, reference: Option<&str>, event: Option<u
         }
         return serde_json::to_string_pretty(&output).map_err(|e| e.to_string());
     }
-    Ok(events.iter().map(|entry| {
+    let mut lines: Vec<String> = Vec::new();
+    if let Some(info) = branch::read_branch_info(&dir) {
+        let note = info.lesson.as_deref().map(|l| format!(" lesson={l:?}")).unwrap_or_default();
+        lines.push(format!("# branch from {:?} at event {} workspace={}{note}", info.parent_session, info.fork_event, &info.workspace_revision[..info.workspace_revision.len().min(12)]));
+    }
+    lines.extend(events.iter().map(|entry| {
         let detail = match entry.kind.as_str() {
             "user" | "steer" => entry.data["text"].as_str().unwrap_or_default().to_owned(),
             "tool_attempt" | "tool_result" | "tool_skipped" | "tool_reconciled" => format!(
@@ -607,7 +712,8 @@ pub fn inspect(root: &Path, name: &str, reference: Option<&str>, event: Option<u
             _ => entry.data.to_string(),
         };
         format!("{:>5} run {:>5} {:<20} {}", entry.seq, entry.run, entry.kind, truncate_utf8_bytes(&detail, 220).0)
-    }).collect::<Vec<_>>().join("\n"))
+    }));
+    Ok(lines.join("\n"))
 }
 
 pub fn fork_snapshot(root: &Path, name: &str, manifest: &str, destination: &Path) -> Result<(), String> {

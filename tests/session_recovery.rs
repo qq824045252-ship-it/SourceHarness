@@ -924,3 +924,129 @@ fn timeline_history_surgical_rollback_and_validate_scope_hint() {
     assert_eq!(fs::read_to_string(root.join("a.txt")).unwrap(), "a-v1\n");
     assert_eq!(fs::read_to_string(root.join("b.txt")).unwrap(), "b-v1\n");
 }
+
+#[test]
+fn phase2_intra_turn_parallel_validation_and_phase3_prefix_preserving_branch() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("workspace");
+    fs::create_dir(&root).unwrap();
+    fs::write(root.join("note.txt"), "init\n").unwrap();
+    let ext = tempfile::tempdir().unwrap();
+    let checks = ext.path().join("checks.json");
+    #[cfg(windows)]
+    {
+        let make_slow = |name: &str| {
+            let p = ext.path().join(format!("{name}.cmd"));
+            fs::write(&p, "@echo off\r\nping -n 2 127.0.0.1 > nul\r\nfindstr /C:\"good\" note.txt > nul\r\n").unwrap();
+            p
+        };
+        let (sa, sb) = (make_slow("slow_a"), make_slow("slow_b"));
+        let cmd_exe = std::env::var("COMSPEC").unwrap_or_else(|_| "C:\\Windows\\System32\\cmd.exe".to_owned());
+        fs::write(&checks, serde_json::to_vec(&json!({
+            "slow_a": {"program": cmd_exe, "args": ["/C", sa.to_str().unwrap()], "description": "Slow check A"},
+            "slow_b": {"program": cmd_exe, "args": ["/C", sb.to_str().unwrap()], "description": "Slow check B"}
+        })).unwrap()).unwrap();
+    }
+    #[cfg(not(windows))]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let make_slow = |name: &str| {
+            let p = ext.path().join(format!("{name}.sh"));
+            fs::write(&p, "#!/bin/sh\nsleep 0.5\ngrep -q good note.txt\n").unwrap();
+            fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+            p
+        };
+        let (sa, sb) = (make_slow("slow_a"), make_slow("slow_b"));
+        fs::write(&checks, serde_json::to_vec(&json!({
+            "slow_a": {"program": sa.to_str().unwrap(), "args": [], "description": "Slow check A"},
+            "slow_b": {"program": sb.to_str().unwrap(), "args": [], "description": "Slow check B"}
+        })).unwrap()).unwrap();
+    }
+
+    // Phase 2: 2 concurrent validate calls in one turn + write barrier (edit followed by read).
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let gateway = format!("http://{}/v1", listener.local_addr().unwrap());
+    let root_for_server = root.clone();
+    let saved_prefix = std::sync::Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+    let saved_prefix_srv = saved_prefix.clone();
+    let good_seq = std::sync::Arc::new(std::sync::Mutex::new(0usize));
+    let good_seq_srv = good_seq.clone();
+
+    let server = std::thread::spawn(move || {
+        let mut prior = None;
+        let (stream, _) = compact_round(&listener, &mut prior);
+        respond(stream, call("e_good", "edit", json!({"path":"note.txt","changes":[{"old_text":"init","new_text":"good"}]})));
+        let (stream, _) = compact_round(&listener, &mut prior);
+        let t0 = std::time::Instant::now();
+        respond_many(stream, vec![
+            call("val_a", "validate", json!({"check":"slow_a"})),
+            call("val_b", "validate", json!({"check":"slow_b"})),
+        ]);
+        let (stream, req) = compact_round(&listener, &mut prior);
+        let wall_ms = t0.elapsed().as_millis();
+        let items = req["input"].as_array().unwrap();
+        let out_a = &items[items.len() - 2];
+        let out_b = &items[items.len() - 1];
+        assert_eq!(out_a["call_id"], "val_a");
+        assert_eq!(out_b["call_id"], "val_b");
+        assert!(out_a["output"].as_str().unwrap().starts_with("PASS slow_a"));
+        assert!(out_b["output"].as_str().unwrap().starts_with("PASS slow_b"));
+        let evs = session_events(&root_for_server);
+        let elapsed_sum: u128 = evs.iter()
+            .filter(|e| e["kind"] == "tool_result" && (e["data"]["call_id"] == "val_a" || e["data"]["call_id"] == "val_b"))
+            .filter_map(|e| e["data"]["elapsed_ms"].as_u64())
+            .map(u128::from)
+            .sum();
+        assert!(wall_ms < elapsed_sum, "expected parallel wall_ms ({wall_ms}) < sum ({elapsed_sum})");
+        *saved_prefix_srv.lock().unwrap() = items.clone();
+        *good_seq_srv.lock().unwrap() = evs.last().unwrap()["seq"].as_u64().unwrap() as usize;
+
+        // Dead-end edit after the good checkpoint, then finish main session with a dead-end state.
+        respond(stream, call("e_bad", "edit", json!({"path":"note.txt","changes":[{"old_text":"good","new_text":"dead-end"}]})));
+        let (stream, _) = compact_round(&listener, &mut prior);
+        respond(stream, answer("Dead end reached."));
+        listener
+    });
+    let res = invoke(&root, &gateway, false, &["agent", "--checks", checks.to_str().unwrap(), "--prompt", "Try task."]);
+    assert!(res.status.success(), "{}", String::from_utf8_lossy(&res.stderr));
+    let listener = server.join().unwrap();
+    assert_eq!(fs::read_to_string(root.join("note.txt")).unwrap(), "dead-end\n");
+
+    // Phase 3: Branch back to good_seq, verify workspace rewound and exact 0..K prefix preserved!
+    let k = *good_seq.lock().unwrap();
+    let br = Command::new(env!("CARGO_BIN_EXE_source_harness"))
+        .args(["branch", "--root", root.to_str().unwrap(), "--from", "acceptance", "--to", "alt", "--event", &k.to_string(), "--lesson", "Avoid dead-end edit"])
+        .output().unwrap();
+    assert!(br.status.success(), "{}", String::from_utf8_lossy(&br.stderr));
+    assert_eq!(fs::read_to_string(root.join("note.txt")).unwrap(), "good\n");
+
+    let hist = Command::new(env!("CARGO_BIN_EXE_source_harness"))
+        .args(["history", "--root", root.to_str().unwrap(), "--session", "alt"])
+        .output().unwrap();
+    assert!(hist.status.success());
+    let hist_out = String::from_utf8_lossy(&hist.stdout);
+    assert!(hist_out.contains("# branch from \"acceptance\" at event "), "{hist_out}");
+
+    let expected_prefix = saved_prefix.lock().unwrap().clone();
+    let server2 = std::thread::spawn(move || {
+        let mut prior = None;
+        let (stream, req) = compact_round(&listener, &mut prior);
+        let alt_items = req["input"].as_array().unwrap();
+        assert_eq!(&alt_items[..expected_prefix.len()], &expected_prefix[..], "0..K prefix must stay byte-identical for KV cache");
+        let last = alt_items.last().unwrap();
+        assert_eq!(last["role"], "user");
+        assert!(last["content"].as_str().unwrap().contains("Lesson from prior branch: Avoid dead-end edit"), "{last}");
+        respond(stream, answer("Recovered on branch alt."));
+    });
+    let res2 = Command::new(env!("CARGO_BIN_EXE_source_harness"))
+        .args(["agent", "--root", root.to_str().unwrap(), "--session", "alt", "--checks", checks.to_str().unwrap(), "--resume"])
+        .env("OPENAI_BASE_URL", &gateway)
+        .env("OPENAI_API_KEY", "fixture-key")
+        .env("OPENAI_MODEL", "fixture")
+        .env("OPENAI_REASONING_EFFORT", "low")
+        .env_remove("SOURCE_HARNESS_TEST_INTERRUPT")
+        .output().unwrap();
+    assert!(res2.status.success(), "{}", String::from_utf8_lossy(&res2.stderr));
+    assert!(String::from_utf8_lossy(&res2.stdout).contains("Recovered on branch alt."));
+    server2.join().unwrap();
+}
