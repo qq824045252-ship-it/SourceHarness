@@ -138,6 +138,8 @@ python scripts/eval_qwen_benchmark.py --exe target/debug/source_harness --varian
 
 ## 七、 200 题实时基线（`auto/deepseek-v4.1-flash-1017`，本机 magpie 网关）
 
+> 注：本节记录 2026-11-28 的早期基线（`b8ee49e`，worker rebase 与题干澄清之前）。定版数字见第八节。
+
 2026-11-28 实跑，两条轨道合计 200 题，全部真实模型调用。逐题数据与三份 `summary.json` 已归档在 [`docs/evidence/phase14-200-2026-11-28/`](evidence/phase14-200-2026-11-28/README.md)。
 
 ### 轨道 A：100 题泛化回归（`variant 02–03`）
@@ -191,3 +193,32 @@ python scripts/eval_qwen_benchmark.py --exe target/debug/source_harness --varian
 1. **`worker rebase` 是刚需，不是优化项**（瓶颈 #2 得到 8/8 实测确认）。合流被拒后 Worker 无法获知主线签名变更，模型只能"看不到问题就什么都不改"，二次合流必然失败。修复方向：`merge.rs` + `main.rs` 增加 `worker rebase --root <main> --worker <dir>`，三路合并主线 head 到 Worker 并更新 `worker.json` 的 `base_revision`。
 2. **`validate` 的调用优先级需要显式指令**（12/12 实测）。检查名 `lint`/`types` 会让模型理解为"自己去跑 mypy/ruff"，从而绕过配置好的检查器并污染工作区。修复方向：在静态 `INSTRUCTIONS` 里明确"仓库检查一律用 `validate`，`exec` 只用于临时验证且不得留下缓存目录"；或在 `validate` 描述里列出已配置的检查名。
 3. **oracle 要按"语义等价"判分**（3 例）。模型会补 docstring、改写措辞、调整格式；字节级 exact 会把正确结果判负。修复方向：把 `expect` 的 exact 换成 markers/`any_of`，只在脚本化机制题保留字节比对。
+
+---
+
+## 八、 定版（`b8bc33e`，2026-11-28）
+
+三条轨道全部用同一 commit、同一二进制跑完（`cargo build --locked`，`sha256 = 7aae8231490267c03c5ece3fb5aff14fa0a5ba7f0f25572af3638465cc9e4628`），各自使用全新输出目录；逐题数据与三份 `summary.json` 归档在 [`docs/evidence/phase14-200-b8bc33e-2026-11-28/`](evidence/phase14-200-b8bc33e-2026-11-28/README.md)，每份 `summary-*.json` 都由同目录对应的 `cases-*.jsonl.gz` 生成，配对与摘要见该目录 `provenance.json`。
+
+| 配置 | 通过 | 早期基线（`b8ee49e`） |
+| --- | ---: | ---: |
+| 轨道 A · 100 题泛化（live） | **96/100** | 95/100 |
+| 轨道 B · 100 题专项（live） | **95/100** | 77/100 |
+| 轨道 B · 100 题专项（scripted） | **100/100** | 100/100 |
+
+关键指标：轨道 A 613 请求（`p50/p95 6/11`）、`seconds_p95 19.40s`、1,372,651 token（缓存 88.5%）、前缀 **513/513**；轨道 B live 1,155 请求（`10/22`）、`seconds_p95 25.62s`、2,387,988 token、前缀 **584/584**、合流安检门 `ok 24` / `VALIDATION_FAILED 10` / `CONFLICT 3`；轨道 B scripted 522 请求、前缀 **218/218**。
+
+机制真实触发率（`triggered / evaluated`）：
+
+| 机制 | Track B live | Track B scripted |
+| --- | ---: | ---: |
+| 原子多文件变更集 | 25/25 | 17/25 |
+| 单轮并行 `validate` | 16/25 | 25/25 |
+| 显式 `rollback` 回滚 | 1/7 | 7/7 |
+| Worker `rebase` 后二次合流 | `ok 8` | `ok 8` |
+
+相对早期基线的提升可逐项归因：`c7f41bd`（worker rebase）+ `7927734`（评测计入 rebase）把 `worker-write-skew` 从 0/8 抬到 8/8、worker 家族 15/25 → 23/25；`10b016f`（写屏障题干点名已配置的 `lint`/`types`）把 `write-barrier` 从 0/12 抬到 11/12；`7242ca1`（写偏斜题干写明 `2x`、`scale=2` 即 `4x`、默认 `1`）消除了 `x * scale` 与 docstring 两种合法解读。`b8bc33e` 的变更集前滚恢复没有 benchmark case 依赖崩溃，作用在恢复正确性上。
+
+方案 B（在当轮 user 消息尾部注入检查名）在 write-skew 上实测 **0/7**、637,831 token、91 次 `validate`、5 次 `REBASE_CONFLICT`，已回退且代码未保留；修复因此落在题干而不是内核。
+
+轨道 B live 剩余 5 例失败全部来自 oracle 严格度而非机制：`write-barrier.07`、`validate-fanout.00` 的 `app/service.py` 语义正确但字节不同；`atomic-rollback.06` 未通过该题的 `acceptance` 检查；`worker-conflict.02/.03` 改写 `notes.md` 措辞导致 marker 缺失（`.03` 还因主线改写使同行冲突消失）。下一步按第七节结论 3 把这类断言换成 markers / `any_of`，脚本化机制题保留字节比对。

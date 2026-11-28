@@ -1,0 +1,1 @@
+{"base_url":"http://127.0.0.1:3425/v1","binary_sha256":"7aae8231490267c03c5ece3fb5aff14fa0a5ba7f0f25572af3638465cc9e4628","checker_sha256":"d36889a9fb0ae8abcf73ba6a9cdeceb6558d72a188813f801e6e110bb29ac566","model":"auto/deepseek-v4.1-flash-1017","phase_timeout_seconds":600}

@@ -1,5 +1,8 @@
 # DeepSeek V4.1 Flash on the 200-task Phase 1-4 evaluation
 
+> This is the early baseline at `b8ee49e`, kept for comparison. The definitive run, at `b8bc33e`,
+> is in [docs/evidence/phase14-200-b8bc33e-2026-11-28/](../phase14-200-b8bc33e-2026-11-28/README.md).
+
 This run evaluates two tracks on the `v2-clean` branch. Track A replays 100 unseen instances of the existing 1,000-task compact corpus (`variant 02–03`, all 50 shapes). Track B runs 100 new tasks written for the Phase 1–4 mechanisms: atomic multi-file edits with arbitrary-node rollback, single-turn parallel `validate` behind a write barrier, timeline branching with prefix-cache reuse, and isolated workers behind a merge gate. Track B also has a scripted driver that replays fixed tool calls through a local SSE gateway, which measures the mechanisms without a model.
 
 The model is `auto/deepseek-v4.1-flash-1017` served by a loopback Responses gateway with low effort. Every tool call, workspace mutation and external check is real; only the scripted driver substitutes the model turns. Binary, checker and corpus digests are recorded in each `settings.json` and `manifest.json` in the result directories, and per-case data is published below.
