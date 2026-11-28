@@ -80,7 +80,7 @@ def workspace_check(files, spec):
     semantic = spec.get("json",{})
     behavior = spec.get("behavior")
     protected = spec.get("protected",{})
-    allowed = set(exact) | set(semantic)
+    allowed = set(exact) | set(semantic) | set(spec.get("allow",()))
     if behavior:
         allowed.add(behavior["path"])
     errors = []

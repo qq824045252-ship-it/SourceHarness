@@ -401,6 +401,8 @@ def main():
     parser.add_argument("--limit",type=int,default=1000)
     parser.add_argument("--case",action="append")
     parser.add_argument("--phase-timeout",type=int,default=600)
+    parser.add_argument("--variant-range",default=None,
+                        help="Run only an inclusive variant range such as 2-3")
     parser.add_argument("--plan-only",action="store_true")
     args = parser.parse_args()
     args.out = args.out.resolve()
@@ -424,8 +426,18 @@ def benchmark(args, parser):
     if plan_path.is_file() and json.loads(plan_path.read_bytes()) != plan:
         parser.error("The corpus changed. Choose a new result directory.")
     save(plan_path,plan)
+    variants = None
+    if args.variant_range:
+        match = re.fullmatch(r"(\d+)(?:-(\d+))?",args.variant_range)
+        if not match:
+            parser.error("Use --variant-range <first>[-<last>]")
+        first, last = int(match[1]), int(match[2] or match[1])
+        if not 0 <= first <= last <= 19:
+            parser.error("Variant range must stay within 0..19")
+        variants = set(range(first,last+1))
     if args.plan_only:
-        print(json.dumps(summary([],plan),indent=2))
+        print(json.dumps(summary([],manifest([case for case in all_cases
+                                              if variants is None or case.variant in variants])),indent=2))
         return 0
     if args.exe is None or args.workers < 1 or not 1 <= args.limit <= 1000 or args.phase_timeout < 1:
         parser.error("Supply --exe and positive benchmark limits")
@@ -437,9 +449,11 @@ def benchmark(args, parser):
             or not url.hostname or url.username is not None or url.query
             or url.fragment or not url.path.endswith("/v1")):
         parser.error("Use an HTTPS (or loopback HTTP) API base URL ending in /v1")
-    selected = [case for case in all_cases if not args.case or case.id in args.case]
+    selected = [case for case in all_cases
+                if (not args.case or case.id in args.case) and (variants is None or case.variant in variants)]
     if args.case and set(args.case) != {case.id for case in selected}:
         parser.error("Unknown case ID")
+    selected_plan = manifest(selected)
     settings = {"base_url":args.base_url,"model":args.model,"binary_sha256":sha256(args.exe.read_bytes()).hexdigest(),
                 "checker_sha256":sha256(CHECKER.read_bytes()).hexdigest(),"phase_timeout_seconds":args.phase_timeout}
     settings_path = args.out/"settings.json"
@@ -454,7 +468,7 @@ def benchmark(args, parser):
     rows = {path.stem:json.loads(path.read_bytes()) for path in results.glob("*.json")}
     pending = [case for case in selected if case.id not in rows][:args.limit]
     if not pending:
-        print(json.dumps(summary(list(rows.values()),plan),indent=2))
+        print(json.dumps(summary(list(rows.values()),selected_plan),indent=2))
         return 0
     key = os.environ.get("SOURCEHARNESS_QWEN_API_KEY") or os.environ.get("OPENAI_API_KEY")
     if not key and url.hostname == "opencode.ai" and url.port in (None,443):
@@ -480,14 +494,14 @@ def benchmark(args, parser):
                 rows[case.id] = data
             else:
                 save(attempts/(case.id+"-"+run.name[:8]+".json"),data)
-            report = summary(list(rows.values()),plan)
+            report = summary(list(rows.values()),selected_plan)
             report["stopped_by"] = gateway.failure
             rejected = list(attempts.glob("*.json"))
             report["infrastructure_attempts"] = len(rejected)
             report["infrastructure_requests"] = sum(
                 json.loads(path.read_bytes())["cost"]["attempts"] for path in rejected)
             save(args.out/"summary.json",report)
-            print(f"{len(rows)}/{len(plan)} {case.id} evaluated={data['evaluated']} passed={data['passed']} "
+            print(f"{len(rows)}/{len(selected_plan)} {case.id} evaluated={data['evaluated']} passed={data['passed']} "
                   f"requests={data['cost']['attempts']}",flush=True)
 
         complete(pilot,run_case(args,pilot,run,gateway,proxy))

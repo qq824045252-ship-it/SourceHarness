@@ -1,0 +1,120 @@
+{
+  "actions": 273,
+  "attempted_cases": 100,
+  "categories": {
+    "atomic": {
+      "evaluated": 25,
+      "passed": 25,
+      "planned": 25
+    },
+    "branch": {
+      "evaluated": 25,
+      "passed": 25,
+      "planned": 25
+    },
+    "parallel": {
+      "evaluated": 25,
+      "passed": 25,
+      "planned": 25
+    },
+    "worker": {
+      "evaluated": 25,
+      "passed": 25,
+      "planned": 25
+    }
+  },
+  "evaluated": 100,
+  "failure_reasons": {},
+  "known_usage": {
+    "input_tokens": 325632,
+    "output_tokens": 15264,
+    "total_tokens": 340896
+  },
+  "merge_gate": {
+    "conflict": 4,
+    "ok": 25,
+    "validation_failed": 8
+  },
+  "passed": 100,
+  "planned": 100,
+  "prefix_exact_pairs": 218,
+  "prefix_pairs": 218,
+  "requests": 522,
+  "requests_p50": 4,
+  "requests_p95": 9,
+  "seconds_p95": 2.768,
+  "shapes": {
+    "atomic.atomic-abort": {
+      "evaluated": 8,
+      "passed": 8,
+      "planned": 8
+    },
+    "atomic.atomic-rename": {
+      "evaluated": 10,
+      "passed": 10,
+      "planned": 10
+    },
+    "atomic.atomic-rollback": {
+      "evaluated": 7,
+      "passed": 7,
+      "planned": 7
+    },
+    "branch.branch-ab": {
+      "evaluated": 10,
+      "passed": 10,
+      "planned": 10
+    },
+    "branch.branch-green": {
+      "evaluated": 5,
+      "passed": 5,
+      "planned": 5
+    },
+    "branch.branch-rewind": {
+      "evaluated": 10,
+      "passed": 10,
+      "planned": 10
+    },
+    "parallel.validate-fanout": {
+      "evaluated": 13,
+      "passed": 13,
+      "planned": 13
+    },
+    "parallel.write-barrier": {
+      "evaluated": 12,
+      "passed": 12,
+      "planned": 12
+    },
+    "worker.worker-conflict": {
+      "evaluated": 4,
+      "passed": 4,
+      "planned": 4
+    },
+    "worker.worker-disjoint": {
+      "evaluated": 8,
+      "passed": 8,
+      "planned": 8
+    },
+    "worker.worker-shared-file": {
+      "evaluated": 5,
+      "passed": 5,
+      "planned": 5
+    },
+    "worker.worker-write-skew": {
+      "evaluated": 8,
+      "passed": 8,
+      "planned": 8
+    }
+  },
+  "stopped_by": null,
+  "tools": {
+    "edit": 192,
+    "read": 48,
+    "rollback": 7,
+    "validate": 165
+  },
+  "validate_concurrency": {
+    "max": 2.85,
+    "p50": 2.65,
+    "samples": 25
+  }
+}

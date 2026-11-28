@@ -1,0 +1,173 @@
+{
+  "actions": 273,
+  "attempted_cases": 100,
+  "categories": {
+    "atomic": {
+      "evaluated": 25,
+      "passed": 25,
+      "planned": 25
+    },
+    "branch": {
+      "evaluated": 25,
+      "passed": 24,
+      "planned": 25
+    },
+    "parallel": {
+      "evaluated": 25,
+      "passed": 13,
+      "planned": 25
+    },
+    "worker": {
+      "evaluated": 25,
+      "passed": 15,
+      "planned": 25
+    }
+  },
+  "evaluated": 100,
+  "failure_reasons": {
+    "CLI did not end naturally": 2,
+    "checks not passed: ['lint', 'types']": 10,
+    "file contents differ: app/service.py": 3,
+    "file contents differ: notes.md": 3,
+    "file contents differ: pkg/service_b.py": 17,
+    "merge code was MERGE_CONFLICT, expected MERGE_VALIDATION_FAILED": 1,
+    "merge code was MERGE_VALIDATION_FAILED, expected MERGE_CONFLICT": 1,
+    "merge command failed": 9,
+    "merge conflicts was [], expected ['notes.md']": 1,
+    "merge failed checks were []": 1,
+    "merge head_changed_paths was ['pkg/api.py', 'pkg/service_a.py', 'pkg/service_b.py'], expected ['pkg/api.py', 'pkg/service_a.py']": 1,
+    "merge status was conflict, expected ok": 1,
+    "merge status was conflict, expected validation_failed": 1,
+    "merge status was validation_failed, expected conflict": 1,
+    "merge status was validation_failed, expected ok": 8,
+    "unexpected file: .mypy_cache/.gitignore": 12,
+    "unexpected file: .mypy_cache/3.13/cache.0.db": 12,
+    "unexpected file: .mypy_cache/3.13/cache.1.db": 12,
+    "unexpected file: .mypy_cache/3.13/cache.10.db": 12,
+    "unexpected file: .mypy_cache/3.13/cache.11.db": 12,
+    "unexpected file: .mypy_cache/3.13/cache.12.db": 12,
+    "unexpected file: .mypy_cache/3.13/cache.13.db": 12,
+    "unexpected file: .mypy_cache/3.13/cache.14.db": 12,
+    "unexpected file: .mypy_cache/3.13/cache.15.db": 12,
+    "unexpected file: .mypy_cache/3.13/cache.2.db": 12,
+    "unexpected file: .mypy_cache/3.13/cache.3.db": 12,
+    "unexpected file: .mypy_cache/3.13/cache.4.db": 12,
+    "unexpected file: .mypy_cache/3.13/cache.5.db": 12,
+    "unexpected file: .mypy_cache/3.13/cache.6.db": 12,
+    "unexpected file: .mypy_cache/3.13/cache.7.db": 12,
+    "unexpected file: .mypy_cache/3.13/cache.8.db": 12,
+    "unexpected file: .mypy_cache/3.13/cache.9.db": 12,
+    "unexpected file: .mypy_cache/CACHEDIR.TAG": 12,
+    "unexpected file: .ruff_cache/.gitignore": 12,
+    "unexpected file: .ruff_cache/0.17.6/10396440635525304858": 1,
+    "unexpected file: .ruff_cache/0.17.6/11533198863703400178": 1,
+    "unexpected file: .ruff_cache/0.17.6/12679166109060657466": 1,
+    "unexpected file: .ruff_cache/0.17.6/13200178196979819575": 1,
+    "unexpected file: .ruff_cache/0.17.6/13366044583937886886": 1,
+    "unexpected file: .ruff_cache/0.17.6/14817283509064582081": 1,
+    "unexpected file: .ruff_cache/0.17.6/15561921149849751279": 1,
+    "unexpected file: .ruff_cache/0.17.6/3139290856209077551": 1,
+    "unexpected file: .ruff_cache/0.17.6/3718649652458578499": 1,
+    "unexpected file: .ruff_cache/0.17.6/4429741656621796751": 1,
+    "unexpected file: .ruff_cache/0.17.6/7549324093867811665": 1,
+    "unexpected file: .ruff_cache/0.17.6/775586130867520308": 1,
+    "unexpected file: .ruff_cache/0.17.6/8353426868017496101": 1,
+    "unexpected file: .ruff_cache/0.17.6/8682629952011279606": 1,
+    "unexpected file: .ruff_cache/CACHEDIR.TAG": 12,
+    "workspace matches none of the accepted end states": 1
+  },
+  "known_usage": {
+    "input_tokens": 2421391,
+    "output_tokens": 101799,
+    "total_tokens": 2523190
+  },
+  "merge_gate": {
+    "conflict": 5,
+    "ok": 16,
+    "validation_failed": 16
+  },
+  "passed": 77,
+  "planned": 100,
+  "prefix_exact_pairs": 584,
+  "prefix_pairs": 584,
+  "requests": 1157,
+  "requests_p50": 10,
+  "requests_p95": 22,
+  "seconds_p95": 37.189,
+  "shapes": {
+    "atomic.atomic-abort": {
+      "evaluated": 8,
+      "passed": 8,
+      "planned": 8
+    },
+    "atomic.atomic-rename": {
+      "evaluated": 10,
+      "passed": 10,
+      "planned": 10
+    },
+    "atomic.atomic-rollback": {
+      "evaluated": 7,
+      "passed": 7,
+      "planned": 7
+    },
+    "branch.branch-ab": {
+      "evaluated": 10,
+      "passed": 9,
+      "planned": 10
+    },
+    "branch.branch-green": {
+      "evaluated": 5,
+      "passed": 5,
+      "planned": 5
+    },
+    "branch.branch-rewind": {
+      "evaluated": 10,
+      "passed": 10,
+      "planned": 10
+    },
+    "parallel.validate-fanout": {
+      "evaluated": 13,
+      "passed": 13,
+      "planned": 13
+    },
+    "parallel.write-barrier": {
+      "evaluated": 12,
+      "passed": 0,
+      "planned": 12
+    },
+    "worker.worker-conflict": {
+      "evaluated": 4,
+      "passed": 2,
+      "planned": 4
+    },
+    "worker.worker-disjoint": {
+      "evaluated": 8,
+      "passed": 8,
+      "planned": 8
+    },
+    "worker.worker-shared-file": {
+      "evaluated": 5,
+      "passed": 5,
+      "planned": 5
+    },
+    "worker.worker-write-skew": {
+      "evaluated": 8,
+      "passed": 0,
+      "planned": 8
+    }
+  },
+  "stopped_by": null,
+  "tools": {
+    "edit": 226,
+    "exec": 156,
+    "read": 606,
+    "rollback": 2,
+    "validate": 207,
+    "write": 6
+  },
+  "validate_concurrency": {
+    "max": 2.81,
+    "p50": 1.63,
+    "samples": 12
+  }
+}
