@@ -415,7 +415,9 @@ def worker_write_skew(rng, variant):
     }
     actions = [
         spawn("w2"),
-        agent("main", "main", "Give compute in pkg/api.py an explicit scale parameter (default 1) and pass "
+        agent("main", "main", "Give compute in pkg/api.py an explicit scale parameter (default 1) that multiplies "
+                              "the result: compute(x) must be 2x and compute(x, scale=2) must be 4x. Change only "
+                              "the signature and the return line, leaving the rest of the file untouched. Pass "
                               "scale=2 from pkg/service_a.py.",
               [changesets(head_pairs), "Done."], {"workspace": spec(files, exact=head_state)}),
         agent("w2", "work", "In pkg/service_b.py add one to the summed doubles. Leave pkg/api.py alone.",
@@ -429,7 +431,8 @@ def worker_write_skew(rng, variant):
                       "updated_paths": ["pkg/api.py", "pkg/service_a.py"]}),
         agent("w2", "work", "The merge was rejected because pkg/service_b.py still calls compute with one argument. "
                             "Your workspace has been rebased onto mainline; inspect pkg/api.py and update "
-                            "pkg/service_b.py so every caller passes scale explicitly.",
+                            "pkg/service_b.py so every caller passes scale explicitly with its default value of 1, "
+                            "keeping pkg/service_b.py's totals unchanged.",
               [changesets(fixed_pairs), "Done."],
               {"workspace": spec(files, exact=merged)}),
         merge("w2", {"status": "ok", "workspace": spec(files, exact=merged)}),
