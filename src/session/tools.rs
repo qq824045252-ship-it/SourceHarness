@@ -624,6 +624,13 @@ pub(super) fn apply_changeset(
     if let Some(saved) = journal.events.iter().find(|e| e.kind == "changeset_receipt" && e.data["operation"] == operation) {
         return Ok(saved.data.clone());
     }
+    if let Some(event) = journal.events.iter().rev().find(|e| {
+        e.kind == "changeset_recovery" && e.data["operation"] == operation && e.data["status"] == "conflict"
+    }) {
+        let mut err = rejected("CHANGESET_CONFLICT", "An earlier attempt at this atomic edit stopped partway and one of its files has changed since. Inspect the workspace before retrying.");
+        err["path"] = event.data["path"].clone();
+        return Ok(err);
+    }
     if items.is_empty() {
         return Ok(rejected("INVALID_ARGUMENT", "files must contain at least one file edit."));
     }
@@ -699,12 +706,20 @@ pub(super) fn apply_changeset(
     }
 
     let before_workspace_revision = super::validation::save_workspace(ctx, journal)?;
-    let mut receipts = Vec::with_capacity(planned.len());
-    for (idx, (path, origin, next, before, after)) in planned.into_iter().enumerate() {
-        if let Some(bytes) = &origin { journal.put(bytes)?; }
+    let mut planned_files = Vec::with_capacity(planned.len());
+    for (path, origin, next, before, after) in &planned {
+        if let Some(bytes) = origin { journal.put(bytes)?; }
         journal.put(next.as_bytes())?;
+        planned_files.push(json!({"path": path, "before": before, "after": after}));
+    }
+    journal.append(run, "changeset_intent", json!({
+        "operation": operation, "tx_id": operation,
+        "before_workspace_revision": before_workspace_revision, "files": planned_files,
+    }))?;
+    let mut receipts = Vec::with_capacity(planned.len());
+    for (idx, (path, _, _, before, after)) in planned.into_iter().enumerate() {
         let sub_op = format!("{operation}.{}", idx + 1);
-        let intent = Intent { operation: sub_op, path: path.clone(), before, after, tx_id: Some(operation.to_owned()) };
+        let intent = Intent { operation: sub_op, path, before, after, tx_id: Some(operation.to_owned()) };
         journal.append(run, "edit_intent", json!(intent))?;
         let rec = commit(ctx, journal, run, &intent, false)?;
         if rec["status"] != "ok" {
@@ -723,6 +738,94 @@ pub(super) fn apply_changeset(
     });
     journal.append(run, "changeset_receipt", receipt.clone())?;
     Ok(receipt)
+}
+
+pub(super) fn resume_changesets(ctx: &WorkspaceContext, journal: &mut Journal) -> Result<(), String> {
+    loop {
+        let pending = journal.events.iter().find_map(|event| {
+            let operation = event.data["operation"].clone();
+            let done = journal.events.iter().any(|other| {
+                other.data["operation"] == operation
+                    && (other.kind == "changeset_receipt"
+                        || (other.kind == "changeset_recovery" && other.data["status"] == "conflict"))
+            });
+            (event.kind == "changeset_intent" && !done).then(|| (event.run, event.data.clone()))
+        });
+        let Some((run, intent)) = pending else { return Ok(()); };
+        let operation = intent["operation"].as_str().unwrap_or_default().to_owned();
+        let (mut receipts, mut applied) = (Vec::new(), Vec::new());
+        let mut blocked = None;
+        for (index, file) in intent["files"].as_array().cloned().unwrap_or_default().into_iter().enumerate() {
+            let path = file["path"].as_str().unwrap_or_default().to_owned();
+            let (before, after) = (file["before"].as_str().map(str::to_owned), file["after"].as_str().unwrap_or_default().to_owned());
+            let Ok((target, _)) = workspace_path(ctx, &path, ResolvePath::MissingParents) else {
+                blocked = Some(path);
+                break;
+            };
+            let current = match file_bytes(&target, ctx.config().max_file_bytes) {
+                Ok(bytes) => bytes,
+                Err(_) => {
+                    blocked = Some(path);
+                    break;
+                }
+            };
+            let revision = current.as_deref().map(revision);
+            if revision.as_deref() == Some(after.as_str()) {
+                let sub_op = format!("{operation}.{}", index + 1);
+                let saved = journal.events.iter().find(|event| event.kind == "edit_receipt" && event.data["operation"] == sub_op);
+                receipts.push(match saved {
+                    Some(saved) => saved.data.clone(),
+                    None => {
+                        let content = journal.get(&after)?;
+                        let text = std::str::from_utf8(&content).unwrap_or_default();
+                        json!({
+                            "status": "ok", "outcome": "already_applied", "operation": sub_op,
+                            "path": path, "source": source(&path), "revision": after, "bytes": content.len(),
+                            "lines": line_offsets(text).len().saturating_sub(1), "eol": detect_eol(text),
+                            "trailing_newline": content.ends_with(b"\n"),
+                        })
+                    }
+                });
+                applied.push(json!(path));
+                continue;
+            }
+            if revision != before {
+                blocked = Some(path);
+                break;
+            }
+            let sub_op = format!("{operation}.{}", index + 1);
+            let reply = match resume_edit(ctx, journal, run, &sub_op) {
+                Some(reply) => reply,
+                None => {
+                    let intent = Intent { operation: sub_op, path: path.clone(), before, after: after.clone(), tx_id: Some(operation.clone()) };
+                    journal.append(run, "edit_intent", json!(intent))?;
+                    commit(ctx, journal, run, &intent, true)
+                }
+            };
+            let receipt = reply?;
+            if receipt["status"] != "ok" {
+                blocked = Some(path);
+                break;
+            }
+            receipts.push(receipt);
+        }
+        if let Some(path) = blocked {
+            journal.append(run, "changeset_recovery", json!({
+                "status": "conflict", "operation": operation, "path": path,
+                "reason": "A file moved since the interrupted changeset; inspect the workspace before retrying."
+            }))?;
+            return Ok(());
+        }
+        let workspace_revision = super::validation::save_workspace(ctx, journal)?;
+        journal.append(run, "changeset_recovery", json!({
+            "status": "completed", "operation": operation, "already_applied": applied,
+        }))?;
+        journal.append(run, "changeset_receipt", json!({
+            "status": "ok", "operation": operation, "tx_id": operation,
+            "before_workspace_revision": intent["before_workspace_revision"],
+            "workspace_revision": workspace_revision, "files": receipts,
+        }))?;
+    }
 }
 
 pub(super) fn restore_file(

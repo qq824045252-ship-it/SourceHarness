@@ -104,7 +104,8 @@ impl Session {
             .open(ctx.root().join(".sourceharness/workspace.lock")).map_err(|e| e.to_string())?;
         lock.try_lock().map_err(|e| format!("Workspace already has an open SourceHarness session: {e}"))?;
         let (journal, inbox) = (Journal::open(&canonical)?, InputInbox::open(&canonical)?);
-        let session = Self { ctx, journal, inbox, options, _workspace_lock: lock };
+        let mut session = Self { ctx, journal, inbox, options, _workspace_lock: lock };
+        tools::resume_changesets(&session.ctx, &mut session.journal)?;
         let cp = session.checkpoint()?;
         if cp.run > 0 && cp.final_text.is_none() { session.inbox.lock()?.active_run = Some(cp.run); }
         Ok(session)
@@ -447,7 +448,7 @@ impl Session {
     fn observe_pending(&self, call: &Call) -> Value {
         for event in self.journal.events.iter().rev().filter(|e| e.data["operation"] == call.operation) {
             match event.kind.as_str() {
-                "edit_receipt" | "validation_receipt" | "exec_receipt" | "rollback_receipt" => return event.data.clone(),
+                "edit_receipt" | "changeset_receipt" | "validation_receipt" | "exec_receipt" | "rollback_receipt" => return event.data.clone(),
                 "edit_intent" => {
                     let path = event.data["path"].as_str().unwrap_or("");
                     let current = tools::workspace_revision(&self.ctx, path);

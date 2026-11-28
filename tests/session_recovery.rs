@@ -1050,3 +1050,84 @@ fn phase2_intra_turn_parallel_validation_and_phase3_prefix_preserving_branch() {
     assert!(String::from_utf8_lossy(&res2.stdout).contains("Recovered on branch alt."));
     server2.join().unwrap();
 }
+
+#[test]
+fn resumes_an_interrupted_changeset_and_finishes_every_file() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("a.txt"), b"a-v1\n").unwrap();
+    fs::write(root.path().join("b.txt"), b"b-v1\n").unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let gateway = format!("http://{}/v1", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        let (mut first, _) = listener.accept().unwrap();
+        request(&mut first);
+        respond(first, call("edit_1", "edit", json!({"files": [
+            {"path": "a.txt", "content": "a-v2\n"},
+            {"path": "b.txt", "content": "b-v2\n"},
+        ]})));
+        let (mut second, _) = listener.accept().unwrap();
+        let resumed = request(&mut second);
+        let output = resumed["input"].as_array().unwrap().iter().rev()
+            .find(|item| item["call_id"] == "edit_1").unwrap()["output"].as_str().unwrap().to_owned();
+        assert!(output.starts_with("Edited 2 files"), "{output}");
+        respond(second, answer("Both files are updated."));
+    });
+    let stopped = invoke(root.path(), &gateway, true, &["agent", "--prompt", "Update both files."]);
+    assert_eq!(stopped.status.code(), Some(86), "{}", String::from_utf8_lossy(&stopped.stderr));
+    assert_eq!(fs::read(root.path().join("a.txt")).unwrap(), b"a-v2\n");
+    assert_eq!(fs::read(root.path().join("b.txt")).unwrap(), b"b-v1\n");
+
+    let resumed = invoke(root.path(), &gateway, false, &["agent", "--resume"]);
+    assert!(resumed.status.success(), "{}", String::from_utf8_lossy(&resumed.stderr));
+    assert_eq!(String::from_utf8_lossy(&resumed.stdout).trim(), "Both files are updated.");
+    server.join().unwrap();
+    assert_eq!(fs::read(root.path().join("a.txt")).unwrap(), b"a-v2\n");
+    assert_eq!(fs::read(root.path().join("b.txt")).unwrap(), b"b-v2\n");
+
+    let events = session_events(root.path());
+    let recovered: Vec<_> = events.iter().filter(|e| e["kind"] == "changeset_recovery").collect();
+    assert_eq!(recovered.len(), 1);
+    assert_eq!(recovered[0]["data"]["status"], "completed");
+    assert_eq!(recovered[0]["data"]["already_applied"], json!(["a.txt"]));
+    let receipts: Vec<_> = events.iter().filter(|e| e["kind"] == "changeset_receipt").collect();
+    assert_eq!(receipts.len(), 1);
+    assert_eq!(receipts[0]["data"]["files"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn refuses_to_finish_a_changeset_whose_file_moved_meanwhile() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("a.txt"), b"a-v1\n").unwrap();
+    fs::write(root.path().join("b.txt"), b"b-v1\n").unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let gateway = format!("http://{}/v1", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        let (mut first, _) = listener.accept().unwrap();
+        request(&mut first);
+        respond(first, call("edit_1", "edit", json!({"files": [
+            {"path": "a.txt", "content": "a-v2\n"},
+            {"path": "b.txt", "content": "b-v2\n"},
+        ]})));
+        let (mut second, _) = listener.accept().unwrap();
+        let resumed = request(&mut second);
+        let output = resumed["input"].as_array().unwrap().iter().rev()
+            .find(|item| item["call_id"] == "edit_1").unwrap()["output"].as_str().unwrap().to_owned();
+        assert!(output.contains("CHANGESET_CONFLICT"), "{output}");
+        respond(second, answer("Stopped."));
+    });
+    let stopped = invoke(root.path(), &gateway, true, &["agent", "--prompt", "Update both files."]);
+    assert_eq!(stopped.status.code(), Some(86), "{}", String::from_utf8_lossy(&stopped.stderr));
+    fs::write(root.path().join("b.txt"), b"b-v3\n").unwrap();
+
+    let resumed = invoke(root.path(), &gateway, false, &["agent", "--resume"]);
+    assert!(resumed.status.success(), "{}", String::from_utf8_lossy(&resumed.stderr));
+    server.join().unwrap();
+    assert_eq!(fs::read(root.path().join("a.txt")).unwrap(), b"a-v2\n");
+    assert_eq!(fs::read(root.path().join("b.txt")).unwrap(), b"b-v3\n");
+    let events = session_events(root.path());
+    let recovered: Vec<_> = events.iter().filter(|e| e["kind"] == "changeset_recovery").collect();
+    assert_eq!(recovered.len(), 1);
+    assert_eq!(recovered[0]["data"]["status"], "conflict");
+    assert_eq!(recovered[0]["data"]["path"], "b.txt");
+    assert_eq!(events.iter().filter(|e| e["kind"] == "changeset_receipt").count(), 0);
+}
