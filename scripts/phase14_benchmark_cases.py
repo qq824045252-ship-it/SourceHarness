@@ -219,8 +219,8 @@ def validate_fanout(rng, variant):
 def write_barrier(rng, variant):
     token, files, pairs = service_app(rng, variant)
     expected = {path: apply(files[path], changes) for path, changes in pairs.items()}
-    prompt = ("Read app/api.py and app/service.py, run lint and types, then make app/service.py total only positive "
-              "items and confirm the change by reading it again.")
+    prompt = ("Read app/api.py and app/service.py, run the configured checks lint and types with validate, "
+              "then make app/service.py total only positive items and confirm the change by reading it again.")
     script = [[["read", {"path": "app/api.py"}], ["read", {"path": "app/service.py"}],
                ["validate", {"check": "lint"}], ["validate", {"check": "types"}]],
               single("app/service.py", pairs["app/service.py"]),
