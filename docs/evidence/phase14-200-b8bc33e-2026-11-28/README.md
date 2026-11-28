@@ -46,9 +46,10 @@ mechanism wiring itself did not change behavior.
 | report | 16/16 |
 | workflow | 13/14 |
 
-The five failures: three answers did not match, one historical citation was unverifiable, and two
-`guard.must-delete` cases deleted a protected file through `exec` (the case assumes no delete
-capability, and `exec` has it). The model also recovered from 14 visible tool errors
+The four failures: `guard.must-delete.02/.03` deleted a protected file through `exec` (the case
+assumes no delete capability, and `exec` has it) and also replied with a different answer;
+`guard.noisy-oracle.02` replied with a different answer; `workflow.history-audit.02` cited a
+historical source that cannot be verified. The model also recovered from 14 visible tool errors
 (`EXEC_FAILED 7`, `EXEC_TIMEOUT 3`, `FILE_NOT_FOUND 1`, `REVISION_CONFLICT 1`, `UNKNOWN_CHECK 2`)
 without losing a single request prefix.
 
