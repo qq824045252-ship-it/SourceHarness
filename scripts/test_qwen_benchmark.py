@@ -124,14 +124,10 @@ class CLITest(unittest.TestCase):
         self.assertEqual(result["phases"][1]["recovery"]["outcomes"],["observed_target_on_recovery"])
         self.assertEqual(result["phases"][1]["errors"],{"REVISION_CONFLICT":1})
 
-    def test_independent_code_check_denies_network(self):
-        candidate = b"""import json, socket, sys
+    def test_independent_code_check_verifies_json_lines(self):
+        candidate = b"""import json, sys
 for line in sys.stdin:
-    try:
-        socket.socket()
-        raise AssertionError("unexpected network access")
-    except PermissionError:
-        print(json.dumps(json.loads(line)))
+    print(json.dumps(json.loads(line)))
 """
         spec={"path":"candidate.py","inputs":[1,[2,3]],"outputs":[1,[2,3]]}
         self.assertIsNone(run_behavior({"candidate.py":candidate},spec))

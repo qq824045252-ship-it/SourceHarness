@@ -76,7 +76,12 @@ def edit(old, new):
     return tool("edit", path="legacy.txt", changes=[{"old_text": old, "new_text": new}])
 
 
+def _py_cmd(code):
+    return f'"{sys.executable}" -c "{code}"'
+
+
 def actions(case, round_number):
+    nt = os.name == "nt"
     if case == "noisy-validation":
         return [tool("write", path="state.txt", content=f"candidate {round_number}\n"), tool("validate")]
     if case == "static-noise":
@@ -91,13 +96,15 @@ def actions(case, round_number):
         change = tool("write", path="state.txt", content="header\n") if round_number % 2 == 0 else tool("rollback")
         return [change, tool("validate")]
     if case == "empty-rollback":
-        return [tool("rollback"), tool("exec", command=f"cat absent-{round_number}.txt")]
+        cmd = _py_cmd(f"import pathlib,sys; sys.exit(0 if pathlib.Path('absent-{round_number}.txt').is_file() else 1)") if nt else f"cat absent-{round_number}.txt"
+        return [tool("rollback"), tool("exec", command=cmd)]
     if case == "empty-search":
         return [tool("exec", command=f"find . -type f -name 'missing-{round_number}.marker'", timeout_seconds=5 + round_number)]
     if case == "failed-probes":
-        return [tool("exec", command=f"cat fixture-{round_number}.txt")]
+        cmd = _py_cmd(f"import pathlib,sys; sys.exit(0 if pathlib.Path('fixture-{round_number}.txt').is_file() else 1)") if nt else f"cat fixture-{round_number}.txt"
+        return [tool("exec", command=cmd)]
     if case == "bad-edits":
-        return [[edit("kind=example\nstatus=draft", "kind=example\nstatus=ready")],
+        return [[edit("kind=example\r\nstatus=unknown", "kind=example\r\nstatus=ready")],
                 [tool("edit", path="legacy.txt", patch="@@ invalid patch")],
                 [tool("edit", path=f"missing-{round_number}.txt",
                       changes=[{"old_text":"draft","new_text":"ready"}])]][(round_number - 1) % 3]
@@ -109,25 +116,30 @@ def actions(case, round_number):
         return calls + [tool("validate")]
     if case == "successful-probes":
         if round_number <= 6:
-            return [tool("exec", command=f"test -f {'state.txt' if round_number % 2 else 'legacy.txt'}")]
+            target = "state.txt" if round_number % 2 else "legacy.txt"
+            cmd = _py_cmd(f"import pathlib,sys; sys.exit(0 if pathlib.Path('{target}').is_file() else 1)") if nt else f"test -f {target}"
+            return [tool("exec", command=cmd)]
         if round_number <= 12:
-            return [tool("exec", command="find . -type f -name '*.txt'")]
+            cmd = _py_cmd("import pathlib; print([p.name for p in sorted(pathlib.Path().glob('*.txt'))])") if nt else "find . -type f -name '*.txt'"
+            return [tool("exec", command=cmd)]
         return []
     if case == "quiet-match":
         if round_number <= 6:
             pattern = ("draft", "^draft", "draft$", "^draft$", "kind", "example")[round_number - 1]
-            return [tool("exec", command=f"grep -q '{pattern}' state.txt legacy.txt")]
+            cmd = (_py_cmd(f"import pathlib,re,sys; sys.exit(0 if any(re.search(r'{pattern}', pathlib.Path(f).read_text(), re.M) for f in ('state.txt','legacy.txt')) else 1)")
+                   if nt else f"grep -q '{pattern}' state.txt legacy.txt")
+            return [tool("exec", command=cmd)]
         return []
     if case == "sandbox-write":
         if round_number == 1:
-            return [tool("exec", command=r"printf 'kind=example\r\nstatus=ready\r\n' > legacy.txt && cat legacy.txt")]
-        if round_number == 2:
             return [tool("validate")]
-        if round_number == 3:
-            return [edit("status=draft", "status=ready"), tool("validate")]
+        if round_number == 2:
+            cmd = (_py_cmd("import pathlib; pathlib.Path('legacy.txt').write_bytes(b'kind=example\\r\\nstatus=ready\\r\\n'); print('updated')")
+                   if nt else r"printf 'kind=example\r\nstatus=ready\r\n' > legacy.txt && cat legacy.txt")
+            return [tool("exec", command=cmd), tool("validate")]
         return []
     if round_number == 1:
-        return [edit("kind=example\nstatus=draft", "kind=example\nstatus=ready"),
+        return [edit("kind=example\r\nstatus=unknown", "kind=example\r\nstatus=ready"),
                 tool("edit", path="legacy.txt", patch="@@ invalid patch")]
     if round_number == 2:
         return [edit("kind=example\r\nstatus=draft", "kind=example\r\nstatus=ready")]
@@ -209,7 +221,7 @@ def run_case(exe, directory, case, paired=None, token=None):
                "OPENAI_API_KEY":"local-test-bridge"}
         env.pop("SOURCE_HARNESS_TEST_INTERRUPT", None)
         run = subprocess.run(
-            [str(exe), "agent", "--root", str(root), "--session", "work", "--tool-profile", "compact",
+            [str(exe), "agent", "--root", str(root), "--session", "work",
              "--model", env["OPENAI_MODEL"], "--effort", "low", "--checks", str(checks), "--prompt", CASES[case]],
             capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600, env=env,
         )
@@ -286,7 +298,7 @@ def run_session_check(exe, out):
     with scripted_provider(lambda number: scheduled[number - 1], requests) as url:
         env = {**os.environ, "OPENAI_BASE_URL": url, "OPENAI_API_KEY": "local-test-bridge"}
         env.pop("SOURCE_HARNESS_TEST_INTERRUPT", None)
-        command = [str(exe), "agent", "--root", str(root), "--session", "work", "--tool-profile", "compact",
+        command = [str(exe), "agent", "--root", str(root), "--session", "work",
                    "--model", "scripted", "--checks", str(checks)]
 
         def execute(*flags, kill=False):
@@ -316,7 +328,7 @@ def run_session_check(exe, out):
             scheduled.extend([attempts, reads, []])
             exit_code = execute("--prompt", f"Evaluate version {phase}.", kill=phase == 3)
             row = {"phase":phase, "exit":exit_code}
-            if phase == 3 and exit_code == -signal.SIGKILL:
+            if phase == 3 and exit_code in (-getattr(signal, "SIGKILL", -9), 86):
                 evidence = interrupt_evidence(root, read_events(root)[start:])
                 row["resume_exit"] = execute("--resume")
                 receipts = [event for event in read_events(root)[start:] if event["kind"] == "edit_receipt"
@@ -365,8 +377,8 @@ def main():
     args = parser.parse_args()
     exe, out = args.exe.resolve(), args.out.resolve()
     if args.session_check:
-        if args.live_runner or args.case or sys.platform != "linux":
-            parser.error("--session-check uses the scripted provider on Linux")
+        if args.live_runner or args.case:
+            parser.error("--session-check does not take --live-runner or --case")
         return run_session_check(exe, out)
     paired = token = None
     if args.live_runner:

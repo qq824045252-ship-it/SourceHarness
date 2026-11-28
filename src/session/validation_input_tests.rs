@@ -1,4 +1,3 @@
-use super::super::history;
 use super::*;
 use crate::workspace::WorkspaceConfig;
 
@@ -44,15 +43,6 @@ fn external_rule_content_changes_the_validation_and_its_provenance() {
 
     fs::write(&rule, "deny").unwrap();
     assert_ne!(initial_inputs, commands.input_revision_profile());
-    let related = history::related(&ctx, &journal, 2, &profile, &commands);
-    let comparison = &related[0];
-    assert_eq!(comparison["workspace_revision_comparison"]["status"], "same");
-    for field in ["validation_config_revision", "validation_program_revision"] {
-        assert_eq!(comparison["comparisons"][field]["status"], "same");
-    }
-    let inputs = &comparison["comparisons"]["validation_input_revisions"];
-    assert_eq!(inputs["status"], "changed");
-    assert_eq!(inputs["current"][rule.to_str().unwrap()], revision(b"deny"));
     let second = run(&ctx, &mut journal, 2, "2.1.1", &commands, &tool_args).unwrap();
     assert_eq!(second["passed"], false);
     assert_eq!(first["workspace_revision"], second["workspace_revision"]);

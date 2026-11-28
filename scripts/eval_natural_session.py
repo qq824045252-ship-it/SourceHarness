@@ -304,8 +304,7 @@ def run_scenario(args, case, index, start_phase=None, previous=None):
 
     all_events = read_events(root)
     profiles = [event["data"]["profile"] for event in all_events if event["kind"] == "user"]
-    stable_keys = ("gateway", "model", "effort", "tools_revision", "binary_revision",
-                   "history_mode", "freshness_instructions", "stale_projection", "history_budget_bytes")
+    stable_keys = ("gateway", "model", "effort", "tools_revision")
     summary = {
         "session": "work", "case": case.name, "model": args.model, "effort": args.effort,
         "exe_sha256": sha(args.exe.read_bytes()),
@@ -336,7 +335,7 @@ def main():
     parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--interrupt-phase", type=int)
     parser.add_argument("--sigkill", action="store_true", help="Use SIGKILL for the injected interruption on Linux")
-    parser.add_argument("--tool-profile", choices=("classic", "compact"), default="classic")
+    parser.add_argument("--tool-profile", choices=("classic", "compact"), default="compact")
     parser.add_argument("--live-runner", type=Path, help="Published Pi comparison runner directory for OpenCode Go")
     parser.add_argument("--resume-output", action="store_true",
                         help="Resume the last interrupted phase from an existing compact result directory")

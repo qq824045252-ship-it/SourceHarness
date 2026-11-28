@@ -50,18 +50,7 @@ class Trial:
     tool_profile: str = "classic"
 
     def flags(self):
-        flags = [
-            "--edit-mode", self.edit, "--history-mode", self.history,
-            "--freshness-instructions", self.freshness, "--stale-projection", self.projection,
-            "--history-budget", "8192",
-        ]
-        if self.tool_profile != "classic":
-            flags.extend(["--tool-profile", self.tool_profile])
-        if self.receipt != "versioned":
-            flags.extend(["--receipt-mode", self.receipt])
-        if self.notices is not None:
-            flags.extend(["--workspace-change-notices", self.notices])
-        return flags
+        return []
 
 
 def read_events(root):

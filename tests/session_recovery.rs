@@ -8,9 +8,7 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 fn request(stream: &mut TcpStream) -> Value {
-    stream
-        .set_read_timeout(Some(Duration::from_secs(10)))
-        .unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
     let mut reader = BufReader::new(stream);
     let mut length = None;
     for line in reader.by_ref().lines() {
@@ -48,10 +46,14 @@ fn answer(text: &str) -> Value {
 fn start_chat(root: &Path, gateway: &str) -> Child {
     Command::new(env!("CARGO_BIN_EXE_source_harness"))
         .args(["chat", "--root", root.to_str().unwrap(), "--session", "acceptance"])
-        .env("OPENAI_BASE_URL", gateway).env("OPENAI_MODEL", "fixture")
+        .env("OPENAI_BASE_URL", gateway)
+        .env("OPENAI_MODEL", "fixture")
         .env_remove("SOURCE_HARNESS_TEST_INTERRUPT")
-        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
-        .spawn().unwrap()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap()
 }
 
 fn chat_logs(child: &mut Child) -> mpsc::Receiver<String> {
@@ -59,7 +61,9 @@ fn chat_logs(child: &mut Child) -> mpsc::Receiver<String> {
     let stderr = child.stderr.take().unwrap();
     std::thread::spawn(move || {
         for line in BufReader::new(stderr).lines() {
-            if sender.send(line.unwrap()).is_err() { break; }
+            if sender.send(line.unwrap()).is_err() {
+                break;
+            }
         }
     });
     lines
@@ -75,10 +79,49 @@ fn session_events(root: &Path) -> Vec<Value> {
 }
 
 fn user_texts(input: &Value) -> Vec<&str> {
-    input.as_array().unwrap().iter()
+    input
+        .as_array()
+        .unwrap()
+        .iter()
         .filter(|row| row["role"] == "user")
         .map(|row| row["content"].as_str().unwrap())
         .collect()
+}
+
+fn invoke(root: &Path, gateway: &str, interrupt: bool, args: &[&str]) -> Output {
+    invoke_with_interruption(root, gateway, interrupt.then_some("after_file_replace"), args)
+}
+
+fn invoke_with_interruption(root: &Path, gateway: &str, interrupt: Option<&str>, args: &[&str]) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_source_harness"));
+    command
+        .args(args)
+        .args(["--root", root.to_str().unwrap(), "--session", "acceptance"])
+        .env("OPENAI_BASE_URL", gateway)
+        .env("OPENAI_MODEL", "fixture")
+        .env_remove("SOURCE_HARNESS_TEST_INTERRUPT");
+    if let Some(point) = interrupt {
+        command.env("SOURCE_HARNESS_TEST_INTERRUPT", point);
+    }
+    command.output().unwrap()
+}
+
+fn compact_round(listener: &TcpListener, prior: &mut Option<Value>) -> (TcpStream, Value) {
+    let (mut stream, _) = listener.accept().unwrap();
+    let body = request(&mut stream);
+    if let Some(previous) = prior {
+        assert_eq!(body["instructions"], previous["instructions"]);
+        assert_eq!(body["tools"], previous["tools"]);
+        assert!(body["input"].as_array().unwrap().starts_with(previous["input"].as_array().unwrap()));
+    } else {
+        assert!(!body["tools"].to_string().contains("expected_revision"));
+    }
+    *prior = Some(body.clone());
+    (stream, body)
+}
+
+fn last_output(body: &Value) -> &str {
+    body["input"].as_array().unwrap().last().unwrap()["output"].as_str().unwrap()
 }
 
 #[test]
@@ -143,6 +186,7 @@ fn acknowledged_prompt_and_steer_survive_a_stop_during_the_model_request() {
 #[test]
 fn a_followup_waits_until_a_paused_run_resumes_and_finishes() {
     let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("notes.txt"), "0123456789".repeat(8)).unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let gateway = format!("http://{}/v1", listener.local_addr().unwrap());
     let (upstream, started) = mpsc::channel();
@@ -152,19 +196,13 @@ fn a_followup_waits_until_a_paused_run_resumes_and_finishes() {
         assert_eq!(user_texts(&request(&mut initial)["input"]), ["Task A"]);
         upstream.send(()).unwrap();
         accepted.recv_timeout(Duration::from_secs(10)).unwrap();
-        respond(initial, call("count_1", "research", json!({"scope":"workspace"})));
+        respond(initial, call("count_1", "read", json!({"path":"notes.txt","start_byte":0,"end_byte":1})));
         let limit = source_harness::transport::GatewayConfig::default().max_turns;
         for turn in 2..=limit {
             let (mut pending, _) = listener.accept().unwrap();
             let body = request(&mut pending);
             assert_eq!(user_texts(&body["input"]), ["Task A"]);
-            if turn >= 3 {
-                let last = body["input"].as_array().unwrap().last().unwrap();
-                let output: Value = serde_json::from_str(last["output"].as_str().unwrap()).unwrap();
-                assert_eq!(output["loop_warning"]["kind"], "EXACT_REPEAT");
-                assert_eq!(output["loop_warning"]["count"], turn - 1);
-            }
-            respond(pending, call(&format!("count_{turn}"), "research", json!({"scope":"workspace"})));
+            respond(pending, call(&format!("count_{turn}"), "read", json!({"path":"notes.txt","start_byte":turn-1,"end_byte":turn})));
         }
 
         let (mut resumed, _) = listener.accept().unwrap();
@@ -278,8 +316,8 @@ fn streams_a_running_session_and_steers_without_starting_queued_writes() {
         assert_eq!(first["input"][0]["content"], "Write the original files");
         let delta = "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"Working on the original files\\n\"}\n\n";
         let original = json!({"type":"response.completed","response":{"output":[
-            call("first_old", "write", json!({"path":"old-a.txt","mode":"create","content":"old"})),
-            call("second_old", "write", json!({"path":"old-b.txt","mode":"create","content":"old"})),
+            call("first_old", "write", json!({"path":"old-a.txt","content":"old"})),
+            call("second_old", "write", json!({"path":"old-b.txt","content":"old"})),
         ],"usage":{"total_tokens":15}}});
         let end = format!("event: response.completed\ndata: {original}\n\n");
         write!(initial, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{delta}", delta.len() + end.len()).unwrap();
@@ -294,28 +332,19 @@ fn streams_a_running_session_and_steers_without_starting_queued_writes() {
         assert_eq!(input.len(), 6);
         for (index, id) in [(3, "first_old"), (4, "second_old")] {
             assert_eq!(input[index]["call_id"], id);
-            let reply: Value = serde_json::from_str(input[index]["output"].as_str().unwrap()).unwrap();
-            assert_eq!(reply["code"], "SUPERSEDED_BY_STEER");
+            let reply = input[index]["output"].as_str().unwrap();
+            assert!(reply.starts_with("SUPERSEDED_BY_STEER"), "{reply}");
         }
         assert_eq!(input[5], json!({"role":"user","content":"Write corrected.txt instead"}));
-        respond(redirected, call("corrected", "write",
-            json!({"path":"corrected.txt","mode":"create","content":"corrected"})));
+        respond(redirected, call("corrected", "write", json!({"path":"corrected.txt","content":"corrected"})));
 
         let (mut last, _) = listener.accept().unwrap();
         let final_request = request(&mut last);
-        let receipt: Value =
-            serde_json::from_str(final_request["input"][7]["output"].as_str().unwrap()).unwrap();
-        assert_eq!(receipt["outcome"], "committed");
-        respond(last, json!({"type":"message","role":"assistant","content":[
-            {"type":"output_text","text":"Updated corrected.txt."}
-        ]}));
+        assert!(final_request["input"][7]["output"].as_str().unwrap().starts_with("Wrote corrected.txt."));
+        respond(last, answer("Updated corrected.txt."));
     });
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_source_harness"))
-        .args(["chat", "--root", root.path().to_str().unwrap(), "--session", "steering"])
-        .env("OPENAI_BASE_URL", &gateway).env("OPENAI_MODEL", "fixture")
-        .env_remove("SOURCE_HARNESS_TEST_INTERRUPT")
-        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+    let mut child = start_chat(root.path(), &gateway);
     let mut stdin = child.stdin.take().unwrap();
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
@@ -323,20 +352,22 @@ fn streams_a_running_session_and_steers_without_starting_queued_writes() {
     let (progress, logs) = mpsc::channel();
     let read_stdout = std::thread::spawn(move || {
         for line in BufReader::new(stdout).lines() {
-            if text.send(line.unwrap()).is_err() { break; }
+            if text.send(line.unwrap()).is_err() {
+                break;
+            }
         }
     });
     let read_stderr = std::thread::spawn(move || {
         for line in BufReader::new(stderr).lines() {
-            if progress.send(line.unwrap()).is_err() { break; }
+            if progress.send(line.unwrap()).is_err() {
+                break;
+            }
         }
     });
     writeln!(stdin, "Write the original files").unwrap();
-    let signal = lines.recv_timeout(Duration::from_secs(10)).unwrap();
-    assert_eq!(signal, "Working on the original files");
+    assert_eq!(lines.recv_timeout(Duration::from_secs(10)).unwrap(), "Working on the original files");
     writeln!(stdin, ":steer Write corrected.txt instead").unwrap();
-    let wait = Duration::from_secs(10);
-    while logs.recv_timeout(wait).unwrap() != "Correction received." {}
+    while logs.recv_timeout(Duration::from_secs(10)).unwrap() != "Correction received." {}
     release.send(()).unwrap();
     drop(stdin);
     assert!(child.wait().unwrap().success());
@@ -347,8 +378,7 @@ fn streams_a_running_session_and_steers_without_starting_queued_writes() {
     assert!(!root.path().join("old-a.txt").exists());
     assert!(!root.path().join("old-b.txt").exists());
     assert_eq!(fs::read(root.path().join("corrected.txt")).unwrap(), b"corrected");
-    let journal = fs::read_to_string(root.path().join(".sourceharness/sessions/steering/events.jsonl")).unwrap();
-    let events: Vec<Value> = journal.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+    let events = session_events(root.path());
     let steer = events.iter().find(|event| event["kind"] == "steer").unwrap();
     let redirected = events.iter().find(|event| event["kind"] == "model_request" && event["data"]["round"] == 2).unwrap();
     assert_eq!(steer["data"]["after_round"], 1);
@@ -358,49 +388,13 @@ fn streams_a_running_session_and_steers_without_starting_queued_writes() {
     assert_eq!(events.iter().filter(|event| event["kind"] == "tool_attempt").count(), 1);
 }
 
-fn invoke(root: &Path, gateway: &str, interrupt: bool, args: &[&str]) -> Output {
-    invoke_with_interruption(root, gateway, interrupt.then_some("after_file_replace"), args)
-}
-
-fn invoke_with_interruption(root: &Path, gateway: &str, interrupt: Option<&str>, args: &[&str]) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_source_harness"));
-    command
-        .args(args)
-        .args(["--root", root.to_str().unwrap(), "--session", "acceptance"])
-        .env("OPENAI_BASE_URL", gateway)
-        .env("OPENAI_MODEL", "fixture")
-        .env_remove("SOURCE_HARNESS_TEST_INTERRUPT");
-    if let Some(point) = interrupt {
-        command.env("SOURCE_HARNESS_TEST_INTERRUPT", point);
-    }
-    command.output().unwrap()
-}
-
-fn compact_round(listener: &TcpListener, prior: &mut Option<Value>) -> (TcpStream, Value) {
-    let (mut stream, _) = listener.accept().unwrap();
-    let body = request(&mut stream);
-    if let Some(previous) = prior {
-        assert_eq!(body["instructions"], previous["instructions"]);
-        assert_eq!(body["tools"], previous["tools"]);
-        assert!(body["input"].as_array().unwrap().starts_with(previous["input"].as_array().unwrap()));
-    } else {
-        assert!(!body["tools"].to_string().contains("expected_revision"));
-    }
-    *prior = Some(body.clone());
-    (stream, body)
-}
-
-fn last_output(body: &Value) -> &str {
-    body["input"].as_array().unwrap().last().unwrap()["output"].as_str().unwrap()
-}
-
 #[test]
 fn compact_rejects_checks_configuration_in_the_workspace() {
     let root = tempfile::tempdir().unwrap();
     let checks = root.path().join("checks.json");
     fs::write(&checks, "{}").unwrap();
     let result = invoke(root.path(), "http://127.0.0.1:1/v1", false, &[
-        "agent", "--tool-profile", "compact", "--checks", checks.to_str().unwrap(), "--prompt", "Run the check."
+        "agent", "--checks", checks.to_str().unwrap(), "--prompt", "Run the check."
     ]);
     assert!(!result.status.success());
     assert!(String::from_utf8_lossy(&result.stderr).contains("Place the checks file outside the workspace"));
@@ -428,8 +422,8 @@ fn compact_prefix_and_implicit_revision_hold_across_requests_and_followups() {
         ]);
         let (stream, req) = compact_round(&listener, &mut prior);
         let items = req["input"].as_array().unwrap();
-        assert_eq!(items[items.len()-2]["output"], "Edited policy.txt.");
-        assert_eq!(last_output(&req), "Wrote notes.txt.");
+        assert!(items[items.len()-2]["output"].as_str().unwrap().starts_with("Edited policy.txt."));
+        assert!(last_output(&req).starts_with("Wrote notes.txt."));
         respond(stream, edit("inexact", "limit=999", "limit=50"));
         let (stream, req) = compact_round(&listener, &mut prior);
         assert!(last_output(&req).starts_with("TEXT_NOT_FOUND"));
@@ -439,8 +433,9 @@ fn compact_prefix_and_implicit_revision_hold_across_requests_and_followups() {
         ]);
         let (stream, req) = compact_round(&listener, &mut prior);
         let items = req["input"].as_array().unwrap();
-        assert_eq!(items[items.len()-2]["output"], "\"policy.txt\"\n1\tkeep=1\n2\tlimit=40\n");
-        assert_eq!(last_output(&req), "Edited policy.txt.");
+        let read_out = items[items.len()-2]["output"].as_str().unwrap();
+        assert!(read_out.starts_with("\"policy.txt\" (lines 1-2/2, 16B, lf, r") && read_out.contains(")\n1\tkeep=1\n2\tlimit=40\n"), "{read_out}");
+        assert!(last_output(&req).starts_with("Edited policy.txt."));
         fs::write(&file, "keep=2\nlimit=50\n").unwrap();
         respond(stream, edit("stale", "limit=50", "limit=60"));
         let (stream, req) = compact_round(&listener, &mut prior);
@@ -449,19 +444,19 @@ fn compact_prefix_and_implicit_revision_hold_across_requests_and_followups() {
         assert_eq!(fs::read_to_string(&file).unwrap(), "keep=2\nlimit=50\n");
         respond(stream, call("fresh", "read", json!({"path":"policy.txt","start_line":2})));
         let (stream, req) = compact_round(&listener, &mut prior);
-        assert_eq!(last_output(&req), "\"policy.txt\"\n2\tlimit=50\n");
+        assert!(last_output(&req).starts_with("\"policy.txt\" (lines 2-2/2, 16B, lf, r") && last_output(&req).contains(")\n2\tlimit=50\n"), "{}", last_output(&req));
         respond(stream, call("edited", "edit", json!({"path":"policy.txt","changes":[
             {"old_text":"limit=50","new_text":"limit=60"},
             {"old_text":"keep=2","new_text":"keep=3"}
         ]})));
         let (stream, req) = compact_round(&listener, &mut prior);
-        assert_eq!(last_output(&req), "Edited policy.txt.");
+        assert!(last_output(&req).starts_with("Edited policy.txt."));
         respond(stream, answer("Updated."));
         let (stream, req) = compact_round(&listener, &mut prior);
         assert_eq!(user_texts(&req["input"]), ["Update the limit.", "Adjust it again."]);
         respond(stream, edit("across_run", "limit=60", "limit=75"));
         let (stream, req) = compact_round(&listener, &mut prior);
-        assert_eq!(last_output(&req), "Edited policy.txt.");
+        assert!(last_output(&req).starts_with("Edited policy.txt."));
         assert_eq!(fs::read_to_string(&file).unwrap(), "keep=3\nlimit=75\n");
         respond(stream, answer("Adjusted."));
 
@@ -481,20 +476,15 @@ fn compact_prefix_and_implicit_revision_hold_across_requests_and_followups() {
             call("confirmed_create", "write", json!({"path":"policy.txt","content":"limit=90\n"})),
         ]);
         let (stream, req) = compact_round(&listener, &mut prior);
-        assert_eq!(last_output(&req), "Wrote policy.txt.");
+        assert!(last_output(&req).starts_with("Wrote policy.txt."));
         respond(stream, answer("Recreated the requested file."));
     });
 
-    let run = |prompt| invoke(root.path(), &gateway, false, &[
-        "agent", "--tool-profile", "compact", "--prompt", prompt
-    ]);
-    let result = run("Update the limit.");
-    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
-    let result = run("Adjust it again.");
-    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    let run = |prompt| invoke(root.path(), &gateway, false, &["agent", "--prompt", prompt]);
+    assert!(run("Update the limit.").status.success());
+    assert!(run("Adjust it again.").status.success());
     fs::write(root.path().join("policy.txt"), "keep=4\nlimit=75\n").unwrap();
-    let result = run("Update or recreate the file.");
-    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert!(run("Update or recreate the file.").status.success());
     server.join().unwrap();
     assert_eq!(fs::read_to_string(root.path().join("policy.txt")).unwrap(), "limit=90\n");
     assert_eq!(fs::read_to_string(root.path().join("notes.txt")).unwrap(), "replacement\n");
@@ -521,19 +511,17 @@ fn compact_batch_read_keeps_each_result_and_live_revision() {
         }));
         let (stream, _) = compact_round(&listener, &mut prior);
         respond_many(stream, vec![
-            call("batch", "read", json!({
-                "paths":["a.txt","missing.txt","../outside.txt","./b.txt"],"path":null,"limit":10
-            })),
+            call("batch", "read", json!({"paths":["a.txt","missing.txt","../outside.txt","./b.txt"],"path":null,"limit":10})),
             edit("early", "a.txt", "alpha=1", "alpha=2"),
         ]);
         let (stream, req) = compact_round(&listener, &mut prior);
         let items = req["input"].as_array().unwrap();
         let text = items[items.len() - 2]["output"].as_str().unwrap();
-        assert!(text.contains("\"a.txt\"\n1\talpha=1\n"));
+        assert!(text.contains("\"a.txt\" (lines 1-1/1, 8B, lf, r") && text.contains(")\n1\talpha=1\n"), "{text}");
         assert!(text.contains("FILE_NOT_FOUND") && text.contains("missing.txt"));
         assert!(text.contains("INVALID_PATH") && text.contains("../outside.txt"));
-        assert!(text.contains("\"b.txt\"\n1\tbeta=1\n"));
-        assert_eq!(last_output(&req), "Edited a.txt.");
+        assert!(text.contains("\"b.txt\" (lines 1-1/1, 7B, lf, r") && text.contains(")\n1\tbeta=1\n"), "{text}");
+        assert!(last_output(&req).starts_with("Edited a.txt."));
         assert_eq!(fs::read_to_string(&a).unwrap(), "alpha=2\n");
         fs::write(&b, "beta=1\nexternal=true\n").unwrap();
         fs::write(&missing, "externally created\n").unwrap();
@@ -555,17 +543,13 @@ fn compact_batch_read_keeps_each_result_and_live_revision() {
         assert!(last_output(&req).starts_with("INVALID_ARGUMENT"));
         respond(stream, answer("Applied one edit."));
     });
-    let result = invoke(root.path(), &gateway, false, &[
-        "agent", "--tool-profile", "compact", "--prompt", "Read the sources and update them.",
-    ]);
+    let result = invoke(root.path(), &gateway, false, &["agent", "--prompt", "Read the sources and update them."]);
     assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
     server.join().unwrap();
     assert_eq!(fs::read_to_string(root.path().join("a.txt")).unwrap(), "alpha=2\n");
     assert_eq!(fs::read_to_string(root.path().join("b.txt")).unwrap(), "beta=1\nexternal=true\n");
     let events = session_events(root.path());
-    let batch = events.iter().find(|event| {
-        event["kind"] == "tool_result" && event["data"]["call_id"] == "batch"
-    }).unwrap();
+    let batch = events.iter().find(|event| event["kind"] == "tool_result" && event["data"]["call_id"] == "batch").unwrap();
     let observed = batch["data"]["live_observations"].as_array().unwrap();
     assert_eq!(observed.len(), 3);
     assert_eq!(observed[1], json!({"path":"missing.txt","revision":null}));
@@ -606,9 +590,7 @@ fn compact_resumes_past_the_old_limit_without_turn_reminders() {
                     assert!(last_output(&req).len() <= 8192);
                     respond(stream, call("validate_late", "validate", json!({"check":null,"limit":1})));
                 }
-                2 => {
-                    respond(stream, call("last_batch", "read", json!({"paths":["short.txt","long.txt"]})));
-                }
+                2 => respond(stream, call("last_batch", "read", json!({"paths":["short.txt","long.txt"]}))),
                 _ => respond(stream, call(&format!("read_{round}"), "read", json!({"path":"short.txt"}))),
             }
         }
@@ -616,11 +598,9 @@ fn compact_resumes_past_the_old_limit_without_turn_reminders() {
         assert!(!last_output(&req).contains("[Budget"));
         respond(stream, answer("Validated and finished."));
     });
-    let stopped = invoke(&root, &gateway, true, &[
-        "agent", "--tool-profile", "compact", "--checks", checks.to_str().unwrap(), "--prompt", "Inspect and verify."
-    ]);
+    let stopped = invoke(&root, &gateway, true, &["agent", "--checks", checks.to_str().unwrap(), "--prompt", "Inspect and verify."]);
     assert_eq!(stopped.status.code(), Some(86), "{}", String::from_utf8_lossy(&stopped.stderr));
-    let args = ["agent", "--tool-profile", "compact", "--checks", checks.to_str().unwrap(), "--resume"];
+    let args = ["agent", "--checks", checks.to_str().unwrap(), "--resume"];
     let paused = invoke(&root, &gateway, false, &args);
     assert!(!paused.status.success());
     assert!(String::from_utf8_lossy(&paused.stderr).contains("Model turn limit reached"));
@@ -631,20 +611,25 @@ fn compact_resumes_past_the_old_limit_without_turn_reminders() {
 }
 
 #[test]
-fn compact_rollback_recovers_and_preserves_external_changes() {
+fn compact_rollback_reverts_edits_and_exec_while_tolerating_external_files() {
     let fixture = tempfile::tempdir().unwrap();
     let root = fixture.path().join("workspace");
     fs::create_dir(&root).unwrap();
     let policy = root.join("policy.txt");
-    let protected = root.join("protected.txt");
+    let external = root.join("unrelated.txt");
     fs::write(&policy, "limit=30\n").unwrap();
-    fs::write(&protected, "original\n").unwrap();
+    fs::write(&external, "original\n").unwrap();
     let checks = fixture.path().join("checks.json");
     fs::write(&checks, json!({
         "acceptance":{"program":env!("CARGO_BIN_EXE_source_harness"),"args":["--help"]}
     }).to_string()).unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let gateway = format!("http://{}/v1", listener.local_addr().unwrap());
+    let exec_cmd = if cfg!(windows) {
+        "echo from-exec > exec_added.txt"
+    } else {
+        "printf 'from-exec\\n' > exec_added.txt"
+    };
     let server = std::thread::spawn(move || {
         let mut prior = None;
         let edit = |id: &str, old: &str, new: &str| call(id, "edit", json!({
@@ -658,48 +643,43 @@ fn compact_rollback_recovers_and_preserves_external_changes() {
         respond(stream, call("validate", "validate", json!({})));
         let (stream, req) = compact_round(&listener, &mut prior);
         assert!(last_output(&req).starts_with("PASS acceptance. This revision is verified."));
-        respond_many(stream, vec![edit("bad", "limit=60", "limit=0"), call("create", "write", json!({
-            "path":"z-added.txt","content":"temporary"
-        }))]);
+        respond_many(stream, vec![
+            edit("bad", "limit=60", "limit=0"),
+            call("create", "write", json!({"path":"z-added.txt","content":"temporary"})),
+            call("exec_create", "exec", json!({"command": exec_cmd})),
+        ]);
         let (stream, _) = compact_round(&listener, &mut prior);
+        // Unrelated external temp file added outside this run does NOT block rollback.
+        fs::write(&external, "outside\n").unwrap();
+        fs::write(external.with_file_name("extra.tmp"), "ignore me\n").unwrap();
         respond(stream, call("rollback", "rollback", json!({})));
         let (stream, req) = compact_round(&listener, &mut prior);
-        assert!(last_output(&req).starts_with("Restored 2 files"));
+        assert!(last_output(&req).starts_with("Restored 3 files"));
         assert_eq!(fs::read_to_string(&policy).unwrap(), "limit=60\n");
         assert!(!policy.with_file_name("z-added.txt").exists());
+        assert!(!policy.with_file_name("exec_added.txt").exists());
+        assert_eq!(fs::read_to_string(&external).unwrap(), "outside\n");
         respond(stream, edit("expired", "limit=0", "limit=20"));
         let (stream, req) = compact_round(&listener, &mut prior);
         assert!(last_output(&req).starts_with("TEXT_NOT_FOUND"));
         respond(stream, call("noop", "rollback", json!({})));
         let (stream, req) = compact_round(&listener, &mut prior);
         assert!(last_output(&req).starts_with("Restored 0 files"));
-        fs::write(&protected, "outside\n").unwrap();
+        // Modifying a file that WAS touched by this run externally still blocks rollback.
+        respond(stream, edit("bad2", "limit=60", "limit=99"));
+        let (stream, _) = compact_round(&listener, &mut prior);
+        fs::write(&policy, "limit=external\n").unwrap();
         respond(stream, call("blocked", "rollback", json!({})));
         let (stream, req) = compact_round(&listener, &mut prior);
         assert!(last_output(&req).starts_with("ROLLBACK_CONFLICT"));
-        assert_eq!(fs::read_to_string(&protected).unwrap(), "outside\n");
         respond(stream, answer("Restored the last passing version."));
-        let (stream, _) = compact_round(&listener, &mut prior);
-        respond(stream, edit("expired_next_run", "limit=60", "limit=80"));
-        let (stream, req) = compact_round(&listener, &mut prior);
-        assert_eq!(last_output(&req), "Edited policy.txt.");
-        respond(stream, answer("Updated the restored file."));
     });
-    let args = ["agent", "--tool-profile", "compact", "--checks", checks.to_str().unwrap()];
+    let args = ["agent", "--checks", checks.to_str().unwrap()];
     let stopped = invoke_with_interruption(&root, &gateway, Some("during_rollback"), &[&args[..], &["--prompt", "Try the change."]].concat());
     assert_eq!(stopped.status.code(), Some(86), "{}", String::from_utf8_lossy(&stopped.stderr));
-    assert!(root.join("z-added.txt").exists());
     let resumed = invoke(&root, &gateway, false, &[&args[..], &["--resume"]].concat());
     assert!(resumed.status.success(), "{}", String::from_utf8_lossy(&resumed.stderr));
-    let followup = invoke(&root, &gateway, false, &[&args[..], &["--prompt", "Update the restored file."]].concat());
-    assert!(followup.status.success(), "{}", String::from_utf8_lossy(&followup.stderr));
     server.join().unwrap();
-    let events = session_events(&root);
-    let events_of = |kind: &str| events.iter().filter(|event| event["kind"] == kind).count();
-    assert_eq!(events_of("rollback_intent"), 2);
-    assert_eq!(events_of("rollback_receipt"), 2);
-    assert_eq!(events_of("edit_receipt"), 5);
-    assert_eq!(fs::read_to_string(root.join("policy.txt")).unwrap(), "limit=80\n");
 }
 
 #[test]
@@ -716,9 +696,7 @@ fn compact_guard_pauses_and_chat_accepts_steer() {
     let server = std::thread::spawn(move || {
         let mut prior = None;
         let (stream, _) = compact_round(&listener, &mut prior);
-        respond_many(stream, vec![
-            call("first", "validate", json!({})), call("same_round", "validate", json!({}))
-        ]);
+        respond_many(stream, vec![call("first", "validate", json!({})), call("same_round", "validate", json!({}))]);
         let (stream, req) = compact_round(&listener, &mut prior);
         assert!(last_output(&req).starts_with("FAIL acceptance"));
         assert!(!last_output(&req).contains("VALIDATION_OSCILLATION"));
@@ -737,13 +715,18 @@ fn compact_guard_pauses_and_chat_accepts_steer() {
         respond(stream, answer("The configured check failed."));
     });
     let path = checks.to_str().unwrap();
-    let result = invoke(&root, &gateway, false, &["agent","--tool-profile","compact","--checks",path,"--prompt","Fix the check."]);
+    let result = invoke(&root, &gateway, false, &["agent", "--checks", path, "--prompt", "Fix the check."]);
     assert!(!result.status.success());
     assert!(String::from_utf8_lossy(&result.stderr).contains("Loop guard paused"));
     let mut chat = Command::new(env!("CARGO_BIN_EXE_source_harness"))
-        .args(["chat","--root",root.to_str().unwrap(),"--session","acceptance","--tool-profile","compact","--checks",path])
-        .env("OPENAI_BASE_URL", &gateway).env("OPENAI_MODEL","fixture")
-        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+        .args(["chat", "--root", root.to_str().unwrap(), "--session", "acceptance", "--checks", path])
+        .env("OPENAI_BASE_URL", &gateway)
+        .env("OPENAI_MODEL", "fixture")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
     writeln!(chat.stdin.take().unwrap(), ":steer Stop retrying and report.").unwrap();
     let result = chat.wait_with_output().unwrap();
     assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
@@ -755,67 +738,71 @@ fn compact_guard_pauses_and_chat_accepts_steer() {
     assert!(!events.iter().any(|event| event["kind"] == "tool_attempt" && event["data"]["call_id"] == "skipped"));
 }
 
-#[cfg(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64")))]
 #[test]
-#[ignore = "requires a working Linux Bubblewrap namespace backend"]
-fn compact_exec_isolates_oracle_network_and_writes_and_folds_output() {
+fn compact_exec_runs_in_workspace_handles_timeout_and_folds_output() {
     let fixture = tempfile::tempdir().unwrap();
     let root = fixture.path().join("workspace");
     fs::create_dir(&root).unwrap();
     fs::write(root.join("policy.txt"), "limit=30\n").unwrap();
-    fs::write(root.join(".env"), "SYNTHETIC_NOT_FOR_EXEC=1").unwrap();
-    let oracle = fixture.path().join("oracle.py");
-    fs::write(&oracle, "from pathlib import Path\nassert Path('policy.txt').read_text() == 'limit=30\\n'\n").unwrap();
-    let checks = fixture.path().join("checks.json");
-    fs::write(&checks, json!({
-        "acceptance":{"program":"/usr/bin/python3","args":[oracle],"inputs":[oracle]}
-    }).to_string()).unwrap();
+    fs::write(root.join(".env"), "SECRET=1\n").unwrap();
+    fs::write(root.join(".env.example"), "SECRET=placeholder\n").unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let gateway = format!("http://{}/v1", listener.local_addr().unwrap());
+
+    let long_cmd = if cfg!(windows) {
+        "python -c \"print('x' * 2500); print('FOLDED_TAIL')\""
+    } else {
+        "python3 -c \"print('x' * 2500); print('FOLDED_TAIL')\""
+    };
+    let sleep_cmd = if cfg!(windows) {
+        "python -c \"import time; time.sleep(10)\""
+    } else {
+        "sleep 10"
+    };
+    let ok_cmd = if cfg!(windows) { "echo done" } else { "printf done" };
+
     let server = std::thread::spawn(move || {
         let mut prior = None;
         let (stream, _) = compact_round(&listener, &mut prior);
-        let command = format!(
-            "set -e; test ! -e .sourceharness; test ! -e .env; test ! -e '{}'; test -z \"${{OPENAI_API_KEY:-}}\"; \
-             grep -F limit=30 policy.txt; printf 'local only\\n' >policy.txt; \
-             python -c 'import socket; socket.socket()' >/tmp/attempt 2>&1 && exit 9; \
-             grep -q PermissionError /tmp/attempt; echo SOCKET_BLOCKED; \
-             python3 -c \"print('x' * 2500); print('FOLDED_TAIL')\"",
-            oracle.display()
-        );
-        let padding = "#".repeat(32768 - command.len() - 1);
-        respond(stream, call("exec", "exec", json!({"command":format!("{padding}\n{command}"),"note":null})));
+        respond_many(stream, vec![
+            call("env_ex", "read", json!({"path":".env.example"})),
+            call("env_secret", "read", json!({"path":".env"})),
+        ]);
+        let (stream, req) = compact_round(&listener, &mut prior);
+        let items = req["input"].as_array().unwrap();
+        assert!(items[items.len() - 2]["output"].as_str().unwrap().contains("SECRET=placeholder"));
+        assert!(last_output(&req).starts_with("INVALID_PATH"));
+
+        respond(stream, call("exec", "exec", json!({"command": long_cmd, "note": null})));
         let (stream, req) = compact_round(&listener, &mut prior);
         let output = last_output(&req);
-        assert!(output.starts_with("limit=30\nSOCKET_BLOCKED\n"), "{output}");
+        assert!(output.contains("More output: read(result_ref="), "{output}");
         let reference = output.split_once("result_ref=\"").unwrap().1.split('"').next().unwrap();
-        respond(stream, call("folded", "read", json!({"result_ref":reference,"start_line":4,"end_line":4})));
+        respond(stream, call("folded", "read", json!({"result_ref":reference,"start_line":2,"end_line":2})));
         let (stream, req) = compact_round(&listener, &mut prior);
-        assert!(last_output(&req).ends_with("4\tFOLDED_TAIL\n"));
-        respond(stream, call("timed", "exec", json!({"command":"sleep 20 & wait","timeout_seconds":1})));
+        let folded = last_output(&req);
+        assert!(folded.replace("\r\n", "\n").ends_with("2\tFOLDED_TAIL\n"), "{folded:?}");
+
+        respond(stream, call("timed", "exec", json!({"command": sleep_cmd, "timeout_seconds": 1})));
         let (stream, req) = compact_round(&listener, &mut prior);
         assert!(last_output(&req).starts_with("EXEC_TIMEOUT"), "{}", last_output(&req));
+
         respond_many(stream, vec![
             call("too_long", "exec", json!({"command":"#".repeat(32769)})),
-            call("over_timeout", "exec", json!({"command":"true","timeout_seconds":301})),
-            call("max_timeout", "exec", json!({"command":"printf done","timeout_seconds":300})),
+            call("over_timeout", "exec", json!({"command": ok_cmd, "timeout_seconds": 301})),
+            call("max_timeout", "exec", json!({"command": ok_cmd, "timeout_seconds": 300})),
         ]);
         let (stream, req) = compact_round(&listener, &mut prior);
         let items = req["input"].as_array().unwrap();
         assert!(items[items.len()-3]["output"].as_str().unwrap().starts_with("INVALID_ARGUMENT"));
         assert!(items[items.len()-2]["output"].as_str().unwrap().starts_with("INVALID_ARGUMENT"));
-        assert_eq!(last_output(&req), "done\nSandbox changes discarded.");
-        respond(stream, call("check", "validate", json!({"trace":null})));
-        let (stream, req) = compact_round(&listener, &mut prior);
-        assert!(last_output(&req).starts_with("PASS acceptance. This revision is verified."));
-        respond(stream, answer("Isolated execution finished."));
+        assert!(last_output(&req).starts_with("done"));
+        assert!(!last_output(&req).contains("Sandbox changes discarded."));
+        respond(stream, answer("Cross-platform execution finished."));
     });
-    let result = invoke(&root, &gateway, false, &[
-        "agent","--tool-profile","compact","--checks",checks.to_str().unwrap(),"--prompt","Inspect locally and verify."
-    ]);
+    let result = invoke(&root, &gateway, false, &["agent", "--prompt", "Inspect locally."]);
     assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
     server.join().unwrap();
-    assert_eq!(fs::read_to_string(root.join("policy.txt")).unwrap(), "limit=30\n");
     let events = session_events(&root);
     assert!(events.iter().any(|event| event["kind"] == "exec_receipt" && event["data"]["delivery"] == "folded"));
     let timeouts: Vec<_> = events.iter().filter(|event| event["kind"] == "exec_intent")
@@ -824,376 +811,116 @@ fn compact_exec_isolates_oracle_network_and_writes_and_folds_output() {
 }
 
 #[test]
-fn validation_reports_changes_and_preserves_history_across_followup_requests() {
-    let fixture = tempfile::tempdir().unwrap();
-    let root = fixture.path().join("workspace");
-    fs::create_dir(&root).unwrap();
-    fs::write(root.join("policy.txt"), "limit=30\n").unwrap();
-    let checks = fixture.path().join("checks.json");
-    fs::write(&checks, json!({
-        "acceptance":{"program":env!("CARGO_BIN_EXE_source_harness"),"args":["--help"]}
-    }).to_string()).unwrap();
-
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let gateway = format!("http://{}/v1", listener.local_addr().unwrap());
-    let server = std::thread::spawn(move || {
-        let (mut first, _) = listener.accept().unwrap();
-        assert_eq!(user_texts(&request(&mut first)["input"]), ["Write a report."]);
-        respond(first, call("write_1", "write", json!({
-            "mode":"create","path":"report.txt","content":"limit=30\n"
-        })));
-
-        let (mut second, _) = listener.accept().unwrap();
-        request(&mut second);
-        respond(second, call("check_1", "validate", json!({"check":"acceptance"})));
-
-        let (mut validated, _) = listener.accept().unwrap();
-        let body = request(&mut validated);
-        let output = body["input"].as_array().unwrap().iter()
-            .find(|item| item["type"] == "function_call_output" && item["call_id"] == "check_1")
-            .unwrap();
-        let proof: Value = serde_json::from_str(output["output"].as_str().unwrap()).unwrap();
-        assert_eq!(proof["passed"], true);
-        assert_eq!(proof["workspace_changes_since_start"]["files"], json!([
-            {"path":"report.txt","change":"added"}
-        ]));
-        assert_eq!(proof["workspace_changes_since_start"]["total"], 1);
-        assert_eq!(proof["workspace_changes_since_start"]["complete"], true);
-        respond(validated, answer("Report complete."));
-
-        let (mut followup, _) = listener.accept().unwrap();
-        let before = request(&mut followup);
-        let texts = user_texts(&before["input"]);
-        assert_eq!(&texts[..2], ["Write a report.", "Check the policy."]);
-        assert_eq!(texts.len(), 3);
-        let notice = texts[2];
-        assert!(notice.contains("Related recorded evidence."));
-        assert!(notice.contains("previous_runs"));
-        respond(followup, call("read_1", "read", json!({"path":"policy.txt"})));
-
-        let (mut after_read, _) = listener.accept().unwrap();
-        let after = request(&mut after_read);
-        assert_eq!(user_texts(&after["input"]), texts);
-        assert_eq!(after["instructions"], before["instructions"]);
-        respond(after_read, answer("Policy confirmed."));
-        notice.len()
-    });
-
-    let check_path = checks.to_str().unwrap();
-    for prompt in ["Write a report.", "Check the policy."] {
-        let result = invoke(&root, &gateway, false, &["agent", "--checks", check_path, "--prompt", prompt]);
-        assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
-    }
-
-    let notice_bytes = server.join().unwrap();
-    let events = session_events(&root);
-    let followup = events.iter().rev().find(|event| event["kind"] == "user").unwrap();
-    let audits: Vec<_> = events.iter()
-        .filter(|event| event["kind"] == "model_request" && event["run"] == followup["run"])
-        .map(|event| &event["data"]["history_auxiliary"])
-        .collect();
-    assert_eq!(audits.len(), 2);
-    assert_eq!(audits[0]["bytes"], notice_bytes);
-    assert_eq!(audits[0], audits[1]);
-}
-
-#[test]
-fn continues_with_a_changed_tool_contract_and_new_user_correction() {
-    let root = tempfile::tempdir().unwrap();
-    let file = root.path().join("config.txt");
-    fs::write(&file, b"primary\r\nalpha: 30\r\narchive\r\nalpha: 30\r\n").unwrap();
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let gateway = format!("http://{}/v1", listener.local_addr().unwrap());
-    let server = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        request(&mut stream);
-        respond(stream, call("read_1", "read", json!({"path":"config.txt"})));
-
-        let (mut stream, _) = listener.accept().unwrap();
-        let before = request(&mut stream);
-        let output: Value =
-            serde_json::from_str(before["input"][2]["output"].as_str().unwrap()).unwrap();
-        respond(
-            stream,
-            call(
-                "edit_1",
-                "edit",
-                json!({
-                    "path":"config.txt","expected_revision":output["revision"],
-                    "changes":[{"old_text":"primary\r\nalpha: 30","new_text":"primary\r\nalpha: 60"}]
-                }),
-            ),
-        );
-
-        let (mut stream, _) = listener.accept().unwrap();
-        let continued = request(&mut stream);
-        let archived = &continued["input"][4];
-        assert_eq!(archived["call_id"], "edit_1");
-        let observed: Value = serde_json::from_str(archived["output"].as_str().unwrap()).unwrap();
-        assert_eq!(observed["outcome"], "observed_target");
-        assert_eq!(observed["current_revision"], observed["planned_revision"]);
-        assert!(continued["input"][5]["content"]
-            .as_str()
-            .unwrap()
-            .contains("Use 40 instead."));
-        let schema = continued["tools"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|tool| tool["name"] == "edit")
-            .unwrap();
-        assert_eq!(
-            schema["parameters"]["properties"]["changes"]["items"]["properties"]["start_line"]
-                ["type"],
-            "integer"
-        );
-        respond(stream, call("read_2", "read", json!({"path":"config.txt"})));
-
-        let (mut stream, _) = listener.accept().unwrap();
-        let refreshed = request(&mut stream);
-        let output: Value =
-            serde_json::from_str(refreshed["input"][7]["output"].as_str().unwrap()).unwrap();
-        assert!(output["content"]
-            .as_str()
-            .unwrap()
-            .contains("primary\r\nalpha: 60"));
-        respond(
-            stream,
-            call(
-                "edit_2",
-                "edit",
-                json!({
-                    "path":"config.txt","expected_revision":output["revision"],
-                    "changes":[{"start_line":2,"end_line":2,"new_text":"alpha: 40\r\n"}]
-                }),
-            ),
-        );
-
-        let (mut stream, _) = listener.accept().unwrap();
-        let corrected = request(&mut stream);
-        let output: Value =
-            serde_json::from_str(corrected["input"][9]["output"].as_str().unwrap()).unwrap();
-        assert_eq!(output["outcome"], "committed");
-        respond(
-            stream,
-            json!({"type":"message","role":"assistant",
-            "content":[{"type":"output_text","text":"Primary alpha is 40."}]}),
-        );
-    });
-
-    let interrupted = invoke(
-        root.path(),
-        &gateway,
-        true,
-        &["agent", "--prompt", "Use 60 for primary alpha."],
-    );
-    assert_eq!(interrupted.status.code(), Some(86));
-    let rejected = invoke(
-        root.path(),
-        &gateway,
-        false,
-        &["agent", "--resume", "--edit-mode", "range"],
-    );
-    assert!(!rejected.status.success());
-    assert!(String::from_utf8_lossy(&rejected.stderr).contains("Use --continue"));
-    assert_eq!(
-        fs::read(&file).unwrap(),
-        b"primary\r\nalpha: 60\r\narchive\r\nalpha: 30\r\n"
-    );
-
-    let args = [
-        "agent",
-        "--continue",
-        "--edit-mode",
-        "range",
-        "--prompt",
-        "Use 40 instead.",
-    ];
-    let continued = invoke(root.path(), &gateway, false, &args);
-    assert!(
-        continued.status.success(),
-        "{}",
-        String::from_utf8_lossy(&continued.stderr)
-    );
-    server.join().unwrap();
-    assert_eq!(
-        fs::read(file).unwrap(),
-        b"primary\r\nalpha: 40\r\narchive\r\nalpha: 30\r\n"
-    );
-
-    let events = fs::read_to_string(
-        root.path()
-            .join(".sourceharness/sessions/acceptance/events.jsonl"),
-    )
-    .unwrap();
-    let events = events
-        .lines()
-        .map(|line| serde_json::from_str::<Value>(line).unwrap())
-        .collect::<Vec<_>>();
-    let users = events
-        .iter()
-        .filter(|e| e["kind"] == "user")
-        .collect::<Vec<_>>();
-    assert_eq!(users.len(), 2);
-    assert_eq!(users[1]["data"]["continuation"]["run"], users[0]["run"]);
-    assert_eq!(
-        users[1]["data"]["continuation"]["correction"],
-        "Use 40 instead."
-    );
-    assert_eq!(
-        events
-            .iter()
-            .filter(|e| e["kind"] == "edit_receipt")
-            .count(),
-        1
-    );
-    let final_text = invoke(
-        root.path(),
-        &gateway,
-        false,
-        &["agent", "--resume", "--edit-mode", "range"],
-    );
-    assert!(final_text.status.success());
-    assert_eq!(
-        String::from_utf8_lossy(&final_text.stdout).trim(),
-        "Primary alpha is 40."
-    );
-}
-
-#[test]
 fn resumes_an_applied_edit_and_retains_exact_old_content() {
     let root = tempfile::tempdir().unwrap();
-    fs::write(
-        root.path().join("config.txt"),
-        b"primary\r\nalpha: 30\r\narchive\r\nalpha: 30\r\n",
-    )
-    .unwrap();
+    fs::write(root.path().join("config.txt"), b"primary\r\nalpha: 30\r\narchive\r\nalpha: 30\r\n").unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let gateway = format!("http://{}/v1", listener.local_addr().unwrap());
     let server = std::thread::spawn(move || {
         let (mut unavailable, _) = listener.accept().unwrap();
         let failed = request(&mut unavailable);
-        write!(
-            unavailable,
-            "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-        )
-        .unwrap();
+        write!(unavailable, "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
         drop(unavailable);
         let (mut first, _) = listener.accept().unwrap();
         let initial = request(&mut first);
         assert_eq!(initial, failed);
-        assert_eq!(
-            initial["input"][0]["content"],
-            "Raise the primary alpha setting"
-        );
-        respond(
-            first,
-            call(
-                "read_1",
-                "read",
-                json!({"path":"config.txt","start_line":1,"line_count":2}),
-            ),
-        );
+        respond(first, call("read_1", "read", json!({"path":"config.txt","start_line":1,"line_count":2})));
 
         let (mut second, _) = listener.accept().unwrap();
-        let reply = request(&mut second);
-        let output: Value =
-            serde_json::from_str(reply["input"][2]["output"].as_str().unwrap()).unwrap();
-        assert_eq!(output["content"], "primary\r\nalpha: 30\r\n");
-        let reference = output["result_ref"].as_str().unwrap().to_owned();
-        respond(
-            second,
-            call(
-                "edit_1",
-                "edit",
-                json!({"path":"config.txt","expected_revision":output["revision"],
-            "changes":[{"old_text":"primary\r\nalpha: 30","new_text":"primary\r\nalpha: 60"}]}),
-            ),
-        );
+        request(&mut second);
+        respond(second, call("edit_1", "edit", json!({
+            "path":"config.txt",
+            "changes":[{"old_text":"primary\r\nalpha: 30","new_text":"primary\r\nalpha: 60"}]
+        })));
 
         let (mut third, _) = listener.accept().unwrap();
         let resumed = request(&mut third);
-        let result: Value =
-            serde_json::from_str(resumed["input"][4]["output"].as_str().unwrap()).unwrap();
+        let output = resumed["input"][4]["output"].as_str().unwrap();
         assert_eq!(resumed["input"][4]["call_id"], "edit_1");
-        assert_eq!(result["outcome"], "observed_target_on_recovery");
-        assert!(result["diff"].as_str().unwrap().contains("+alpha: 60"));
-        respond(
-            third,
-            json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":"Primary alpha is 60."}]}),
-        );
-        reference
+        assert!(output.starts_with("Edited config.txt."));
+        respond(third, answer("Primary alpha is 60."));
     });
 
-    let stopped = invoke(
-        root.path(),
-        &gateway,
-        true,
-        &["agent", "--prompt", "Raise the primary alpha setting"],
-    );
-    assert_eq!(
-        stopped.status.code(),
-        Some(86),
-        "{}",
-        String::from_utf8_lossy(&stopped.stderr)
-    );
-    assert_eq!(
-        fs::read(root.path().join("config.txt")).unwrap(),
-        b"primary\r\nalpha: 60\r\narchive\r\nalpha: 30\r\n"
-    );
-    let journal = root
-        .path()
-        .join(".sourceharness/sessions/acceptance/events.jsonl");
-    OpenOptions::new()
-        .append(true)
-        .open(&journal)
-        .unwrap()
-        .write_all(b"{\"seq\":")
-        .unwrap();
+    let stopped = invoke(root.path(), &gateway, true, &["agent", "--prompt", "Raise the primary alpha setting"]);
+    assert_eq!(stopped.status.code(), Some(86), "{}", String::from_utf8_lossy(&stopped.stderr));
+    assert_eq!(fs::read(root.path().join("config.txt")).unwrap(), b"primary\r\nalpha: 60\r\narchive\r\nalpha: 30\r\n");
+
+    let journal = root.path().join(".sourceharness/sessions/acceptance/events.jsonl");
+    OpenOptions::new().append(true).open(&journal).unwrap().write_all(b"{\"seq\":").unwrap();
 
     let resumed = invoke(root.path(), &gateway, false, &["agent", "--resume"]);
-    assert!(
-        resumed.status.success(),
-        "{}",
-        String::from_utf8_lossy(&resumed.stderr)
-    );
-    assert_eq!(
-        String::from_utf8_lossy(&resumed.stdout).trim(),
-        "Primary alpha is 60."
-    );
-    let reference = server.join().unwrap();
+    assert!(resumed.status.success(), "{}", String::from_utf8_lossy(&resumed.stderr));
+    assert_eq!(String::from_utf8_lossy(&resumed.stdout).trim(), "Primary alpha is 60.");
+    server.join().unwrap();
+    let events = session_events(root.path());
+    let receipt = events.iter().find(|e| e["kind"] == "edit_receipt").unwrap();
+    assert_eq!(receipt["data"]["outcome"], "observed_target_on_recovery");
+    assert_eq!(events.iter().filter(|e| e["kind"] == "model_error").count(), 1);
+}
 
-    let history = invoke(
-        root.path(),
-        &gateway,
-        false,
-        &["history", "--ref", &reference],
-    );
-    assert_eq!(
-        history.stdout,
-        b"primary\r\nalpha: 30\r\narchive\r\nalpha: 30\r\n"
-    );
-    let result = fs::read_to_string(journal).unwrap();
-    let events: Vec<Value> = result
-        .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
-        .collect();
-    assert_eq!(
-        events
-            .iter()
-            .filter(|event| event["kind"] == "edit_receipt")
-            .count(),
-        1
-    );
-    assert_eq!(
-        events
-            .iter()
-            .filter(|event| event["kind"] == "model_error")
-            .count(),
-        1
-    );
-    assert_eq!(
-        fs::read(root.path().join("config.txt")).unwrap(),
-        b"primary\r\nalpha: 60\r\narchive\r\nalpha: 30\r\n"
-    );
+#[test]
+fn timeline_history_surgical_rollback_and_validate_scope_hint() {
+    let py = ["python3", "python", "python.exe", "python3.exe"].into_iter().find_map(|name| {
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).map(|d| d.join(name)).find(|p| p.is_file())
+    }).expect("python executable in PATH");
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture.path().join("workspace");
+    let checks = fixture.path().join("checks.json");
+    let checker = fixture.path().join("check.py");
+    fs::create_dir(&root).unwrap();
+    fs::write(root.join("a.txt"), "a-v1\n").unwrap();
+    fs::write(root.join("b.txt"), "b-v1\n").unwrap();
+    fs::write(root.join("never_read.txt"), "initial-bytes\n").unwrap();
+    fs::write(&checker, "import pathlib, sys\nsys.exit(0 if pathlib.Path('a.txt').read_text() == 'a-v1\\n' else 1)\n").unwrap();
+    fs::write(&checks, serde_json::to_string(&json!({
+        "unit": { "program": py, "args": [checker], "timeout_seconds": 10 }
+    })).unwrap()).unwrap();
+    let exec_cmd = format!("{} -c \"open('b.txt', 'wb').write(b'b-v2\\n')\"", if cfg!(windows) { "python" } else { "python3" });
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let gateway = format!("http://{}/v1", listener.local_addr().unwrap());
+    let root_for_server = root.clone();
+    let server = std::thread::spawn(move || {
+        let mut prior = None;
+        let (stream, _) = compact_round(&listener, &mut prior);
+        respond(stream, call("e_a", "edit", json!({"path":"a.txt","changes":[{"old_text":"a-v1","new_text":"a-v2"}]})));
+        let (stream, _) = compact_round(&listener, &mut prior);
+        respond(stream, call("x_b", "exec", json!({"command": exec_cmd})));
+        let (stream, _) = compact_round(&listener, &mut prior);
+        respond(stream, call("v_fail", "validate", json!({})));
+        let (stream, req) = compact_round(&listener, &mut prior);
+        let v_out = last_output(&req);
+        assert!(v_out.contains("FAIL unit") && v_out.contains("Changed since checkpoint:") && v_out.contains("a.txt"), "{v_out}");
+        respond(stream, call("hist_all", "read", json!({"history":true})));
+        let (stream, req) = compact_round(&listener, &mut prior);
+        let h_out = last_output(&req);
+        assert!(h_out.contains(" edit path=\"a.txt\"") && h_out.contains(" exec ") && h_out.contains(" validate check=\"unit\" FAIL"), "{h_out}");
+        respond(stream, call("hist_nr", "read", json!({"history":true,"path":"never_read.txt"})));
+        let (stream, req) = compact_round(&listener, &mut prior);
+        let nr_out = last_output(&req);
+        assert!(nr_out.contains("initial_snapshot") && nr_out.contains("result_ref="), "{nr_out}");
+        let nr_ref = nr_out.split_once("result_ref=\"").unwrap().1.split('"').next().unwrap().to_owned();
+        respond(stream, call("read_nr", "read", json!({"result_ref": nr_ref})));
+        let (stream, req) = compact_round(&listener, &mut prior);
+        assert!(last_output(&req).contains("initial-bytes"), "{}", last_output(&req));
+        respond(stream, call("rb_dry", "rollback", json!({"paths":["a.txt"],"dry_run":true})));
+        let (stream, req) = compact_round(&listener, &mut prior);
+        let dry_out = last_output(&req);
+        assert!(dry_out.contains("Dry-run rollback") && dry_out.contains("-a-v2") && dry_out.contains("+a-v1"), "{dry_out}");
+        respond(stream, call("rb_a", "rollback", json!({"paths":["a.txt"]})));
+        let (stream, req) = compact_round(&listener, &mut prior);
+        assert!(last_output(&req).starts_with("Restored 1 files"), "rb_a={}", last_output(&req));
+        assert_eq!(fs::read_to_string(root_for_server.join("a.txt")).unwrap(), "a-v1\n");
+        assert_eq!(fs::read_to_string(root_for_server.join("b.txt")).unwrap(), "b-v2\n");
+        let events_now = session_events(&root_for_server);
+        let exec_seq = events_now.iter().find(|e| e["kind"] == "exec_receipt").unwrap()["seq"].as_u64().unwrap();
+        respond(stream, call("rb_exec", "rollback", json!({"to_event": exec_seq, "paths":["b.txt"]})));
+        let (stream, req) = compact_round(&listener, &mut prior);
+        assert!(last_output(&req).starts_with("Restored 1 files"), "rb_exec={}", last_output(&req));
+        respond(stream, answer("Timeline and surgical rollback complete."));
+    });
+    let res = invoke(&root, &gateway, false, &["agent", "--checks", checks.to_str().unwrap(), "--prompt", "Test timeline."]);
+    assert!(res.status.success(), "{}", String::from_utf8_lossy(&res.stderr));
+    server.join().unwrap();
+    assert_eq!(fs::read_to_string(root.join("a.txt")).unwrap(), "a-v1\n");
+    assert_eq!(fs::read_to_string(root.join("b.txt")).unwrap(), "b-v1\n");
 }

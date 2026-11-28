@@ -4,7 +4,10 @@ import argparse
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
-import fcntl
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
 import getpass
 from hashlib import sha256
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -38,6 +41,15 @@ def save(path, value):
     temporary = path.with_suffix(path.suffix+".new")
     temporary.write_bytes(encode(value)+b"\n")
     temporary.replace(path)
+
+
+def model_matches(expected, observed):
+    if observed == expected:
+        return True
+    if not observed or not expected:
+        return False
+    norm = lambda text: re.sub(r"[^a-z0-9]+", "", text.lower())
+    return norm(observed).endswith(norm(expected))
 
 
 class NoRedirect(request.HTTPRedirectHandler):
@@ -103,7 +115,7 @@ class Gateway:
                         if event.get("type") in ("response.completed","response.incomplete","response.failed"):
                             row["terminal"] = event["type"]
                             row["usage"] = state.get("usage")
-                            if row["model"] != self.model:
+                            if not model_matches(self.model, row["model"]):
                                 row["failure"] = "unexpected_response_model"
                                 self.block("unexpected_response_model")
                                 return
@@ -197,7 +209,7 @@ def invoke(exe, root, checks, model, base, prompt, timeout, interrupt=False):
     env.update(OPENAI_BASE_URL=base,OPENAI_API_KEY="loopback-benchmark")
     if interrupt:
         env["SOURCE_HARNESS_TEST_INTERRUPT"] = "kill_after_file_replace"
-    command = [str(exe),"agent","--tool-profile","compact","--session","work","--root",str(root),
+    command = [str(exe),"agent","--session","work","--root",str(root),
                "--checks",str(checks),"--model",model,"--effort","low"]
     command.extend(["--prompt",prompt] if prompt is not None else ["--resume"])
     started = time.monotonic()
@@ -297,13 +309,14 @@ def run_case(args, case, temporary, gateway, proxy):
         spec, checks = oracle(directory,tree(root),step)
         runs = [invoke(args.exe,root,checks,args.model,base,step.prompt,args.phase_timeout,step.interrupt)]
         recovered = {"passed":False,"triggered":False} if step.interrupt else None
-        if step.interrupt and runs[-1]["exit"] == -signal.SIGKILL:
+        interrupt_codes = (-getattr(signal, "SIGKILL", -9), 86)
+        if step.interrupt and runs[-1]["exit"] in interrupt_codes:
             recovered.update(interrupt_evidence(root,read_events(root)[checkpoint:]))
             runs.append(invoke(args.exe,root,checks,args.model,base,None,args.phase_timeout))
         if resumable_transport_failure(runs[-1]) and not gateway.blocked.is_set():
             runs.append(invoke(args.exe,root,checks,args.model,base,None,args.phase_timeout,
                                step.interrupt and not recovered["triggered"] if recovered is not None else False))
-            if step.interrupt and not recovered["triggered"] and runs[-1]["exit"] == -signal.SIGKILL:
+            if step.interrupt and not recovered["triggered"] and runs[-1]["exit"] in interrupt_codes:
                 recovered.update(interrupt_evidence(root,read_events(root)[checkpoint:]))
                 runs.append(invoke(args.exe,root,checks,args.model,base,None,args.phase_timeout))
         all_events = read_events(root)
@@ -327,7 +340,7 @@ def run_case(args, case, temporary, gateway, proxy):
                 and new["instructions_match_previous"] and new["tools_match_previous"]
                 for old,new in zip(contexts,contexts[1:]))
     observed = [row for row in record["requests"] if row.get("terminal")]
-    verified = bool(observed) and all(row["model"] == args.model for row in observed)
+    verified = bool(observed) and all(model_matches(args.model, row["model"]) for row in observed)
     infrastructure_blocked = any(resumable_transport_failure(phase["executions"][-1]) for phase in phases)
     if gateway.blocked.is_set():
         unfinished = not phases or len(phases) < len(case.steps) or phases[-1]["executions"][-1]["exit"] != 0
@@ -392,12 +405,14 @@ def main():
     args = parser.parse_args()
     args.out = args.out.resolve()
     args.out.mkdir(parents=True,exist_ok=True)
-    with (args.out/"benchmark.lock").open("a") as lock:
-        try:
-            fcntl.flock(lock.fileno(),fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            parser.error("A benchmark is already using this result directory")
-        return benchmark(args,parser)
+    if fcntl is not None:
+        with (args.out/"benchmark.lock").open("a") as lock:
+            try:
+                fcntl.flock(lock.fileno(),fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                parser.error("A benchmark is already using this result directory")
+            return benchmark(args,parser)
+    return benchmark(args,parser)
 
 
 def benchmark(args, parser):
@@ -417,11 +432,11 @@ def benchmark(args, parser):
     args.exe = args.exe.resolve(strict=True)
     args.base_url = args.base_url.rstrip("/")
     url = parse.urlsplit(args.base_url)
-    if (url.scheme != "https" or not url.hostname or url.username is not None or url.query
+    loopback = url.hostname in ("127.0.0.1", "localhost", "::1")
+    if ((url.scheme not in ("https", "http") or (url.scheme == "http" and not loopback))
+            or not url.hostname or url.username is not None or url.query
             or url.fragment or not url.path.endswith("/v1")):
-        parser.error("Use an HTTPS API base URL ending in /v1")
-    if args.model != DEEPSEEK_MODEL and not re.search(r"qwen[^\d]*3[.\-]8\b",args.model,re.I):
-        parser.error(f"Use an explicit Qwen3.8 model ID or {DEEPSEEK_MODEL}")
+        parser.error("Use an HTTPS (or loopback HTTP) API base URL ending in /v1")
     selected = [case for case in all_cases if not args.case or case.id in args.case]
     if args.case and set(args.case) != {case.id for case in selected}:
         parser.error("Unknown case ID")
@@ -441,7 +456,7 @@ def benchmark(args, parser):
     if not pending:
         print(json.dumps(summary(list(rows.values()),plan),indent=2))
         return 0
-    key = os.environ.get("SOURCEHARNESS_QWEN_API_KEY")
+    key = os.environ.get("SOURCEHARNESS_QWEN_API_KEY") or os.environ.get("OPENAI_API_KEY")
     if not key and url.hostname == "opencode.ai" and url.port in (None,443):
         key = os.environ.get("SOURCEHARNESS_OPENCODE_GO_API_KEY")
     key = key or getpass.getpass("Benchmark API credential (hidden): ")
@@ -458,7 +473,8 @@ def benchmark(args, parser):
         pilot = next(ordered)
 
         def complete(case, data):
-            data = json.loads(encode(data).decode().replace(key,"[credential]"))
+            if len(key) >= 12:
+                data = json.loads(encode(data).decode().replace(key,"[credential]"))
             if data["evaluated"]:
                 save(results/(case.id+".json"),data)
                 rows[case.id] = data

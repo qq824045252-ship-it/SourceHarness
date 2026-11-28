@@ -1,11 +1,4 @@
-pub mod bench;
 pub mod budget;
-pub mod error;
-pub mod eval;
-pub mod read;
-pub mod registry;
 pub mod session;
-pub mod search;
-pub mod store;
 pub mod transport;
 pub mod workspace;

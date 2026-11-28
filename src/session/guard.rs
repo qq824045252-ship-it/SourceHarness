@@ -1,16 +1,14 @@
 use super::journal::{revision, Journal};
 use regex::Regex;
 use serde_json::{json, Value};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::OnceLock;
 
-const WARN_THRESHOLD: usize = 2;
 const PAUSE_THRESHOLD: usize = 3;
 
 pub(super) fn compact_candidate(tool: &str, args: &Value, result: &Value) -> bool {
     if tool == "validate" && result["passed"] == false {
-        return result["workspace_changed_during_check"] != true
-            && result["input_revisions_stable"] != false;
+        return result["workspace_changed_during_check"] != true && result["input_revisions_stable"] != false;
     }
     result["status"] == "error" || (tool == "exec" && empty_lookup(args, result))
 }
@@ -21,24 +19,23 @@ fn empty_lookup(args: &Value, result: &Value) -> bool {
     }
     let Some(command) = args["command"].as_str() else { return false };
     let mut words = command.split_ascii_whitespace();
-    let program = words.next().and_then(|name| name.rsplit('/').next());
-    // A quiet grep can find a match and exit successfully. Simple find lookups
-    // can return an empty result with exit zero.
+    let program = words.next().and_then(|name| name.rsplit(['/', '\\']).next());
+    // Quiet grep can find a match cleanly; simple find lookups can return empty with exit 0.
     program == Some("find")
         && !command.contains([';', '|', '&', '<', '>', '$', '\x60', '\n'])
-        && !words.any(|word| matches!(word, "-delete" | "-exec" | "-execdir" | "-ok" | "-okdir" | "-quit"))
+        && !words.any(|w| matches!(w, "-delete" | "-exec" | "-execdir" | "-ok" | "-okdir" | "-quit"))
 }
 
 pub(super) fn compact_signal(
-    journal: &Journal, run: usize, round: usize, tool: &str, args: &Value,
-    result: &Value, workspace: &str,
+    journal: &Journal, run: usize, round: usize, tool: &str, args: &Value, result: &Value, workspace: &str,
 ) -> Value {
     if tool == "validate" && result["passed"] == false {
         return validation_signal(journal, run, round, result, workspace);
     }
     let stall = match tool {
-        "exec" if matches!(result["code"].as_str(), Some("EXEC_FAILED" | "EXEC_TIMEOUT"))
-            || empty_lookup(args, result) => Some("EXEC_WITHOUT_PROGRESS"),
+        "exec" if matches!(result["code"].as_str(), Some("EXEC_FAILED" | "EXEC_TIMEOUT")) || empty_lookup(args, result) => {
+            Some("EXEC_WITHOUT_PROGRESS")
+        }
         "edit" => Some("EDIT_ERROR_STREAK"),
         _ => None,
     };
@@ -47,41 +44,27 @@ pub(super) fn compact_signal(
     let fingerprint = revision(format!("{workspace}/{diagnostic}").as_bytes());
     let mut exact = HashSet::from([round as u64]);
     let mut stalled = exact.clone();
-    let mut same_exact = true;
-    let mut same_stall = stall.is_some();
-    for event in journal.events.iter().rev().take_while(|event| event.run == run) {
+    let (mut same_exact, mut same_stall) = (true, stall.is_some());
+    for event in journal.events.iter().rev().take_while(|e| e.run == run) {
         if matches!(event.kind.as_str(), "steer" | "paused" | "edit_receipt")
             || (event.kind == "rollback_receipt" && event.data["from"] != event.data["target"])
             || (event.kind == "validation_receipt" && event.data["passed"] == true)
         {
             break;
         }
-        if event.kind != "tool_result" || event.data["name"] != tool {
-            continue;
-        }
-        let Some(prior_round) = event.data["round"].as_u64() else { continue };
-        if prior_round == round as u64 {
-            continue;
-        }
-        let previous = &event.data["guard"];
-        same_exact &= previous["fingerprint"] == fingerprint;
-        same_stall &= previous["stall"].as_str() == stall && previous["workspace_revision"] == workspace;
-        if same_exact {
-            exact.insert(prior_round);
-        }
-        if same_stall {
-            stalled.insert(prior_round);
-        }
-        if !same_exact && !same_stall {
-            break;
-        }
+        if event.kind != "tool_result" || event.data["name"] != tool { continue; }
+        let Some(prior) = event.data["round"].as_u64() else { continue };
+        if prior == round as u64 { continue; }
+        let prev = &event.data["guard"];
+        same_exact &= prev["fingerprint"] == fingerprint;
+        same_stall &= prev["stall"].as_str() == stall && prev["workspace_revision"] == workspace;
+        if same_exact { exact.insert(prior); }
+        if same_stall { stalled.insert(prior); }
+        if !same_exact && !same_stall { break; }
     }
-    let mut kind = "REPEATED_FAILURE";
-    let mut count = exact.len();
-    let mut state = guard_state(count, PAUSE_THRESHOLD);
+    let (mut kind, mut count, mut state) = ("REPEATED_FAILURE", exact.len(), guard_state(exact.len(), PAUSE_THRESHOLD));
     if let Some(stall) = stall {
-        let threshold = if tool == "exec" { 4 } else { PAUSE_THRESHOLD };
-        let stalled_state = guard_state(stalled.len(), threshold);
+        let stalled_state = guard_state(stalled.len(), if tool == "exec" { 4 } else { PAUSE_THRESHOLD });
         if stalled_state > state {
             kind = stall;
             count = stalled.len();
@@ -93,30 +76,16 @@ pub(super) fn compact_signal(
 }
 
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
-enum GuardState {
-    Observe,
-    Warn,
-    Pause,
-}
+enum GuardState { Observe, Warn, Pause }
 
 impl GuardState {
     fn label(&self) -> &'static str {
-        match self {
-            Self::Observe => "observe",
-            Self::Warn => "warn",
-            Self::Pause => "pause",
-        }
+        match self { Self::Observe => "observe", Self::Warn => "warn", Self::Pause => "pause" }
     }
 }
 
 fn guard_state(count: usize, pause: usize) -> GuardState {
-    if count >= pause {
-        GuardState::Pause
-    } else if count >= pause - 1 {
-        GuardState::Warn
-    } else {
-        GuardState::Observe
-    }
+    if count >= pause { GuardState::Pause } else if count >= pause - 1 { GuardState::Warn } else { GuardState::Observe }
 }
 
 fn validation_conditions(result: &Value) -> Value {
@@ -125,249 +94,53 @@ fn validation_conditions(result: &Value) -> Value {
 
 fn normalized_stream(journal: &Journal, hash: &Value) -> Value {
     static VOLATILE: OnceLock<Regex> = OnceLock::new();
-    let Some(bytes) = hash.as_str().and_then(|hash| journal.get(hash).ok()) else {
-        return hash.clone();
-    };
+    let Some(bytes) = hash.as_str().and_then(|h| journal.get(h).ok()) else { return hash.clone() };
     let Ok(text) = std::str::from_utf8(&bytes) else { return hash.clone() };
-    if text.len() > 8192 {
-        return hash.clone();
-    }
+    if text.len() > 8192 { return hash.clone(); }
     let volatile = VOLATILE.get_or_init(|| Regex::new(concat!(
         r"(?i)\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?",
         r"|(?P<label>\b(?:timestamp|line|column|pid)[ \t:=#]+)\d+\b",
     )).expect("valid diagnostic pattern"));
-    let normalized = volatile.replace_all(text, "$label<volatile>");
-    json!(revision(normalized.as_bytes()))
+    json!(revision(volatile.replace_all(text, "$label<volatile>").as_bytes()))
 }
 
 fn validation_signal(journal: &Journal, run: usize, round: usize, result: &Value, workspace: &str) -> Value {
     let conditions = validation_conditions(result);
     let failed_revision = revision(format!("{workspace}/{conditions}").as_bytes());
     let detail = json!({"conditions":conditions,"exit":result["exit_code"],"timed_out":result["timed_out"],
-        "streams":[normalized_stream(journal, &result["streams"]["stdout"]),
-                   normalized_stream(journal, &result["streams"]["stderr"])]});
+        "streams":[normalized_stream(journal, &result["streams"]["stdout"]), normalized_stream(journal, &result["streams"]["stderr"])]});
     let diagnostic = revision(detail.to_string().as_bytes());
-    let mut repeated_revision = HashSet::from([round as u64]);
-    let mut consecutive_validation = repeated_revision.clone();
-    let mut same_diagnostic = true;
-    for event in journal.events.iter().rev().take_while(|event| event.run == run) {
+    let mut repeated_rev = HashSet::from([round as u64]);
+    let mut consecutive = repeated_rev.clone();
+    let mut same_diag = true;
+    for event in journal.events.iter().rev().take_while(|e| e.run == run) {
         match event.kind.as_str() {
             "steer" | "paused" => break,
-            "rollback_receipt" if event.data["from"] != event.data["target"] => same_diagnostic = false,
+            "rollback_receipt" if event.data["from"] != event.data["target"] => same_diag = false,
             "validation_receipt" if event.data["passed"] == true
                 && event.data["workspace_changed_during_check"] != true
                 && validation_conditions(&event.data) == conditions =>
             {
-                // A pass on B does not erase a known failure on A.
-                if event.data["workspace_revision"] == workspace {
-                    break;
-                }
-                same_diagnostic = false;
+                if event.data["workspace_revision"] == workspace { break; }
+                same_diag = false;
             }
             "tool_result" if event.data["name"] == "validate" => {
-                let Some(prior_round) = event.data["round"].as_u64() else { continue };
-                if prior_round == round as u64 {
-                    continue;
-                }
-                let previous = &event.data["guard"];
-                if previous["failed_revision"] == failed_revision {
-                    repeated_revision.insert(prior_round);
-                }
-                if previous["check"] == result["check"] {
-                    same_diagnostic &= previous["diagnostic"] == diagnostic;
-                    if same_diagnostic {
-                        consecutive_validation.insert(prior_round);
-                    }
+                let Some(prior) = event.data["round"].as_u64() else { continue };
+                if prior == round as u64 { continue; }
+                let prev = &event.data["guard"];
+                if prev["failed_revision"] == failed_revision { repeated_rev.insert(prior); }
+                if prev["check"] == result["check"] {
+                    same_diag &= prev["diagnostic"] == diagnostic;
+                    if same_diag { consecutive.insert(prior); }
                 }
             }
             _ => {}
         }
     }
-    let count = repeated_revision.len().max(consecutive_validation.len());
+    let count = repeated_rev.len().max(consecutive.len());
     json!({"kind":"VALIDATION_OSCILLATION","state":guard_state(count, PAUSE_THRESHOLD).label(),
         "count":count,"workspace_revision":workspace,"check":result["check"],
         "diagnostic":diagnostic,"failed_revision":failed_revision})
-}
-
-pub struct PendingOutcome<'a> {
-    pub operation: &'a str,
-    pub attempt: usize,
-    pub name: &'a str,
-    pub result: &'a Value,
-}
-
-/// Report deterministic signs of repeated work within the current run.
-///
-/// Signals:
-/// 1. `EXACT_REPEAT`: identical `(tool_name, args_hash)` repeated with no
-///    intervening successful workspace mutation (`edit_receipt`).
-/// 2. `ERROR_STREAK`: consecutive error results on the same `(tool_name, target, code)`.
-/// 3. `VALIDATION_OSCILLATION`: repeated identical failed validation fingerprint
-///    or returning to a previously failed `workspace_revision` for the same check.
-pub fn evaluate(journal: &Journal, run: usize, pending: &PendingOutcome<'_>) -> Option<Value> {
-    let mut attempts: HashMap<usize, (&str, &str)> = HashMap::new();
-    let mut workspace_epoch: usize = 0;
-    let mut exact_counts: HashMap<(&str, &str, usize), usize> = HashMap::new();
-
-    let mut streak_key: Option<(String, String, String)> = None;
-    let mut streak_count: usize = 0;
-
-    let mut last_val_fail: Option<(String, Option<i64>, String, String)> = None;
-    let mut same_val_fail_count: usize = 0;
-    let mut failed_revisions: HashMap<(String, String), usize> = HashMap::new();
-    let mut latest_val_count: usize = 0;
-
-    for event in journal.events.iter().filter(|e| e.run == run) {
-        match event.kind.as_str() {
-            "tool_attempt" => {
-                if let (Some(name), Some(args)) = (
-                    event.data["name"].as_str(),
-                    event.data["arguments"].as_str(),
-                ) {
-                    attempts.insert(event.seq, (name, args));
-                }
-            }
-            "edit_receipt" => {
-                if event.data["status"] == "ok"
-                    && event.data["operation"].as_str() != Some(pending.operation)
-                {
-                    workspace_epoch += 1;
-                }
-            }
-            "tool_result" => {
-                if let Some((name, args)) = event.data["attempt"]
-                    .as_u64()
-                    .and_then(|v| usize::try_from(v).ok())
-                    .and_then(|seq| attempts.get(&seq).copied())
-                {
-                    *exact_counts
-                        .entry((name, args, workspace_epoch))
-                        .or_insert(0) += 1;
-                }
-                if event.data["status"] == "error" {
-                    let key = error_key(
-                        event.data["name"].as_str().unwrap_or(""),
-                        &event.data,
-                    );
-                    if streak_key.as_ref() == Some(&key) {
-                        streak_count += 1;
-                    } else {
-                        streak_key = Some(key);
-                        streak_count = 1;
-                    }
-                } else {
-                    streak_key = None;
-                    streak_count = 0;
-                }
-            }
-            "validation_receipt" => {
-                if event.data["passed"] == true {
-                    last_val_fail = None;
-                    same_val_fail_count = 0;
-                } else {
-                    let check = event.data["check"].as_str().unwrap_or("").to_owned();
-                    let ws_rev = event.data["workspace_revision"]
-                        .as_str()
-                        .unwrap_or("")
-                        .to_owned();
-                    let rev_count = *failed_revisions
-                        .entry((check.clone(), ws_rev))
-                        .and_modify(|c| *c += 1)
-                        .or_insert(1);
-                    let sig = (
-                        check,
-                        event.data["exit_code"].as_i64(),
-                        event.data["streams"]["stdout"]
-                            .as_str()
-                            .unwrap_or("")
-                            .to_owned(),
-                        event.data["streams"]["stderr"]
-                            .as_str()
-                            .unwrap_or("")
-                            .to_owned(),
-                    );
-                    if last_val_fail.as_ref() == Some(&sig) {
-                        same_val_fail_count += 1;
-                    } else {
-                        last_val_fail = Some(sig);
-                        same_val_fail_count = 1;
-                    }
-                    if event.data["operation"].as_str() == Some(pending.operation) {
-                        latest_val_count = same_val_fail_count.max(rev_count);
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-
-    let exact_count = attempts
-        .get(&pending.attempt)
-        .map(|&(name, args)| {
-            let entry = exact_counts
-                .entry((name, args, workspace_epoch))
-                .or_insert(0);
-            *entry += 1;
-            *entry
-        })
-        .unwrap_or(0);
-
-    let current_streak = if pending.result["status"] == "error" {
-        let key = error_key(pending.name, pending.result);
-        if streak_key.as_ref() == Some(&key) {
-            streak_count + 1
-        } else {
-            1
-        }
-    } else {
-        0
-    };
-
-    let candidates = [
-        (
-            exact_count,
-            "EXACT_REPEAT",
-            format!(
-                "Repeated identical `{}` call {} times without an intervening recorded edit.",
-                pending.name, exact_count
-            ),
-        ),
-        (
-            current_streak,
-            "ERROR_STREAK",
-            format!(
-                "Consecutive `{}` rejection `{}` ({} times). Inspect fresh evidence or change approach before retrying.",
-                pending.name,
-                pending.result["code"].as_str().unwrap_or("ERROR"),
-                current_streak
-            ),
-        ),
-        (
-            latest_val_count,
-            "VALIDATION_OSCILLATION",
-            format!(
-                "Validation check failed with the same signature or reverted to a previously failed workspace revision ({} times).",
-                latest_val_count
-            ),
-        ),
-    ];
-
-    let (count, kind, reason) = candidates
-        .into_iter()
-        .max_by_key(|(count, _, _)| *count)
-        .filter(|(count, _, _)| *count >= WARN_THRESHOLD)?;
-
-    Some(json!({"kind": kind, "count": count, "reason": reason}))
-}
-
-fn error_key(name: &str, data: &Value) -> (String, String, String) {
-    let target = data["source"]["path"]
-        .as_str()
-        .or_else(|| data["path"].as_str())
-        .or_else(|| data["result_ref"].as_str())
-        .unwrap_or("");
-    let code = data["code"].as_str().unwrap_or("ERROR");
-    (name.to_owned(), target.to_owned(), code.to_owned())
 }
 
 #[cfg(test)]
@@ -379,143 +152,68 @@ mod tests {
     fn compact_detects_failed_workspace_oscillation_across_different_diagnostics() {
         let dir = tempfile::tempdir().unwrap();
         let mut journal = Journal::open(dir.path()).unwrap();
-        for (round, workspace, expected) in [
-            (1, "a", "observe"),
-            (2, "b", "observe"),
-            (3, "a", "warn"),
-            (4, "b", "warn"),
-            (5, "a", "pause"),
-        ] {
-            let result = json!({"check":"test","program_revision":"runner","passed":false,
-                "exit_code":1,"streams":{"stderr":format!("diagnostic {round}")}});
-            let signal = compact_signal(&journal, 1, round, "validate", &json!({}), &result, workspace);
+        for (round, ws, expected) in [(1, "a", "observe"), (2, "b", "observe"), (3, "a", "warn"), (4, "b", "warn"), (5, "a", "pause")] {
+            let result = json!({"check":"test","program_revision":"runner","passed":false,"exit_code":1,"streams":{"stderr":format!("diagnostic {round}")}});
+            let signal = compact_signal(&journal, 1, round, "validate", &json!({}), &result, ws);
             assert_eq!(signal["state"], expected);
-            journal.append(1, "tool_result", json!({
-                "name":"validate", "round":round, "guard":signal
-            })).unwrap();
+            journal.append(1, "tool_result", json!({"name":"validate", "round":round, "guard":signal})).unwrap();
         }
         journal.append(1, "steer", json!({"text":"Try a different approach."})).unwrap();
-        let result = json!({"check":"test","program_revision":"runner","passed":false,"exit_code":1});
-        let after_steer = compact_signal(&journal, 1, 6, "validate", &json!({}), &result, "a");
-        assert_eq!(after_steer["state"], "observe");
+        let after = compact_signal(&journal, 1, 6, "validate", &json!({}), &json!({"check":"test","program_revision":"runner","passed":false,"exit_code":1}), "a");
+        assert_eq!(after["state"], "observe");
     }
 
     #[test]
-    fn exact_repeat_warns_and_resets_after_edit() {
+    fn compact_detects_repeated_failure_and_resets_after_edit() {
         let dir = tempfile::tempdir().unwrap();
         let mut journal = Journal::open(dir.path()).unwrap();
-        let args = journal.put(br#"{"path":"a.txt"}"#).unwrap();
-        let ok = json!({"status":"ok","content":"hi"});
-
-        let a1 = journal
-            .append(1, "tool_attempt", json!({"operation":"1.1.1","name":"read","arguments":args}))
-            .unwrap();
-        assert_eq!(
-            evaluate(&journal, 1, &PendingOutcome { operation: "1.1.1", attempt: a1, name: "read", result: &ok }),
-            None
-        );
-        journal
-            .append(1, "tool_result", json!({"operation":"1.1.1","attempt":a1,"name":"read","status":"ok"}))
-            .unwrap();
-
-        let a2 = journal
-            .append(1, "tool_attempt", json!({"operation":"1.2.1","name":"read","arguments":args}))
-            .unwrap();
-        assert!(matches!(
-            evaluate(&journal, 1, &PendingOutcome { operation: "1.2.1", attempt: a2, name: "read", result: &ok }),
-            Some(ref w) if w["kind"] == "EXACT_REPEAT" && w["count"] == 2
-        ));
-        journal
-            .append(1, "tool_result", json!({"operation":"1.2.1","attempt":a2,"name":"read","status":"ok"}))
-            .unwrap();
-
-        let a3 = journal
-            .append(1, "tool_attempt", json!({"operation":"1.3.1","name":"read","arguments":args}))
-            .unwrap();
-        assert!(matches!(
-            evaluate(&journal, 1, &PendingOutcome { operation: "1.3.1", attempt: a3, name: "read", result: &ok }),
-            Some(ref p) if p["kind"] == "EXACT_REPEAT" && p["count"] == 3
-        ));
-
-        // After a successful edit_receipt, the workspace epoch advances so reading again is allowed.
-        journal
-            .append(1, "edit_receipt", json!({"operation":"1.4.1","status":"ok"}))
-            .unwrap();
-        let a4 = journal
-            .append(1, "tool_attempt", json!({"operation":"1.5.1","name":"read","arguments":args}))
-            .unwrap();
-        assert_eq!(
-            evaluate(&journal, 1, &PendingOutcome { operation: "1.5.1", attempt: a4, name: "read", result: &ok }),
-            None
-        );
+        let args = json!({"path":"a.txt"});
+        let err = json!({"status":"error","code":"FILE_NOT_FOUND"});
+        for (round, expected) in [(1, "observe"), (2, "warn"), (3, "pause")] {
+            let signal = compact_signal(&journal, 1, round, "read", &args, &err, "ws-1");
+            assert_eq!(signal["kind"], "REPEATED_FAILURE");
+            assert_eq!(signal["state"], expected);
+            journal.append(1, "tool_result", json!({"name":"read","round":round,"guard":signal})).unwrap();
+        }
+        journal.append(1, "edit_receipt", json!({"operation":"1.4.1","status":"ok"})).unwrap();
+        let reset = compact_signal(&journal, 1, 4, "read", &args, &err, "ws-1");
+        assert_eq!(reset["state"], "observe");
+        assert_eq!(reset["count"], 1);
     }
 
     #[test]
-    fn error_streak_warns_on_same_target_and_code() {
+    fn compact_detects_edit_error_streak_across_different_errors() {
         let dir = tempfile::tempdir().unwrap();
         let mut journal = Journal::open(dir.path()).unwrap();
-        let err = json!({"status":"error","code":"TEXT_NOT_FOUND","source":{"kind":"workspace","path":"app.py"}});
-
-        for (round, expected) in [(1, false), (2, true), (3, true)] {
-            let op = format!("1.{round}.1");
-            let args = journal.put(format!(r#"{{"round":{round}}}"#).as_bytes()).unwrap();
-            let attempt = journal
-                .append(1, "tool_attempt", json!({"operation":op,"name":"edit","arguments":args}))
-                .unwrap();
-            let action = evaluate(
-                &journal,
-                1,
-                &PendingOutcome { operation: &op, attempt, name: "edit", result: &err },
-            );
-            if expected {
-                let warning = action.unwrap();
-                assert_eq!(warning["kind"], "ERROR_STREAK");
-                assert_eq!(warning["count"], round);
-            } else {
-                assert_eq!(action, None);
-            }
-            journal
-                .append(1, "tool_result", json!({
-                    "operation":op,"attempt":attempt,"name":"edit","status":"error",
-                    "code":"TEXT_NOT_FOUND","source":{"kind":"workspace","path":"app.py"}
-                }))
-                .unwrap();
+        for (round, code, kind, expected) in [
+            (1, "TEXT_NOT_FOUND", "REPEATED_FAILURE", "observe"),
+            (2, "INVALID_ARGUMENT", "EDIT_ERROR_STREAK", "warn"),
+            (3, "AMBIGUOUS_MATCH", "EDIT_ERROR_STREAK", "pause"),
+        ] {
+            let res = json!({"status":"error","code":code});
+            let signal = compact_signal(&journal, 1, round, "edit", &json!({"path":"app.py","round":round}), &res, "ws-1");
+            assert_eq!(signal["kind"], kind);
+            assert_eq!(signal["state"], expected);
+            journal.append(1, "tool_result", json!({"name":"edit","round":round,"guard":signal})).unwrap();
         }
     }
 
     #[test]
-    fn validation_oscillation_detects_repeated_failure_signatures() {
+    fn compact_detects_noisy_validation_oscillation_and_ignores_empty_rollback() {
         let dir = tempfile::tempdir().unwrap();
         let mut journal = Journal::open(dir.path()).unwrap();
-        let ok_res = json!({"status":"ok","passed":false});
-
-        for (round, ws_rev, expected) in [(1, "rev-a", false), (2, "rev-b", true), (3, "rev-a", true)] {
-            let op = format!("1.{round}.1");
-            let args = journal.put(format!(r#"{{"check":"ci","r":{round}}}"#).as_bytes()).unwrap();
-            let attempt = journal
-                .append(1, "tool_attempt", json!({"operation":op,"name":"validate","arguments":args}))
-                .unwrap();
-            journal
-                .append(1, "validation_receipt", json!({
-                    "operation":op,"check":"ci","passed":false,"exit_code":1,
-                    "workspace_revision":ws_rev,"streams":{"stdout":"out1","stderr":"err1"}
-                }))
-                .unwrap();
-            let action = evaluate(
-                &journal,
-                1,
-                &PendingOutcome { operation: &op, attempt, name: "validate", result: &ok_res },
-            );
-            if expected {
-                let warning = action.unwrap();
-                assert_eq!(warning["kind"], "VALIDATION_OSCILLATION");
-                assert_eq!(warning["count"], round);
-            } else {
-                assert_eq!(action, None);
-            }
-            journal
-                .append(1, "tool_result", json!({"operation":op,"attempt":attempt,"name":"validate","status":"ok"}))
-                .unwrap();
+        for (round, noise, expected) in [
+            (1, "timestamp=100 line 12: missing", "observe"),
+            (2, "timestamp=200 line 88: missing", "warn"),
+            (3, "timestamp=300 line 99: missing", "pause"),
+        ] {
+            let err_hash = journal.put(noise.as_bytes()).unwrap();
+            let res = json!({"check":"ci","program_revision":"p1","passed":false,"exit_code":1,"streams":{"stdout":"","stderr":err_hash}});
+            let signal = compact_signal(&journal, 1, round, "validate", &json!({}), &res, &format!("ws-{round}"));
+            assert_eq!(signal["kind"], "VALIDATION_OSCILLATION");
+            assert_eq!(signal["state"], expected);
+            journal.append(1, "tool_result", json!({"name":"validate","round":round,"guard":signal})).unwrap();
+            journal.append(1, "rollback_receipt", json!({"from":"base","target":"base","paths":[]})).unwrap();
         }
     }
 }
