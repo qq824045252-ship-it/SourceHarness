@@ -78,6 +78,10 @@ def spawn(name):
     return {"kind": "spawn", "name": name}
 
 
+def rebase(worker, expect):
+    return {"kind": "rebase", "worker": worker, "expect": expect}
+
+
 def merge(worker, expect):
     return {"kind": "merge", "from": worker, "session": "main", "expect": expect}
 
@@ -421,12 +425,13 @@ def worker_write_skew(rng, variant):
         merge("w2", {"status": "validation_failed", "code": "MERGE_VALIDATION_FAILED",
                      "head_changed_paths": ["pkg/api.py", "pkg/service_a.py"], "unchanged": True,
                      "failed_checks": ["acceptance", "signature"]}),
+        rebase("w2", {"status": "ok", "head_changed_paths": ["pkg/api.py", "pkg/service_a.py"],
+                      "updated_paths": ["pkg/api.py", "pkg/service_a.py"]}),
         agent("w2", "work", "The merge was rejected because pkg/service_b.py still calls compute with one argument. "
-                            "Fix it so every caller passes scale explicitly.",
+                            "Your workspace has been rebased onto mainline; inspect pkg/api.py and update "
+                            "pkg/service_b.py so every caller passes scale explicitly.",
               [changesets(fixed_pairs), "Done."],
-              {"workspace": spec(files, exact={**files, "pkg/service_b.py":
-                                               apply(apply(files["pkg/service_b.py"], stale_pairs["pkg/service_b.py"]),
-                                                     fixed_pairs["pkg/service_b.py"])})}),
+              {"workspace": spec(files, exact=merged)}),
         merge("w2", {"status": "ok", "workspace": spec(files, exact=merged)}),
     ]
     return files, checks, actions

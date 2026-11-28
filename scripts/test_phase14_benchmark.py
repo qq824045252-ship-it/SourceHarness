@@ -5,7 +5,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from phase14_benchmark import ScriptedGateway, run_case
+from phase14_benchmark import ScriptedGateway, run_case, summary
 from phase14_benchmark_cases import SHAPES, apply, corpus, manifest
 from phase14_checker import markers, signature
 
@@ -27,12 +27,36 @@ class CorpusTest(unittest.TestCase):
             self.assertTrue(case.checks, case.id)
             self.assertTrue(case.actions, case.id)
             kinds = {action["kind"] for action in case.actions}
-            self.assertTrue(kinds <= {"agent", "branch", "spawn", "merge"}, case.id)
+            self.assertTrue(kinds <= {"agent", "branch", "spawn", "rebase", "merge"}, case.id)
             self.assertIn("agent", kinds, case.id)
             for action in case.actions:
                 if action["kind"] == "agent":
                     self.assertTrue(action["script"], case.id)
                     self.assertTrue({"workspace", "any_of"} & set(action["expect"]), case.id)
+
+
+    def test_write_skew_includes_rebase_and_summary_tracks_mechanisms(self):
+        cases = list(corpus())
+        skew = [c for c in cases if c.shape == "worker-write-skew"]
+        self.assertEqual(len(skew), 8)
+        for case in skew:
+            self.assertIn("rebase", [a["kind"] for a in case.actions], case.id)
+        rows = [
+            {"case": "atomic.atomic-rollback.00", "category": "atomic", "shape": "atomic-rollback",
+             "evaluated": True, "passed": True, "requests": 4, "seconds": 1.0,
+             "prefix_pairs": 3, "prefix_exact": 3, "cost": {"known_usage": {}},
+             "actions": [{"action": "agent", "failures": [], "tools": {"edit": 1}, "changesets": 1, "rollbacks": 0}]},
+            {"case": "parallel.validate-fanout.00", "category": "parallel", "shape": "validate-fanout",
+             "evaluated": True, "passed": True, "requests": 4, "seconds": 1.0,
+             "prefix_pairs": 3, "prefix_exact": 3, "cost": {"known_usage": {}},
+             "actions": [{"action": "agent", "failures": [], "tools": {"validate": 4}, "concurrency": 2.1},
+                         {"action": "rebase", "failures": [], "status": "ok"}]},
+        ]
+        report = summary(rows, manifest(cases))
+        self.assertEqual(report["mechanisms"]["atomic_changeset_cases"], {"triggered": 1, "evaluated": 1})
+        self.assertEqual(report["mechanisms"]["rollback_triggered_cases"], {"triggered": 0, "evaluated": 1})
+        self.assertEqual(report["mechanisms"]["parallel_validate_cases"], {"triggered": 1, "evaluated": 1})
+        self.assertEqual(report["mechanisms"]["rebase_gate"], {"ok": 1})
 
     def test_anchor_replacement_is_strict(self):
         self.assertEqual(apply("a b", [("a", "c")]), "c b")

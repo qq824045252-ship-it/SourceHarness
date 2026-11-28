@@ -306,12 +306,14 @@ def score_agent(action, run, events, before, after, emitted, driver):
     invariants = expect.get("invariants", {})
     failures.extend(scripted_invariants(invariants, events, results, emitted, run) if driver == "scripted"
                     else observable_invariants(invariants, events))
+    changesets = sum(1 for e in events if e["kind"] == "changeset_receipt" and e["data"].get("status") == "ok")
+    rollbacks = sum(1 for e in events if e["kind"] == "rollback_receipt")
     return {"action": "agent", "session": action["session"], "passed": not failures, "failures": failures,
             "exit": run["exit"], "final": run["final"][:400], "seconds": run["seconds"],
             "tools": dict(Counter(row["name"] for row in results)),
             "errors": dict(Counter(row["code"] for row in results if row.get("code"))),
             "validated": validated_checks(events), "cost": request_cost(events),
-            "concurrency": concurrency_ratio(events)}
+            "concurrency": concurrency_ratio(events), "changesets": changesets, "rollbacks": rollbacks}
 
 
 def score_branch(action, run, root, source_raw, event, after):
@@ -357,6 +359,25 @@ def compare_prefix(root, pending):
     return (observed.get("instructions") == expected.get("instructions")
             and observed.get("tools") == expected.get("tools")
             and observed.get("input", [])[:len(expected.get("input", []))] == expected.get("input"))
+
+
+def score_rebase(action, run):
+    expect = action["expect"]
+    failures = []
+    report = None
+    try:
+        report = json.loads(run["out"])
+    except ValueError:
+        failures.append("rebase did not print a report")
+    if report is not None:
+        for key in ("status", "code", "head_changed_paths", "worker_changed_paths", "updated_paths", "conflicts"):
+            if key in expect and report.get(key) != expect[key]:
+                failures.append(f"rebase {key} was {report.get(key)}, expected {expect[key]}")
+    if expect.get("status") == "ok" and run["exit"] != 0:
+        failures.append("rebase command failed")
+    return {"action": "rebase", "worker": action["worker"], "passed": not failures, "failures": failures,
+            "status": report and report.get("status"), "code": report and report.get("code"),
+            "updated": report and report.get("updated_paths"), "seconds": run["seconds"]}
 
 
 def score_merge(action, run, before, after):
@@ -432,6 +453,10 @@ def run_case(args, case, temporary, gateway, proxy):
             records.append({"action": "spawn", "worker": action["name"], "passed": run["exit"] == 0,
                             "failures": [] if run["exit"] == 0 else [run["err"][:200]],
                             "seconds": run["seconds"]})
+        elif kind == "rebase":
+            run = run_cli(args, ["worker", "rebase", "--root", str(root), "--worker",
+                                 str(directory / action["worker"])])
+            records.append(score_rebase(action, run))
         else:
             before = tree(root)
             run = run_cli(args, ["worker", "merge", "--root", str(root), "--from", str(directory / action["from"]),
@@ -456,15 +481,34 @@ def summary(rows, planned):
         for counts, label in ((categories, row["category"]), (shapes, f"{row['category']}.{row['shape']}")):
             counts[label]["evaluated"] += 1
             counts[label]["passed"] += int(row["passed"])
-    failures, tools, merge_gate, ratios = Counter(), Counter(), Counter(), []
+    failures, tools, merge_gate, rebase_gate, ratios = Counter(), Counter(), Counter(), Counter(), []
+    atomic_eval = atomic_cs = rollback_eval = rollback_trig = parallel_eval = parallel_trig = 0
     for row in rows:
+        has_cs = has_rb = has_par = False
         for record in row["actions"]:
             failures.update(record["failures"])
             tools.update(record.get("tools", {}))
             if record["action"] == "merge":
                 merge_gate[record["status"] or "unreported"] += 1
+            elif record["action"] == "rebase":
+                rebase_gate[record["status"] or "unreported"] += 1
             if record.get("concurrency"):
                 ratios.append(record["concurrency"])
+                has_par = True
+            if record.get("changesets", 0) > 0:
+                has_cs = True
+            if record.get("rollbacks", 0) > 0 or record.get("tools", {}).get("rollback", 0) > 0:
+                has_rb = True
+        if row["evaluated"]:
+            if row["category"] == "atomic":
+                atomic_eval += 1
+                atomic_cs += int(has_cs)
+            if row["shape"] == "atomic-rollback":
+                rollback_eval += 1
+                rollback_trig += int(has_rb)
+            if row["category"] == "parallel":
+                parallel_eval += 1
+                parallel_trig += int(has_par)
     budgets = sorted(row["requests"] for row in evaluated)
     durations = sorted(row["seconds"] for row in evaluated)
     usage = {key: sum(row["cost"]["known_usage"].get(key, 0) for row in rows)
@@ -480,6 +524,12 @@ def summary(rows, planned):
             "known_usage": usage,
             "validate_concurrency": {"samples": len(ratios), "p50": sorted(ratios)[(len(ratios) - 1) // 2] if ratios else None,
                                      "max": max(ratios) if ratios else None},
+            "mechanisms": {
+                "atomic_changeset_cases": {"triggered": atomic_cs, "evaluated": atomic_eval},
+                "rollback_triggered_cases": {"triggered": rollback_trig, "evaluated": rollback_eval},
+                "parallel_validate_cases": {"triggered": parallel_trig, "evaluated": parallel_eval},
+                "rebase_gate": dict(rebase_gate),
+            },
             "prefix_pairs": sum(row["prefix_pairs"] for row in rows),
             "prefix_exact_pairs": sum(row["prefix_exact"] for row in rows)}
 
